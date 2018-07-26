@@ -121,13 +121,13 @@ if [[ "$count_timeline" -ge "1" ]]; then
 fi
 
 # compute a difference between the machine time and GPU time
-grep "HSAQueue_wait" $log_file | \
+grep "hcc-ts-ref, prof_name wait" $log_file | \
   awk '{if ($NF > 0) print $NF}' > ${tmp}/end_time;
 
 diff=`while read time; do 
   grep "$time" $log_file | \
-  grep "removeAsyncOp" | \
-  awk -e '{read_data(data); print data["ts"]"\t"data["end_time_of_op"]}' \
+  grep "hcc-ts-ref, prof_name removeAsyncOp" | \
+  awk -e '{read_data(data); print data["unix_ts"]"\t"data["gpu_ts"]}' \
     -f $awk_fn -F ', ';
 done < ${tmp}/end_time | \
   awk 'NR == 1 {
