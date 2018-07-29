@@ -127,6 +127,7 @@ grep "hcc-ts-ref, prof_name wait" $log_file | \
 diff=`while read time; do 
   grep "$time" $log_file | \
   grep "hcc-ts-ref, prof_name removeAsyncOp" | \
+  head -1 | \
   awk -e '{read_data(data); print data["unix_ts"]"\t"data["gpu_ts"]}' \
     -f $awk_fn -F ', ';
 done < ${tmp}/end_time | \
