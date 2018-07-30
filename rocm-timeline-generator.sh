@@ -12,19 +12,28 @@
 # awk functions for printing data in JSON format
 #
 
-usage="$0 <log file> <output filename> <optional: TF timeline prefix i.e., tf_cifar10_timeline>"
+get_arg () {
+  if [ -z "$1" ]
+  then
+    # default value
+    echo $2
+  else
+    echo $1
+  fi
+}
+
+usage="$0 <log file> <output filename> <optional: TF timeline prefix i.e., tf_cifar10_timeline> <optional: start time> <optional: end time>"
 
 : ${1?$usage}
 : ${2?$usage}
 
 log_file=$1
 output=$2
-if [ -z "$3" ]
-then
-  tf_tl_prefix="_none"
-else
-  tf_tl_prefix=$3
-fi
+
+tf_tl_prefix=`get_arg $3 "_none"`
+start_time=`get_arg $4 -1`
+end_time=`get_arg $5 -1`
+
 tmp=/tmp
 awk_fn=fn-rocm-timeline-generator.awk
 
@@ -170,9 +179,10 @@ for tid in `/bin/grep "HIP initialized" $tmp_hip_api | \
       dur = tmp[2] / 1e3;
       status = gensub("[(](.*)[)]>>", "\\1", "g", $(NF - 2));
       create_args_str("", 0, "", "\"status\": \""status"\"");
-      print_json(name, pid, tid, ts, dur, args_str);
+      print_json(name, pid, tid, ts, dur, args_str, start_ts, end_ts);
     }
   }' -f $awk_fn -v diff=$diff -v pid=$num_meta -v tid=$tid \
+    -v start_ts=${start_time} -v end_ts=${end_time} \
     >> ${timeline["hip"]}
   grep "tid:${tid}:" $tmp_hip_api | \
     grep "HIP initialized" | \
@@ -193,23 +203,28 @@ grep "hip-profile" $log_file | \
       args[0]="dstCtx"; args[1]="srcCtx"; nargs=2
       args_str = create_args_str(args, nargs, data);
       print_json("canSeeMemory, check dst", pid, tid,
-        data["ts_check_dst"], data["check_dst_time"], args_str);
+        data["ts_check_dst"], data["check_dst_time"], args_str,
+        start_ts, end_ts);
       print_json("canSeeMemory, lock dst", pid, tid,
-        data["ts_lock_dst"], data["lock_dst_time"], args_str);
+        data["ts_lock_dst"], data["lock_dst_time"], args_str,
+        start_ts, end_ts);
       print_json("canSeeMemory, check src", pid, tid,
-        data["ts_check_src"], data["check_src_time"], args_str);
+        data["ts_check_src"], data["check_src_time"], args_str,
+        start_ts, end_ts);
       print_json("canSeeMemory, lock src", pid, tid,
-        data["ts_lock_src"], data["lock_src_time"], args_str);
+        data["ts_lock_src"], data["lock_src_time"], args_str,
+        start_ts, end_ts);
     }
     else {
       args_str = "";
       print_json(data["prof_name"], pid, tid,
-        data["ts"], data["time"], args_str);
+        data["ts"], data["time"], args_str, start_ts, end_ts);
     }
   }
   END {
     print_meta("hip-profile", pid);
-  }' -f $awk_fn -F ', ' -v pid=${num_meta} \
+  }' -f $awk_fn -F ', ' -v pid=${num_meta} -v start_ts=${start_time} \
+    -v end_ts=${end_time} \
     >> ${timeline["hip"]}
 
 echo "formating HCC timeline"
@@ -233,13 +248,15 @@ grep "profile:" $log_file | \
     args_str = create_args_str("", 0, "", args);
     cur_dev = dev[2] + pid;
     if (cur_dev > max_dev) max_dev = cur_dev;
-    print_json(name, cur_dev, id[2], ($6/1e3) + diff, $4, args_str);
+    print_json(name, cur_dev, id[2], ($6/1e3) + diff, $4, args_str,
+      start_ts, end_ts);
   }
   END {
     for (i = pid; i <= max_dev; i++)
       print_meta("hcc-profile, device "(i - pid), i);
     print (max_dev - pid);
   }' -v diff=${diff} -f $awk_fn -v pid=${num_meta} \
+     -v start_ts=${start_time} -v end_ts=${end_time} \
     > ${timeline["hcc"]}
 
 # get pid_offset from the last line and remove the last line from the file
@@ -291,11 +308,12 @@ grep "tf-profile" $log_file | \
       else
         tid = data["id"];
     }
-    print_json(name, pid, tid, ts, time, args_str);
+    print_json(name, pid, tid, ts, time, args_str, start_ts, end_ts);
   }
   END {
     print_meta("tf-profile", pid);
-  }' -f $awk_fn -F ', ' -v pid=${num_meta} \
+  }' -f $awk_fn -F ', ' -v pid=${num_meta} -v start_ts=${start_time} \
+    -v end_ts=${end_time} \
     > ${timeline["custom_tf"]}
 
 # merge timeline files

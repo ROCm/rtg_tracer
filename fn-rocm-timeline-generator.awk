@@ -1,5 +1,5 @@
-function print_json(name, pid, tid, ts, dur, args_str, start_ts) {
-  if (ts != 0 && dur != 0 && ts > start_ts) {
+function print_json(name, pid, tid, ts, dur, args_str, start_ts, end_ts) {
+  if (ts != 0 && dur != 0 && ts >= start_ts && (ts <= end_ts || end_ts == -1)) {
     printf("{ \"name\": \"%s\", \"ph\": \"X\", \"pid\": %d, \"tid\": %d, \"ts\": %d, \"dur\": %d%s },\n",
         name, pid, tid, ts, dur, args_str);
   }
