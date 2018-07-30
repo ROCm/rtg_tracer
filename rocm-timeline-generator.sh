@@ -60,9 +60,10 @@ if [[ "$count_timeline" -ge "1" ]]; then
     }
     NR > 2 {
       lines++;
-      if ($0 ~ /{/) count++;
-      else if ($0 ~ /}/) count--;
-      else if ($0 ~ /ph/ && $NF !~ /\"M\"/) done = 1;
+      open_brackets = gsub(/{/, "{");
+      close_brackets = gsub(/}/, "}");
+      count += open_brackets - close_brackets;
+      if ($0 ~ /ph/ && $NF !~ /\"M\"/) done = 1;
       if (count == 0 && done == 0) last_meta_line = lines;
     }
     END {
@@ -72,8 +73,9 @@ if [[ "$count_timeline" -ge "1" ]]; then
   # create metadata dictionary (mapping pid to name)
   head -${num_meta_lines} ${tf_tl_prefix}_0.json | \
     awk 'NR > 2 {
-      if ($0 ~ /{/) count++;
-      else if ($0 ~ /}/) count--;
+      open_brackets = gsub(/{/, "{");
+      close_brackets = gsub(/}/, "}");
+      count += open_brackets - close_brackets;
       if (count == 0)
         printf("%d\t%s\n", pid, name);
       if (count == 2 && $0 ~ /name/) {
@@ -97,8 +99,9 @@ if [[ "$count_timeline" -ge "1" ]]; then
         dict[tmp[2]] = tmp[1];
       }
       NR > (num_meta + 5) {
-        if ($0 ~ /{/) count++;
-        else if ($0 ~ /}/) count--;
+        open_brackets = gsub(/{/, "{");
+        close_brackets = gsub(/}/, "}");
+        count += open_brackets - close_brackets;
         if (count == 0)
           printf("from %d\tto %d\n", pid, dict[name])
         if (count == 2 && $0 ~ /name/) {
