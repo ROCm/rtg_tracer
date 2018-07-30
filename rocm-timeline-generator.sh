@@ -121,30 +121,13 @@ if [[ "$count_timeline" -ge "1" ]]; then
 fi
 
 # compute a difference between the machine time and GPU time
-grep "hcc-ts-ref, prof_name wait" $log_file | \
-  awk '{if ($NF > 0) print $NF}' > ${tmp}/end_time;
-
-diff=`while read time; do 
-  grep "$time" $log_file | \
-  grep "hcc-ts-ref, prof_name removeAsyncOp" | \
-  head -1 | \
-  awk -e '{read_data(data); print data["unix_ts"]"\t"data["gpu_ts"]}' \
-    -f $awk_fn -F ', ';
-done < ${tmp}/end_time | \
-  awk 'NR == 1 {
-    diff = $1 - ($2 / 1e3);
-    min=diff;
-    max=diff;
-  }
-  {
-    diff = $1 - ($2 / 1e3);
-    if (min > diff) min = diff;
-    if (max < diff) max = diff;
-  } 
-  END {
-    fdiff = min + ((max - min) / 2);
-    printf("%d\n", fdiff)
-  }'`;
+diff=`grep "hcc-ts-ref, prof_name gpu_host_ts" $log_file | \
+  awk -e '{
+    read_data(data);
+    host_time = data["unix_ts"];
+    gpu_time = data["gpu_ts"];
+    printf("%d\n", host_time - (gpu_time / 1e3))
+  }' -f $awk_fn -F ', ' | head -1`
 
 echo "formating HIP timeline"
 num_meta=`echo "${num_meta} + 1" | bc`
