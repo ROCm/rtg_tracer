@@ -148,6 +148,7 @@ tmp_toskip=${tmp}/toskip
 tmp_hip_api=${tmp}/hip-api
 
 grep "hip-api" $log_file | \
+  sed 's/.*\(hip-api\)/\1/g' | \
   awk '{print $2}' | \
   sort | uniq -c | sort -nr | \
   awk '{if ($2 ~ /tid/ && $2 !~ /HIP/ && $1 != 2) print "hip-api toskip "$2}' \
@@ -155,12 +156,13 @@ grep "hip-api" $log_file | \
 
 cat $tmp_toskip $log_file | \
   grep "hip-api" | \
+  sed 's/.*\(hip-api\)/\1/g' | \
   awk '{
     if ($2 ~ /toskip/)
       toskip[$3] = 1;
     else {
       tid = $2;
-      if (tid ~ /tid/ && toskip[tid] != 1)
+      if ((tid ~ /tid/ && toskip[tid] != 1) || $0 ~ /HIP initialized/)
         print $0
       }
     }' > $tmp_hip_api
