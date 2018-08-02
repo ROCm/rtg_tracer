@@ -178,12 +178,18 @@ for tid in `/bin/grep "HIP initialized" $tmp_hip_api | \
     if (lines % 2 == 1) {
       split($NF, tmp, "@");
       ts = (tmp[2] / 1e3) + diff;
+      parm = "";
+      if (NF != 4)
+        parm = $4;
+      for ( i = 5; i < NF; i++ )
+        parm = parm" "$i;
+      gsub(/, /, "\\n", parm);
     }
     else {
       split($(NF-1), tmp, "+");
       dur = tmp[2] / 1e3;
       status = gensub("[(](.*)[)]>>", "\\1", "g", $(NF - 2));
-      create_args_str("", 0, "", "\"status\": \""status"\"");
+      create_args_str("", 0, "", "\"status\": \""status"\", \"parm\": \""parm"\"");
       print_json(name, pid, tid, ts, dur, args_str, start_ts, end_ts);
     }
   }' -f $awk_fn -v diff=$diff -v pid=$num_meta -v tid=$tid \
