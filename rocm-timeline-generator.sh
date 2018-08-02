@@ -203,7 +203,7 @@ grep "hip-profile" $log_file | \
     read_data(data);
     tid = data["id"];
     if (data["prof_name"] ~ /canSeeMemory/) {
-      args[0]="dstCtx"; args[1]="srcCtx"; nargs=2
+      args[1]="dstCtx"; args[2]="srcCtx"; nargs=2
       args_str = create_args_str(args, nargs, data);
       print_json("canSeeMemory, check dst", pid, tid,
         data["ts_check_dst"], data["check_dst_time"], args_str,
@@ -219,9 +219,10 @@ grep "hip-profile" $log_file | \
         start_ts, end_ts);
     }
     else {
-      args_str = "";
-      print_json(data["prof_name"], pid, tid,
-        data["ts"], data["time"], args_str, start_ts, end_ts);
+      args[1] = "args"; nargs = 1;
+      args_str = create_args_str(args, nargs, data);
+      print_json(data["prof_name"], pid, tid, data["ts"],
+        data["time"], args_str, start_ts, end_ts);
     }
   }
   END {
@@ -275,13 +276,14 @@ num_meta=`echo "${num_meta} + ${pid_offset} + 1" | bc`
 grep "tf-profile" $log_file | \
   awk -e 'NR == 1 { tid_count = 0 }
   {
+    data["args"] = "";
     read_data(data);
     ts = data["ts"];
     time = data["time"];
     tid = 0;
     if (data["prof_name"] == "process") {
-      args[0]="name"; args[1]="op"; args[2]="device";
-      args[3]="step"; args[4]="type"; nargs=5;
+      args[1]="name"; args[2]="op"; args[3]="device";
+      args[4]="step"; args[5]="type"; nargs=5;
       args_str = create_args_str(args, nargs, data);
       if (data["type"] == "DATA") {
         name = "Data augmentation";
@@ -299,7 +301,8 @@ grep "tf-profile" $log_file | \
     }
     else {
       name = data["prof_name"];
-      args_str = ""
+      nargs = split(data["args"], args, ";");
+      args_str = create_args_str(args, nargs, data);
       if (data["id"] == "") {
         if (get_tid[name] == "") {
           get_tid[name] = tid_count;

@@ -17,9 +17,9 @@ function print_meta(name, pid, tid) {
 function create_args_str(args, nargs, data, extra) {
   args_str = "";
   if (nargs != 0) {
-    for (i = 0; i < nargs; i++) {
+    for (i = 1; i <= nargs; i++) {
       args_str = args_str"\""args[i]"\": \""data[args[i]]"\"";
-      if (i != nargs - 1)
+      if (i != nargs)
         args_str = args_str", ";
     }
   }
