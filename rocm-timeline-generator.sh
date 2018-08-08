@@ -133,7 +133,7 @@ if [[ "$count_timeline" -ge "1" ]]; then
 fi
 
 # compute a difference between the machine time and GPU time
-diff=`grep "hcc-ts-ref, prof_name gpu_host_ts" $log_file | \
+diff=`grep -a "hcc-ts-ref, prof_name gpu_host_ts" $log_file | \
   awk -e '{
     read_data(data);
     host_time = data["unix_ts"];
@@ -147,7 +147,7 @@ num_meta=`echo "${num_meta} + 1" | bc`
 tmp_toskip=${tmp}/toskip
 tmp_hip_api=${tmp}/hip-api
 
-grep "hip-api" $log_file | \
+grep -a "hip-api" $log_file | \
   sed 's/.*\(hip-api\)/\1/g' | \
   awk '{print $2}' | \
   sort | uniq -c | sort -nr | \
@@ -155,7 +155,7 @@ grep "hip-api" $log_file | \
     > $tmp_toskip
 
 cat $tmp_toskip $log_file | \
-  grep "hip-api" | \
+  grep -a "hip-api" | \
   sed 's/.*\(hip-api\)/\1/g' | \
   awk '{
     if ($2 ~ /toskip/)
@@ -168,9 +168,9 @@ cat $tmp_toskip $log_file | \
     }' > $tmp_hip_api
 
 # format timeline from hip-api
-for tid in `/bin/grep "HIP initialized" $tmp_hip_api | \
+for tid in `/bin/grep -a "HIP initialized" $tmp_hip_api | \
   awk -F ':' '{printf("%d ", $2)}'`; do
-  grep "tid:${tid}[.]" $tmp_hip_api | \
+  grep -a "tid:${tid}[.]" $tmp_hip_api | \
     awk -e 'NR == 1 { lines = 0; }
   {
     lines++;
@@ -195,8 +195,8 @@ for tid in `/bin/grep "HIP initialized" $tmp_hip_api | \
   }' -f $awk_fn -v diff=$diff -v pid=$num_meta -v tid=$tid \
     -v start_ts=${start_time} -v end_ts=${end_time} \
     >> ${timeline["hip"]}
-  grep "tid:${tid}:" $tmp_hip_api | \
-    grep "HIP initialized" | \
+  grep -a "tid:${tid}:" $tmp_hip_api | \
+    grep -a "HIP initialized" | \
     awk '{ print $NF }' | \
     sed 's/0x\(.*\))/\1/g' | \
     awk -e '{ hex = hex2dec($0); print_meta(hex, pid, tid) }' \
@@ -206,7 +206,7 @@ done;
 
 # print canSeeMemory function in details, while printing only the total time of
 # other profiles
-grep "hip-profile" $log_file | \
+grep -a "hip-profile" $log_file | \
   awk -e '{
     read_data(data);
     tid = data["id"];
@@ -243,7 +243,7 @@ echo "formating HCC timeline"
 num_meta=`echo "${num_meta} + 1" | bc`
 
 # format HCC profiles
-grep "profile:" $log_file | \
+grep -a "profile:" $log_file | \
   sed 's/;//g' | \
   awk -e  'NR == 1 { max_dev = pid; }
   {
@@ -281,7 +281,7 @@ echo "formating custom TF timers"
 num_meta=`echo "${num_meta} + ${pid_offset} + 1" | bc`
 
 # note: data augmentation profile is specific for cifar_multi_gpu_train.py
-grep "tf-profile" $log_file | \
+grep -a "tf-profile" $log_file | \
   awk -e 'NR == 1 { tid_count = 0 }
   {
     data["args"] = "";
