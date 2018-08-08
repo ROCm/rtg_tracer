@@ -276,9 +276,30 @@ pid_offset=`echo $(tail -1 ${timeline["hcc"]}) | \
   awk '{if ($0 == "") print 0; else print $0}'`
 sed -i '$d' ${timeline["hcc"]}
 
+num_meta=`echo "${num_meta} + ${pid_offset} + 1" | bc`
+
+grep -a "hcc-profile" $log_file | \
+  awk -e '{
+    read_data(data);
+    name = data["prof_name"];
+    if (get_tid[name] == "") {
+      get_tid[name] = tid;
+      print_meta(name, pid, tid);
+      tid++;
+    }
+    this_tid = get_tid[name];
+    print_json(name, pid, this_tid, data["ts"], data["time"], "",
+      start_ts, end_ts);
+  }
+  END {
+    print_meta("hcc-profile, runtime", pid);
+  }
+  ' -f $awk_fn -F ', ' -v pid=${num_meta} -v start_ts=${start_time} \
+    -v end_ts=${end_time} >> ${timeline["hcc"]}
+
 echo "formating custom TF timers"
 
-num_meta=`echo "${num_meta} + ${pid_offset} + 1" | bc`
+num_meta=`echo "${num_meta} + 1" | bc`
 
 # note: data augmentation profile is specific for cifar_multi_gpu_train.py
 grep -a "tf-profile" $log_file | \
