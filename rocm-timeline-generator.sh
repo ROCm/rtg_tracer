@@ -36,6 +36,7 @@ end_time=`get_arg $5 -1`
 
 tmp=/tmp
 awk_fn=fn-rocm-timeline-generator.awk
+AWK=gawk
 
 echo "log file ${log_file}"
 
@@ -54,7 +55,7 @@ num_meta=0
 echo "formating TF timeline"
 if [[ "$count_timeline" -ge "1" ]]; then 
   # compute number of lines that contain metadata events
-  num_meta_lines=`cat ${tf_tl_prefix}_0.json | awk '
+  num_meta_lines=`cat ${tf_tl_prefix}_0.json | ${AWK} '
     NR == 1 {
       lines = 2;
     }
@@ -72,7 +73,7 @@ if [[ "$count_timeline" -ge "1" ]]; then
 
   # create metadata dictionary (mapping pid to name)
   head -${num_meta_lines} ${tf_tl_prefix}_0.json | \
-    awk 'NR > 2 {
+    ${AWK} 'NR > 2 {
       open_brackets = gsub(/{/, "{");
       close_brackets = gsub(/}/, "}");
       count += open_brackets - close_brackets;
@@ -94,7 +95,7 @@ if [[ "$count_timeline" -ge "1" ]]; then
   for (( i = 0 ; i < $count_timeline; i++ )); do
     file=${tf_tl_prefix}_${i}.json;
     head -${num_meta_lines} ${tmp}/dict $file | \
-      awk -v num_meta=${num_meta} 'NR >= 2 && NR <= (num_meta + 1) {
+      ${AWK} -v num_meta=${num_meta} 'NR >= 2 && NR <= (num_meta + 1) {
         split($0, tmp, "\t");
         dict[tmp[2]] = tmp[1];
       }
@@ -115,8 +116,8 @@ if [[ "$count_timeline" -ge "1" ]]; then
       }' > ${tmp}/changes;
     sed -i 's/"pid": /NEED_CHANGE/g' $file;
     while read change; do
-      from_id=`echo $change | awk '{print $2}'`;
-      to_id=`echo $change | awk '{print $NF}'`;
+      from_id=`echo $change | ${AWK} '{print $2}'`;
+      to_id=`echo $change | ${AWK} '{print $NF}'`;
       sed -i "s/NEED_CHANGE${from_id}\([,]\?\)$/\"pid\": ${to_id}\1/g" $file;
     done < ${tmp}/changes;
   done
@@ -134,7 +135,7 @@ fi
 
 # compute a difference between the machine time and GPU time
 diff=`grep -a "hcc-ts-ref, prof_name gpu_host_ts" $log_file | \
-  awk -e '{
+  ${AWK} -e '{
     read_data(data);
     host_time = data["unix_ts"];
     gpu_time = data["gpu_ts"];
@@ -149,15 +150,15 @@ tmp_hip_api=${tmp}/hip-api
 
 grep -a "hip-api" $log_file | \
   sed 's/.*\(hip-api\)/\1/g' | \
-  awk '{print $2}' | \
+  ${AWK} '{print $2}' | \
   sort | uniq -c | sort -nr | \
-  awk '{if ($2 ~ /tid/ && $2 !~ /HIP/ && $1 != 2) print "hip-api toskip "$2}' \
+  ${AWK} '{if ($2 ~ /tid/ && $2 !~ /HIP/ && $1 != 2) print "hip-api toskip "$2}' \
     > $tmp_toskip
 
 cat $tmp_toskip $log_file | \
   grep -a "hip-api" | \
   sed 's/.*\(hip-api\)/\1/g' | \
-  awk '{
+  ${AWK} '{
     if ($2 ~ /toskip/)
       toskip[$3] = 1;
     else {
@@ -169,9 +170,9 @@ cat $tmp_toskip $log_file | \
 
 # format timeline from hip-api
 for tid in `/bin/grep -a "HIP initialized" $tmp_hip_api | \
-  awk -F ':' '{printf("%d ", $2)}'`; do
+  ${AWK} -F ':' '{printf("%d ", $2)}'`; do
   grep -a "tid:${tid}[.]" $tmp_hip_api | \
-    awk -e 'NR == 1 { lines = 0; }
+    ${AWK} -e 'NR == 1 { lines = 0; }
   {
     lines++;
     name = $3;
@@ -197,9 +198,9 @@ for tid in `/bin/grep -a "HIP initialized" $tmp_hip_api | \
     >> ${timeline["hip"]}
   grep -a "tid:${tid}:" $tmp_hip_api | \
     grep -a "HIP initialized" | \
-    awk '{ print $NF }' | \
+    ${AWK} '{ print $NF }' | \
     sed 's/0x\(.*\))/\1/g' | \
-    awk -e '{ hex = hex2dec($0); print_meta(hex, pid, tid) }' \
+    ${AWK} -e '{ hex = hex2dec($0); print_meta(hex, pid, tid) }' \
       -f $awk_fn -v pid=$num_meta -v tid=$tid \
       >> ${timeline["hip"]}
 done;
@@ -207,7 +208,7 @@ done;
 # print canSeeMemory function in details, while printing only the total time of
 # other profiles
 grep -a "hip-profile" $log_file | \
-  awk -e '{
+  ${AWK} -e '{
     read_data(data);
     tid = data["id"];
     if (data["prof_name"] ~ /canSeeMemory/) {
@@ -245,7 +246,7 @@ num_meta=`echo "${num_meta} + 1" | bc`
 # format HCC profiles
 grep -a "profile:" $log_file | \
   sed 's/;//g' | \
-  awk -e  'NR == 1 { max_dev = pid; }
+  ${AWK} -e  'NR == 1 { max_dev = pid; }
   {
     split($8, id, ".");
     split(id[1], dev, "#");
@@ -273,13 +274,13 @@ grep -a "profile:" $log_file | \
 
 # get pid_offset from the last line and remove the last line from the file
 pid_offset=`echo $(tail -1 ${timeline["hcc"]}) | \
-  awk '{if ($0 == "") print 0; else print $0}'`
+  ${AWK} '{if ($0 == "") print 0; else print $0}'`
 sed -i '$d' ${timeline["hcc"]}
 
 num_meta=`echo "${num_meta} + ${pid_offset} + 1" | bc`
 
 grep -a "hcc-profile" $log_file | \
-  awk -e '{
+  ${AWK} -e '{
     read_data(data);
     name = data["prof_name"];
     if (get_tid[name] == "") {
@@ -303,7 +304,7 @@ num_meta=`echo "${num_meta} + 1" | bc`
 
 # note: data augmentation profile is specific for cifar_multi_gpu_train.py
 grep -a "tf-profile" $log_file | \
-  awk -e 'NR == 1 { tid_count = 0 }
+  ${AWK} -e 'NR == 1 { tid_count = 0 }
   {
     data["args"] = "";
     read_data(data);
@@ -324,7 +325,12 @@ grep -a "tf-profile" $log_file | \
         tid = get_tid[name];
       }
       else {
-        name = "Process";
+        if (data["op"] == "") {
+          name = "Process";
+        }
+        else {
+          name = data["op"];
+        }
         tid = data["id"];
       }
     }
