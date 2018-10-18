@@ -47,6 +47,14 @@ function read_data(data) {
   }
 }
 
+function read_data2(data) {
+  delete data;
+  for (i = 1; i <= NF; i++) {
+    split($i, tmp, ":");
+    data[tmp[1]] = tmp[2];
+  }
+}
+
 function hex2dec(hex) {
   hex_chars="123456789abcdef";
   split(hex, chars, "")

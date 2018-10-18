@@ -42,7 +42,7 @@ echo "log file ${log_file}"
 
 declare -A timeline
 
-files="tf hcc hip custom_tf"
+files="tf hcc hip rccl custom_tf"
 for file in ${files}; do
   timeline[$file]="${tmp}/timeline_${file}.json"
   rm -f ${timeline[$file]}
@@ -207,38 +207,38 @@ done;
 
 # print canSeeMemory function in details, while printing only the total time of
 # other profiles
-grep -a "hip-profile" $log_file | \
-  ${AWK} -e '{
-    read_data(data);
-    tid = data["id"];
-    if (data["prof_name"] ~ /canSeeMemory/) {
-      args[1]="dstCtx"; args[2]="srcCtx"; nargs=2
-      args_str = create_args_str(args, nargs, data);
-      print_json("canSeeMemory, check dst", pid, tid,
-        data["ts_check_dst"], data["check_dst_time"], args_str,
-        start_ts, end_ts);
-      print_json("canSeeMemory, lock dst", pid, tid,
-        data["ts_lock_dst"], data["lock_dst_time"], args_str,
-        start_ts, end_ts);
-      print_json("canSeeMemory, check src", pid, tid,
-        data["ts_check_src"], data["check_src_time"], args_str,
-        start_ts, end_ts);
-      print_json("canSeeMemory, lock src", pid, tid,
-        data["ts_lock_src"], data["lock_src_time"], args_str,
-        start_ts, end_ts);
-    }
-    else {
-      args[1] = "args"; nargs = 1;
-      args_str = create_args_str(args, nargs, data);
-      print_json(data["prof_name"], pid, tid, data["ts"],
-        data["time"], args_str, start_ts, end_ts);
-    }
-  }
-  END {
-    print_meta("hip-profile", pid);
-  }' -f $awk_fn -F ', ' -v pid=${num_meta} -v start_ts=${start_time} \
-    -v end_ts=${end_time} \
-    >> ${timeline["hip"]}
+#grep -a "hip-profile" $log_file | \
+#  awk -e '{
+#    read_data(data);
+#    tid = data["id"];
+#    if (data["prof_name"] ~ /canSeeMemory/) {
+#      args[1]="dstCtx"; args[2]="srcCtx"; nargs=2
+#      args_str = create_args_str(args, nargs, data);
+#      print_json("canSeeMemory, check dst", pid, tid,
+#        data["ts_check_dst"], data["check_dst_time"], args_str,
+#        start_ts, end_ts);
+#      print_json("canSeeMemory, lock dst", pid, tid,
+#        data["ts_lock_dst"], data["lock_dst_time"], args_str,
+#        start_ts, end_ts);
+#      print_json("canSeeMemory, check src", pid, tid,
+#        data["ts_check_src"], data["check_src_time"], args_str,
+#        start_ts, end_ts);
+#      print_json("canSeeMemory, lock src", pid, tid,
+#        data["ts_lock_src"], data["lock_src_time"], args_str,
+#        start_ts, end_ts);
+#    }
+#    else {
+#      args[1] = "args"; nargs = 1;
+#      args_str = create_args_str(args, nargs, data);
+#      print_json(data["prof_name"], pid, tid, data["ts"],
+#        data["time"], args_str, start_ts, end_ts);
+#    }
+#  }
+#  END {
+#    print_meta("hip-profile", pid);
+#  }' -f $awk_fn -F ', ' -v pid=${num_meta} -v start_ts=${start_time} \
+#    -v end_ts=${end_time} \
+#    >> ${timeline["hip"]}
 
 echo "formating HCC timeline"
 num_meta=`echo "${num_meta} + 1" | bc`
@@ -297,6 +297,24 @@ grep -a "hcc-profile" $log_file | \
   }
   ' -f $awk_fn -F ', ' -v pid=${num_meta} -v start_ts=${start_time} \
     -v end_ts=${end_time} >> ${timeline["hcc"]}
+
+echo "formating RCCL timeline"
+num_meta=`echo "${num_meta} + 1" | bc`
+
+grep -a "rccl-api" $log_file | \
+  awk -e '{
+    read_data2(data);
+    name = data["func"];
+    this_tid = data["device"];
+    args_str = create_args_str(args, nargs, data);
+    print_json(name, pid, this_tid, data["ts"], data["dur"], args_str,
+      start_ts, end_ts);
+  }
+  END {
+    print_meta("rccl-profile, runtime", pid);
+  }
+  ' -f $awk_fn -F ' ' -v pid=${num_meta} -v start_ts=${start_time} \
+    -v end_ts=${end_time} >> ${timeline["rccl"]}
 
 echo "formating custom TF timers"
 
