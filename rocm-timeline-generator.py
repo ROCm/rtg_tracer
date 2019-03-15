@@ -88,6 +88,10 @@ count_hcc_prof_op = 0
 count_hcc_prof = 0
 count_hcc_missed = 0
 
+hip_events = {}
+
+out = open("out.json", "w")
+
 for filename in sys.argv[1:]:
     if not os.path.isfile(filename):
         print("Skipping '%s': not a file" % filename)
@@ -106,12 +110,16 @@ for filename in sys.argv[1:]:
             if match:
                 count_hip_open += 1
                 pid,tid,msg,ts = match.groups()
+                hip_events[(pid,tid)] = msg
                 continue
 
             match = RE_HIP_CLOSE.search(line)
             if match:
                 count_hip_close += 1
                 pid,tid,msg,retcode,retstr,ns = match.groups()
+                if (pid,tid) not in hip_events:
+                    print("HIP event close without open: (%s,%s)"%(pid,tid))
+                    sys.exit(1)
                 continue
 
             # look for most specific HCC profile first
