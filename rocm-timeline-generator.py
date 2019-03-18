@@ -113,6 +113,9 @@ for filename in non_opt_args:
     if not os.path.isfile(filename):
         print("Skipping '%s': not a file" % filename)
         continue
+    if output_filename == filename:
+        # skip the output filename we just created; it's not an input file
+        continue
 
     with open(filename) as input_file:
 
@@ -135,7 +138,7 @@ for filename in non_opt_args:
 
             continue # filename loop
         except:
-            print("Could not parse '%s' as JSON object" % filename)
+            print("Could not parse '%s' as JSON object, assuming HCC/HIP output" % filename)
 
     # the JSON attempt above consumes the open file lines, so re-open
     with open(filename) as input_file:
