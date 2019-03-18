@@ -41,6 +41,7 @@ import getopt
 import json
 import os
 import re
+import subprocess
 import sys
 
 RE_HCC_TS_REF     = re.compile(r"hcc-ts-ref, prof_name gpu_host_ts, unix_ts (\d+), gpu_ts (\d+)")
@@ -108,6 +109,34 @@ def kern_to_json(full_string):
     stream = parts[5].split(':')[1]
     return '{"name":"%s", "gridDim":"%s", "groupDim":"%s", "sharedMem":"%s", "stream":"%s"}'%(
             name, gridDim, groupDim, sharedMem, stream)
+
+def get_system_ticks():
+    global hcc_ts_ref
+    if 0 == hcc_ts_ref:
+        print("HCC to Unix timestamp reference not found prior to first attempt to output HCC event")
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "get_system_ticks")
+        if not os.path.exists(os.path.join(path, "get_system_ticks")):
+            print("attempting to compile get_system_ticks program")
+            print("cd '%s'; make clean all" % path)
+            make_process = subprocess.Popen("make clean all", shell=True, cwd=path)
+            if make_process.wait() != 0:
+                print("failed to compile get_system_ticks")
+                sys.exit(2)
+        print("attempting to run get_system_ticks program")
+        ticks_process = subprocess.Popen("./get_system_ticks", shell=True, cwd=path, stdout=subprocess.PIPE)
+        if ticks_process.wait() != 0:
+            print("failed to run get_system_ticks program")
+            print(path)
+            sys.exit(2)
+        try:
+            output = ticks_process.stdout.readlines()
+            offset = output[2].split()[1]
+            out.write("\n")
+            hcc_ts_ref = int(offset)
+        except:
+            print("Failed to parse output of get_system_ticks:")
+            for line in output: print(line)
+            sys.exit(2)
 
 for filename in non_opt_args:
     if not os.path.isfile(filename):
@@ -190,6 +219,7 @@ for filename in non_opt_args:
 
             match = RE_HIP_CLOSE.search(line)
             if match:
+                get_system_ticks()
                 count_hip_close += 1
                 pid,tid,opnum,new_msg,retcode,retstr,ns = match.groups()
                 if (pid,tid) not in hip_events:
@@ -213,6 +243,7 @@ for filename in non_opt_args:
 
             match = RE_HCC_PROF_TS_OP.search(line)
             if match:
+                get_system_ticks()
                 count_hcc_prof_ts_op += 1
                 optype,msg,us,start,stop,extra = match.groups()
                 if not extra.startswith('#'):
