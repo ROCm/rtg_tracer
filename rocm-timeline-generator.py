@@ -45,7 +45,7 @@ import subprocess
 import sys
 
 RE_HCC_TS_REF     = re.compile(r"hcc-ts-ref, prof_name gpu_host_ts, unix_ts (\d+), gpu_ts (\d+)")
-RE_HIP_TID        = re.compile(r"hip-api @(\d+) pid:(\d+) tid:(\d+):HIP initialized short_tid#(\d+)\s*\(maps to full_tid: 0x(\w+)\)")
+RE_HIP_TID        = re.compile(r"hip-api pid:(\d+) tid:(\d+):HIP initialized short_tid#(\d+)\s*\(maps to full_tid: 0x(\w+)\)")
 RE_HIP_OPEN       = re.compile(r"<<hip-api pid:(\d+) tid:(\d+)\.(\d+) (.*) @(\d+)")
 RE_HIP_CLOSE      = re.compile(r"hip-api pid:(\d+) tid:(\d+)\.(\d+) (.*) ret=\s?(\d+) \((\w+)\)>> \+(\d+) ns")
 RE_HCC_PROF_TS_OP = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;\s+(\d+);\s+(\d+);\s+(.*)")
@@ -183,7 +183,7 @@ for filename in non_opt_args:
             match = RE_HIP_TID.search(line)
             if match:
                 count_hip_tid += 1
-                ts,pid,tid,short_tid,hex_tid = match.groups()
+                pid,tid,short_tid,hex_tid = match.groups()
                 hip_pid = pid
                 if short_tid in hip_events:
                     print("Duplicate short_tid found in HIP event %s" % short_tid)
