@@ -3,6 +3,7 @@
 
 Parse files looking for HCC and HIP profile or trace output.
 Generate a chrome://tracing JSON file.
+TensorFlow JSON output is parsed, removing the Tensor and Memory categories.
 
 HCC GPU-to-Host timestamp:
     hcc-ts-ref, prof_name gpu_host_ts, unix_ts 1552667119747642, gpu_ts 83823572514501
@@ -36,6 +37,8 @@ HIP closing sample output:
 """
 
 from __future__ import print_function
+import getopt
+import json
 import os
 import re
 import sys
@@ -61,19 +64,42 @@ count_hcc_prof = 0
 count_hcc_missed = 0
 hcc_ts_ref = 0
 hip_pid = 0
+count_json = 0
+count_json_skipped = 0
 
-# HIP can nest its calls, so the opnum is not reliable (bug in HIP trace)
-# Also, hipLaunchKernel is printed without a closing HIP print and should amend the preceeding kernel launch info
+# HIP can nest its calls, so the opnum is not reliable (bug in HIP trace).
+# Also, hipLaunchKernel is printed without a closing HIP print.
+# The hipLaunchKernel message should amend the preceeding kernel launch info.
 hip_events = {}
 
+# The set of GPUs is maintained for pretty-printing metadata in the chrome://tracing output.
 devices = {}
 
-out = open("out.json", "w")
+try:
+    opts,non_opt_args = getopt.gnu_getopt(sys.argv[1:], "o:")
+    output_filename = None
+    for o,a in opts:
+        if o == "-o":
+            output_filename = a
+        else:
+            assert False, "unhandled option"
+except getopt.getoptError as err:
+    print(err)
+    sys.exit(2)
+
+if not output_filename:
+    output_filename = "out.json"
+    print("Writing chrome://tracing output to '%s' (use -o to change name)" % output_filename)
+else:
+    print("Writing chrome://tracing output to '%s'" % output_filename)
+
+out = open(output_filename, "w")
 out.write("""{
 "traceEvents": [
 """)
 
 def kern_to_json(full_string):
+    """Parse HIP kernel information into an 'args' JSON object."""
     parts = full_string.strip().split()
     name = parts[1][1:-1]
     gridDim = parts[2].split(':')[1]
@@ -83,10 +109,35 @@ def kern_to_json(full_string):
     return '{"name":"%s", "gridDim":"%s", "groupDim":"%s", "sharedMem":"%s", "stream":"%s"}'%(
             name, gridDim, groupDim, sharedMem, stream)
 
-for filename in sys.argv[1:]:
+for filename in non_opt_args:
     if not os.path.isfile(filename):
         print("Skipping '%s': not a file" % filename)
         continue
+
+    with open(filename) as input_file:
+
+        # attempt to read file as a JSON object. If successful, assume it is TF output.
+        try:
+            obj = json.load(input_file)
+            for event in obj["traceEvents"]:
+                # skip Tensor and Memory categories
+                if "cat" in event and event["cat"] in ["Tensor","Memory"]:
+                    count_json_skipped += 1
+                    continue
+                elif ("name" in event and event["name"] == "process_name" and
+                        ("Allocators" in event["args"]["name"] or
+                            "Tensors" in event["args"]["name"])):
+                    count_json_skipped += 1
+                    continue
+                else:
+                    count_json += 1
+                    out.write("%s,\n"%json.dumps(event))
+
+            continue # filename loop
+        except:
+            print("Could not parse '%s' as JSON object" % filename)
+
+    # the JSON attempt above consumes the open file lines, so re-open
     with open(filename) as input_file:
         for line in input_file:
             match = None
@@ -234,3 +285,5 @@ print("   prof ts hcc lines: %d"%count_hcc_prof_ts)
 print("   prof op hcc lines: %d"%count_hcc_prof_op)
 print("      prof hcc lines: %d"%count_hcc_prof)
 print("    missed hcc lines: %d"%count_hcc_missed)
+print("          JSON lines: %d"%count_json)
+print("  skipped JSON lines: %d"%count_json_skipped)
