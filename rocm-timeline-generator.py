@@ -44,20 +44,22 @@ import re
 import subprocess
 import sys
 
-RE_HCC_TS_REF     = re.compile(r"hcc-ts-ref, prof_name gpu_host_ts, unix_ts (\d+), gpu_ts (\d+)")
-RE_HIP_TID        = re.compile(r"hip-api pid:(\d+) tid:(\d+):HIP initialized short_tid#(\d+)\s*\(maps to full_tid: 0x(\w+)\)")
-RE_HIP_OPEN       = re.compile(r"<<hip-api pid:(\d+) tid:(\d+)\.(\d+) (.*) @(\d+)")
-RE_HIP_CLOSE      = re.compile(r"hip-api pid:(\d+) tid:(\d+)\.(\d+) (.*) ret=\s?(\d+) \((\w+)\)>> \+(\d+) ns")
-RE_HCC_PROF_TS_OP = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;\s+(\d+);\s+(\d+);\s+(.*)")
-RE_HCC_PROF_TS    = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;\s+(\d+);\s+(\d+);")
-RE_HCC_PROF_OP    = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;\s+(.*)")
-RE_HCC_PROF       = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;")
+RE_HCC_TS_REF      = re.compile(r"hcc-ts-ref, prof_name gpu_host_ts, unix_ts (\d+), gpu_ts (\d+)")
+RE_HIP_TID         = re.compile(r"hip-api pid:(\d+) tid:(\d+):HIP initialized short_tid#(\d+)\s*\(maps to full_tid: 0x(\w+)\)")
+RE_HIP_OPEN        = re.compile(r"<<hip-api pid:(\d+) tid:(\d+)\.(\d+) (.*) @(\d+)")
+RE_HIP_CLOSE       = re.compile(r"hip-api pid:(\d+) tid:(\d+)\.(\d+) (.*) ret=\s?(\d+) \((\w+)\)>> \+(\d+) ns")
+RE_HCC_PROF_TS_OPX = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;\s+(\d+);\s+(\d+);\s+#(\d+\.\d+\.\d+);\s+(.*)")
+RE_HCC_PROF_TS_OP  = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;\s+(\d+);\s+(\d+);\s+#(\d+\.\d+\.\d+);")
+RE_HCC_PROF_TS     = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;\s+(\d+);\s+(\d+);")
+RE_HCC_PROF_OP     = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;\s+#(\d+\.\d+\.\d+);")
+RE_HCC_PROF        = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;")
 
 count_skipped = 0
 count_hip_tid = 0
 count_hip_open = 0
 count_hip_close = 0
 count_hip_missed = 0
+count_hcc_prof_ts_opx = 0
 count_hcc_prof_ts_op = 0
 count_hcc_prof_ts = 0
 count_hcc_prof_op = 0
@@ -122,12 +124,14 @@ def get_system_ticks():
             if make_process.wait() != 0:
                 print("failed to compile get_system_ticks")
                 sys.exit(2)
+            print("done")
         print("attempting to run get_system_ticks program")
         ticks_process = subprocess.Popen("./get_system_ticks", shell=True, cwd=path, stdout=subprocess.PIPE)
         if ticks_process.wait() != 0:
             print("failed to run get_system_ticks program")
             print(path)
             sys.exit(2)
+        print("done")
         try:
             output = ticks_process.stdout.readlines()
             offset = output[2].split()[1]
@@ -241,30 +245,48 @@ for filename in non_opt_args:
 
             # look for most specific HCC profile first
 
-            match = RE_HCC_PROF_TS_OP.search(line)
+            match = RE_HCC_PROF_TS_OPX.search(line)
             if match:
                 get_system_ticks()
-                count_hcc_prof_ts_op += 1
-                optype,msg,us,start,stop,extra = match.groups()
-                if not extra.startswith('#'):
-                    print("HCC event extra message string not recognized '%s'" % extra)
-                    sys.exit(1)
-                extra_parts = extra.split(';')
-                opnum = extra_parts[0].strip()
-                if not opnum.startswith('#'):
-                    print("HCC event sequence number not recognized '%s'" % opnum)
-                    sys.exit(1)
-                opnum_parts = opnum[1:].split('.')
+                count_hcc_prof_ts_opx += 1
+                optype,msg,us,start,stop,opnum,extra = match.groups()
+                extra = ' '.join(extra.strip().split()).strip() # normalize whitespace in extra text
+                opnum_parts = opnum.split('.')
                 if len(opnum_parts) != 3:
-                    print("HCC event sequence number not recognized '%s'" % opnum)
+                    print("RE_HCC_PROF_TS_OPX: HCC event sequence number not recognized '%s'" % opnum)
                     sys.exit(1)
                 # these are fake -- pid is GPU device ID, tid is stream ID
                 # we use negative offsets for GPU device ID so they don't collide with TensorFlow
                 pid = -int(opnum_parts[0])-1
                 devices[pid] = None
                 tid = opnum_parts[1]
-                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s},\n'%(
-                    msg, (int(start)/1000)+hcc_ts_ref, (int(stop)-int(start))/1000, pid, tid))
+                seqnum = opnum_parts[2]
+                if extra:
+                    args = '{"seqNum":%s, "extra":"%s"}' % (seqnum,extra)
+                else:
+                    args = '{"seqNum":%s}' % seqnum
+                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
+                    msg, (int(start)/1000)+hcc_ts_ref, (int(stop)-int(start))/1000, pid, tid, args))
+                continue
+
+            match = RE_HCC_PROF_TS_OP.search(line)
+            if match:
+                get_system_ticks()
+                count_hcc_prof_ts_op += 1
+                optype,msg,us,start,stop,opnum = match.groups()
+                opnum_parts = opnum.split('.')
+                if len(opnum_parts) != 3:
+                    print("RE_HCC_PROF_TS_OP: HCC event sequence number not recognized '%s'" % opnum)
+                    sys.exit(1)
+                # these are fake -- pid is GPU device ID, tid is stream ID
+                # we use negative offsets for GPU device ID so they don't collide with TensorFlow
+                pid = -int(opnum_parts[0])-1
+                devices[pid] = None
+                tid = opnum_parts[1]
+                seqnum = opnum_parts[2]
+                args = '{"seqNum":%s}' % seqnum
+                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
+                    msg, (int(start)/1000)+hcc_ts_ref, (int(stop)-int(start))/1000, pid, tid, args))
                 continue
 
             match = RE_HCC_PROF_TS.search(line)
@@ -309,15 +331,16 @@ out.write("""{}
 }
 """)
 
-print(" total skipped lines: %d"%count_skipped)
-print("       tid hip lines: %d"%count_hip_tid)
-print("      open hip lines: %d"%count_hip_open)
-print("     close hip lines: %d"%count_hip_close)
-print("    missed hip lines: %d"%count_hip_missed)
-print("prof ts op hcc lines: %d"%count_hcc_prof_ts_op)
-print("   prof ts hcc lines: %d"%count_hcc_prof_ts)
-print("   prof op hcc lines: %d"%count_hcc_prof_op)
-print("      prof hcc lines: %d"%count_hcc_prof)
-print("    missed hcc lines: %d"%count_hcc_missed)
-print("          JSON lines: %d"%count_json)
-print("  skipped JSON lines: %d"%count_json_skipped)
+print("  total skipped lines: %d"%count_skipped)
+print("        tid hip lines: %d"%count_hip_tid)
+print("       open hip lines: %d"%count_hip_open)
+print("      close hip lines: %d"%count_hip_close)
+print("     missed hip lines: %d"%count_hip_missed)
+print("prof ts opx hcc lines: %d"%count_hcc_prof_ts_opx)
+print(" prof ts op hcc lines: %d"%count_hcc_prof_ts_op)
+print("    prof ts hcc lines: %d"%count_hcc_prof_ts)
+print("    prof op hcc lines: %d"%count_hcc_prof_op)
+print("       prof hcc lines: %d"%count_hcc_prof)
+print("     missed hcc lines: %d"%count_hcc_missed)
+print("           JSON lines: %d"%count_json)
+print("   skipped JSON lines: %d"%count_json_skipped)
