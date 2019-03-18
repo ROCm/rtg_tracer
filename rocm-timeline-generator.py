@@ -235,6 +235,9 @@ for filename in non_opt_args:
                     print("event mismatch: '%s'.startswith('%s')" % (item,msg))
                     print(opnum)
                     sys.exit(1)
+                # we don't normally print hip function arguments, except for set device
+                if 'hipSetDevice' in msg:
+                    new_msg = msg
                 if 'Kernel' in new_msg:
                     out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
                         new_msg, (int(ts)/1000)+hcc_ts_ref, int(ns)/1000, pid, tid, kern_to_json(msg)))
