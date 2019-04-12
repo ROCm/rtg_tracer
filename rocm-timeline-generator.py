@@ -69,6 +69,9 @@ hcc_ts_ref = 0
 hip_pid = 0
 count_json = 0
 count_json_skipped = 0
+count_gap_duplicate_ts = 0
+count_gap_wrapped = 0
+count_gap_okay = 0
 
 # HIP can nest its calls, so the opnum is not reliable (bug in HIP trace).
 # Also, hipLaunchKernel is printed without a closing HIP print.
@@ -78,15 +81,25 @@ hip_events = {}
 # The set of GPUs is maintained for pretty-printing metadata in the chrome://tracing output.
 devices = {}
 
+# Per device HCC timestamps, for gap analysis
+gaps = {}
+gap_names = {}
+
 try:
-    opts,non_opt_args = getopt.gnu_getopt(sys.argv[1:], "o:")
+    opts,non_opt_args = getopt.gnu_getopt(sys.argv[1:], "go:v")
     output_filename = None
+    show_gaps = False
+    verbose = False
     for o,a in opts:
         if o == "-o":
             output_filename = a
+        elif o == "-g":
+            show_gaps = True
+        elif o == "-v":
+            verbose = True
         else:
             assert False, "unhandled option"
-except getopt.getoptError as err:
+except getopt.GetoptError as err:
     print(err)
     sys.exit(2)
 
@@ -95,6 +108,10 @@ if not output_filename:
     print("Writing chrome://tracing output to '%s' (use -o to change name)" % output_filename)
 else:
     print("Writing chrome://tracing output to '%s'" % output_filename)
+
+def vprint(msg):
+    if verbose:
+        print(msg)
 
 out = open(output_filename, "w")
 out.write("""{
@@ -268,8 +285,29 @@ for filename in non_opt_args:
                     args = '{"seqNum":%s, "extra":"%s"}' % (seqnum,extra)
                 else:
                     args = '{"seqNum":%s}' % seqnum
+                ts = (int(start)/1000)+hcc_ts_ref
+                dur = (int(stop)-int(start))/1000
+                #ts = int(start)
+                #dur = int(stop)-int(start)
                 out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
-                    msg, (int(start)/1000)+hcc_ts_ref, (int(stop)-int(start))/1000, pid, tid, args))
+                    msg, ts, dur, pid, tid, args))
+                # we do not log barriers for gap analysis
+                if show_gaps and "depcnt" not in msg:
+                    if pid not in gaps:
+                        gaps[pid] = {}
+                        gap_names[pid] = {}
+                    if ts in gaps[pid]:
+                        count_gap_duplicate_ts += 1
+                        vprint("duplicate timestamp found in gap analysis, pid:%s ts:%s" % (pid,ts))
+                        if dur > gaps[pid][ts]:
+                            vprint("replacing with longer dur %s >  %s for name:%s" % (dur, gaps[pid][ts], msg))
+                            gaps[pid][ts] = dur
+                            gap_names[pid][ts] = msg
+                        else:
+                            vprint("keeping existing      dur %s >= %s for name:%s" % (gaps[pid][ts], dur, msg))
+                    else:
+                        gaps[pid][ts] = dur
+                        gap_names[pid][ts] = msg
                 continue
 
             match = RE_HCC_PROF_TS_OP.search(line)
@@ -327,6 +365,46 @@ for fake in devices:
     dev = -(fake + 1)
     out.write('{"name":"process_name", "ph":"M", "pid":%s, "args":{"name":"HCC GPU %s"}},\n'%(fake,dev))
 
+def get_gap_name(dur):
+    gaps_default = [10, 20, 50, 100, 1000, 10000, 100000]
+    for interval in gaps_default:
+        if dur < interval:
+            return "gap%s" % interval
+    return "gapHUGE"
+
+if show_gaps:
+    for fake in sorted(gaps):
+        dev = -(fake + 1)
+        pid = fake-1000 # something unique from fake HCC GPU pid
+        g = gaps[fake]
+        out.write('{"name":"process_name", "ph":"M", "pid":%s, "args":{"name":"GAP GPU %s"}},\n'%(pid,dev))
+        prev_ts = None
+        prev_dur = None
+        prev_end = None
+        for ts in sorted(g):
+            dur = g[ts]
+            if not prev_end:
+                prev_ts = ts
+                prev_dur = dur
+                prev_end = ts+dur
+                continue
+            # check whether the next duration fits inside the previous one, and skip if so
+            if ts < prev_end and ts+dur < prev_end:
+                count_gap_wrapped += 1
+                vprint("event completely inside another ts:%s ts+dur:%s prev_end:%s name:%s wrapped_by:%s" % (
+                    ts, ts+dur, prev_end, gap_names[fake][ts][0:40], gap_names[fake][prev_ts][0:40]))
+                continue
+            else:
+                count_gap_okay += 1
+            gap_dur = ts - prev_end
+            out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s},\n'%(
+                get_gap_name(gap_dur), prev_end, gap_dur, pid, 0))
+            prev_ts = ts
+            prev_dur = dur
+            prev_end = ts+dur
+
+
+
 
 # write an empty event so we don't need to clean up the last extra comma
 out.write("""{}
@@ -347,3 +425,6 @@ print("       prof hcc lines: %d"%count_hcc_prof)
 print("     missed hcc lines: %d"%count_hcc_missed)
 print("           JSON lines: %d"%count_json)
 print("   skipped JSON lines: %d"%count_json_skipped)
+print("     duplicate gap ts: %d"%count_gap_duplicate_ts)
+print("    wrapped gap event: %d"%count_gap_wrapped)
+print("       okay gap event: %d"%count_gap_okay)
