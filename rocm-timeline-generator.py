@@ -65,13 +65,14 @@ count_hcc_prof_ts = 0
 count_hcc_prof_op = 0
 count_hcc_prof = 0
 count_hcc_missed = 0
-hcc_ts_ref = 0
 hip_pid = 0
 count_json = 0
 count_json_skipped = 0
 count_gap_duplicate_ts = 0
 count_gap_wrapped = 0
 count_gap_okay = 0
+
+hcc_ts_ref = None
 
 # HIP can nest its calls, so the opnum is not reliable (bug in HIP trace).
 # Also, hipLaunchKernel is printed without a closing HIP print.
@@ -85,8 +86,11 @@ devices = {}
 gaps = {}
 gap_names = {}
 
+# if get_system_ticks fails to compile, or user knows that the offset should be
+hcc_ts_ref_user = None
+
 try:
-    opts,non_opt_args = getopt.gnu_getopt(sys.argv[1:], "go:v")
+    opts,non_opt_args = getopt.gnu_getopt(sys.argv[1:], "go:t:v")
     output_filename = None
     show_gaps = False
     verbose = False
@@ -95,6 +99,8 @@ try:
             output_filename = a
         elif o == "-g":
             show_gaps = True
+        elif o == "-t":
+            hcc_ts_ref_user = int(a)
         elif o == "-v":
             verbose = True
         else:
@@ -131,7 +137,7 @@ def kern_to_json(full_string):
 
 def get_system_ticks():
     global hcc_ts_ref
-    if 0 == hcc_ts_ref:
+    if hcc_ts_ref is None:
         print("HCC to Unix timestamp reference not found prior to first attempt to output HCC event")
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "get_system_ticks")
         if not os.path.exists(os.path.join(path, "get_system_ticks")):
@@ -140,15 +146,27 @@ def get_system_ticks():
             make_process = subprocess.Popen("make clean all", shell=True, cwd=path)
             if make_process.wait() != 0:
                 print("failed to compile get_system_ticks")
-                sys.exit(2)
-            print("done")
+                if hcc_ts_ref_user is None:
+                    sys.exit(2) # no alternative way to specify offset
+                else:
+                    print("this is okay since hcc timestamp reference was specified manually")
+                    hcc_ts_ref = hcc_ts_ref_user
+                    return
+            else:
+                print("done")
         print("attempting to run get_system_ticks program")
         ticks_process = subprocess.Popen("./get_system_ticks", shell=True, cwd=path, stdout=subprocess.PIPE)
         if ticks_process.wait() != 0:
             print("failed to run get_system_ticks program")
             print(path)
-            sys.exit(2)
-        print("done")
+            if hcc_ts_ref_user is None:
+                sys.exit(2)
+            else:
+                print("this is okay since hcc timestamp reference was specified manually")
+                hcc_ts_ref = hcc_ts_ref_user
+                return
+        else:
+            print("done")
         try:
             output = ticks_process.stdout.readlines()
             offset = output[2].split()[1]
@@ -157,7 +175,17 @@ def get_system_ticks():
         except:
             print("Failed to parse output of get_system_ticks:")
             for line in output: print(line)
-            sys.exit(2)
+            if hcc_ts_ref_user is None:
+                sys.exit(2)
+            else:
+                print("this is okay since hcc timestamp reference was specified manually")
+                hcc_ts_ref = hcc_ts_ref_user
+                return
+        if hcc_ts_ref_user is not None:
+            if hcc_ts_ref != hcc_ts_ref_user:
+                print("get_system_ticks returned different offset than user-specified: %s != %s" % (hcc_ts_ref, hcc_ts_ref_user))
+                print("using user-specified value")
+            hcc_ts_ref = hcc_ts_ref_user
 
 for filename in non_opt_args:
     if not os.path.isfile(filename):
