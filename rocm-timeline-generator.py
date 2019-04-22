@@ -34,6 +34,14 @@ HIP closing sample output:
     hip-api pid:602 tid:1.3 hipGetDeviceCount              ret= 0 (hipSuccess)>> +2234 ns
     hip-api pid:602 tid:1.4 hipDeviceGet                   ret= 0 (hipSuccess)>> +4739 ns
 
+strace/ltrace -tttT sample output:
+
+    1555950992.253210 fclose(0x7f1d799ab620 <unfinished ...>
+    1555950992.253296 free(0x6d0c90)                 = <void> <0.000067>
+    1555950992.253390 <... fclose resumed> )         = 0 <0.000176>
+    1555950992.253415 __fpending(0x7f1d799ab540, 0, 0x7f1d799ac780, 0) = 0 <0.000078>
+    1555950992.253523 fileno(0x7f1d799ab540)         = 2 <0.000064>
+
 """
 
 from __future__ import print_function
@@ -44,15 +52,18 @@ import re
 import subprocess
 import sys
 
-RE_HCC_TS_REF      = re.compile(r"hcc-ts-ref, prof_name gpu_host_ts, unix_ts (\d+), gpu_ts (\d+)")
-RE_HIP_TID         = re.compile(r"hip-api pid:(\d+) tid:(\d+):HIP initialized short_tid#(\d+)\s*\(maps to full_tid: 0x(\w+)\)")
-RE_HIP_OPEN        = re.compile(r"<<hip-api pid:(\d+) tid:(\d+)\.(\d+) (.*) @(\d+)")
-RE_HIP_CLOSE       = re.compile(r"hip-api pid:(\d+) tid:(\d+)\.(\d+) (.*) ret=\s?(\d+) \((\w+)\)>> \+(\d+) ns")
-RE_HCC_PROF_TS_OPX = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;\s+(\d+);\s+(\d+);\s+#(\d+\.\d+\.\d+);\s+(.*)")
-RE_HCC_PROF_TS_OP  = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;\s+(\d+);\s+(\d+);\s+#(\d+\.\d+\.\d+);")
-RE_HCC_PROF_TS     = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;\s+(\d+);\s+(\d+);")
-RE_HCC_PROF_OP     = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;\s+#(\d+\.\d+\.\d+);")
-RE_HCC_PROF        = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;")
+RE_HCC_TS_REF       = re.compile(r"hcc-ts-ref, prof_name gpu_host_ts, unix_ts (\d+), gpu_ts (\d+)")
+RE_HIP_TID          = re.compile(r"hip-api pid:(\d+) tid:(\d+):HIP initialized short_tid#(\d+)\s*\(maps to full_tid: 0x(\w+)\)")
+RE_HIP_OPEN         = re.compile(r"<<hip-api pid:(\d+) tid:(\d+)\.(\d+) (.*) @(\d+)")
+RE_HIP_CLOSE        = re.compile(r"hip-api pid:(\d+) tid:(\d+)\.(\d+) (.*) ret=\s?(\d+) \((\w+)\)>> \+(\d+) ns")
+RE_HCC_PROF_TS_OPX  = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;\s+(\d+);\s+(\d+);\s+#(\d+\.\d+\.\d+);\s+(.*)")
+RE_HCC_PROF_TS_OP   = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;\s+(\d+);\s+(\d+);\s+#(\d+\.\d+\.\d+);")
+RE_HCC_PROF_TS      = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;\s+(\d+);\s+(\d+);")
+RE_HCC_PROF_OP      = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;\s+#(\d+\.\d+\.\d+);")
+RE_HCC_PROF         = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;")
+RE_STRACE_UNFINISED = re.compile(r"(\d+)\.(\d+) (.*) <unfinished \.\.\.>")
+RE_STRACE_RESUMED   = re.compile(r'(\d+)\.(\d+) <\.\.\. (\w+) resumed> .* = <?(["\w/\.-]+)>? <(.*)>')
+RE_STRACE_COMPLETE  = re.compile(r"(\d+)\.(\d+) (.*) = (-?<?\w+>?) <(.*)>")
 
 count_skipped = 0
 count_hip_tid = 0
@@ -71,6 +82,9 @@ count_json_skipped = 0
 count_gap_duplicate_ts = 0
 count_gap_wrapped = 0
 count_gap_okay = 0
+count_strace_unfinished = 0
+count_strace_resumed = 0
+count_strace_complete = 0
 
 hcc_ts_ref = None
 
@@ -88,6 +102,9 @@ gap_names = {}
 
 # if get_system_ticks fails to compile, or user knows that the offset should be
 hcc_ts_ref_user = None
+
+# strace/ltrace need to track unfinished calls by name
+strace_unfinished = {}
 
 try:
     opts,non_opt_args = getopt.gnu_getopt(sys.argv[1:], "go:t:v")
@@ -384,7 +401,52 @@ for filename in non_opt_args:
                 count_hcc_missed += 1
                 continue
 
+            match = RE_STRACE_UNFINISED.search(line)
+            if match:
+                count_strace_unfinished += 1
+                ts,ms,text = match.groups()
+                text = text.strip()
+                if '(' not in text:
+                    print("strace unfinished cannot parse function name: %s" % text)
+                name = text.split('(')[0]
+                strace_unfinished[name] = (text,ts,ms)
+                continue
+
+            match = RE_STRACE_RESUMED.search(line)
+            #compile(r'(\d+)\.(\d+) <\.\.\. (\w+) resumed> .* = <?(["\w/\.-]+)>? <(.*)>')
+            if match:
+                count_strace_resumed += 1
+                ts,ms,text,retval,dur = match.groups()
+                if text not in strace_unfinished:
+                    print("strace resumed cannot find corresponding unfinished: %s" % text)
+                otext,ots,oms = strace_unfinished[text]
+                ts = int(ots)*1000000 + int(oms) # convert s.us to us
+                dur = int(float(dur)*1000000)
+                otext = "%s)" % otext # adds the closing function paren back in
+                escaped_call = json.dumps(otext)
+                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "args":{"name":%s}},\n'%(
+                    text,ts,dur,-2000,escaped_call))
+                continue
+
+            match = RE_STRACE_COMPLETE.search(line)
+            #compile(r"(\d+)\.(\d+) (.*) = (-?<?\w+>?) <(.*)>")
+            if match:
+                count_strace_complete += 1
+                ts,ms,text,retval,dur = match.groups()
+                text = text.strip()
+                ts = int(ts)*1000000 + int(ms) # convert s.us to us
+                dur = int(float(dur)*1000000)
+                name = text.split('(')[0]
+                escaped_call = json.dumps(text)
+                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "args":{"name":%s}},\n'%(
+                    name,ts,dur,-2000,escaped_call))
+                continue
+
+            vprint("unparsed line: %s" % line.strip())
             count_skipped += 1
+
+if count_strace_resumed + count_strace_complete > 0:
+    out.write('{"name":"process_name", "ph":"M", "pid":-2000, "args":{"name":"strace/ltrace"}},\n')
 
 if hip_pid:
     out.write('{"name":"process_name", "ph":"M", "pid":%s, "args":{"name":"HIP"}},\n'%hip_pid)
@@ -440,19 +502,22 @@ out.write("""{}
 }
 """)
 
-print("  total skipped lines: %d"%count_skipped)
-print("        tid hip lines: %d"%count_hip_tid)
-print("       open hip lines: %d"%count_hip_open)
-print("      close hip lines: %d"%count_hip_close)
-print("     missed hip lines: %d"%count_hip_missed)
-print("prof ts opx hcc lines: %d"%count_hcc_prof_ts_opx)
-print(" prof ts op hcc lines: %d"%count_hcc_prof_ts_op)
-print("    prof ts hcc lines: %d"%count_hcc_prof_ts)
-print("    prof op hcc lines: %d"%count_hcc_prof_op)
-print("       prof hcc lines: %d"%count_hcc_prof)
-print("     missed hcc lines: %d"%count_hcc_missed)
-print("           JSON lines: %d"%count_json)
-print("   skipped JSON lines: %d"%count_json_skipped)
-print("     duplicate gap ts: %d"%count_gap_duplicate_ts)
-print("    wrapped gap event: %d"%count_gap_wrapped)
-print("       okay gap event: %d"%count_gap_okay)
+print("    total skipped lines: %d"%count_skipped)
+print("          tid hip lines: %d"%count_hip_tid)
+print("         open hip lines: %d"%count_hip_open)
+print("        close hip lines: %d"%count_hip_close)
+print("       missed hip lines: %d"%count_hip_missed)
+print("  prof ts opx hcc lines: %d"%count_hcc_prof_ts_opx)
+print("   prof ts op hcc lines: %d"%count_hcc_prof_ts_op)
+print("      prof ts hcc lines: %d"%count_hcc_prof_ts)
+print("      prof op hcc lines: %d"%count_hcc_prof_op)
+print("         prof hcc lines: %d"%count_hcc_prof)
+print("       missed hcc lines: %d"%count_hcc_missed)
+print("             JSON lines: %d"%count_json)
+print("     skipped JSON lines: %d"%count_json_skipped)
+print("unfinished strace lines: %d"%count_strace_unfinished)
+print("   resumed strace lines: %d"%count_strace_resumed)
+print("  complete strace lines: %d"%count_strace_complete)
+print("       duplicate gap ts: %d"%count_gap_duplicate_ts)
+print("      wrapped gap event: %d"%count_gap_wrapped)
+print("         okay gap event: %d"%count_gap_okay)
