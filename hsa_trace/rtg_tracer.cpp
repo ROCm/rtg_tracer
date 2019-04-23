@@ -1408,15 +1408,19 @@ static void InitEnabledTable(std::string what_to_trace) {
     // tokens given by user
     std::vector<std::string> tokens = split(what_to_trace, ',');
     for (auto s : tokens) {
-        // special tokens "core" and "ext"
-        if ("core" == s) {
+        // special tokens "all", "core", and "ext"
+        if ("all" == s || "*" == s) {
+            InitEnabledTableCore(true);
+            InitEnabledTableExtApi(true);
+        }
+        else if ("core" == s) {
             InitEnabledTableCore(true);
         }
         else if ("ext" == s) {
             InitEnabledTableExtApi(true);
         }
         else {
-            // otherwise, go through entire map
+            // otherwise, go through entire map and look for matches
             for (auto &&kv : enabled_map) {
                 if (kv.first.find(s) != std::string::npos) {
                     kv.second = true;
