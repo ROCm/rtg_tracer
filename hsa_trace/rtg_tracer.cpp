@@ -80,7 +80,7 @@ static inline suseconds_t tick() {
     int pid_ = pid(); \
     std::string tid_ = tid(); \
     uint64_t tick_ = tick(); \
-    fprintf(stream, "<<hsa-api pid:%d tid:%s @%lu %s %s\n", pid_, tid_.c_str(), tick_, func.c_str(), args.c_str())
+    fprintf(stream, "<<hsa-api pid:%d tid:%s %s %s @%lu\n", pid_, tid_.c_str(), func.c_str(), args.c_str(), tick_)
 
 #define LOG_STATUS(status)                                                               \
     ({                                                                                   \

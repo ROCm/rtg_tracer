@@ -64,6 +64,8 @@ RE_HCC_PROF         = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;")
 RE_STRACE_UNFINISED = re.compile(r"(\d+)\.(\d+) (.*) <unfinished \.\.\.>")
 RE_STRACE_RESUMED   = re.compile(r'(\d+)\.(\d+) <\.\.\. (\w+) resumed> .* = <?(["\w/\.-]+)>? <(.*)>')
 RE_STRACE_COMPLETE  = re.compile(r"(\d+)\.(\d+) (.*) = (-?<?\w+>?) <(.*)>")
+RE_HSA_OPEN         = re.compile(r"<<hsa-api pid:(\d+) tid:(\d+) (.*) (\(.*\)) @(\d+)")
+RE_HSA_CLOSE        = re.compile(r"  hsa-api pid:(\d+) tid:(\d+) (.*) ret=(.*)>> \+(\d+) ns")
 
 count_skipped = 0
 count_hip_tid = 0
@@ -85,6 +87,9 @@ count_gap_okay = 0
 count_strace_unfinished = 0
 count_strace_resumed = 0
 count_strace_complete = 0
+count_hsa_open = 0
+count_hsa_close = 0
+count_hsa_missed = 0
 
 hcc_ts_ref = None
 
@@ -92,6 +97,9 @@ hcc_ts_ref = None
 # Also, hipLaunchKernel is printed without a closing HIP print.
 # The hipLaunchKernel message should amend the preceeding kernel launch info.
 hip_events = {}
+
+# HSA can nest its calls.
+hsa_events = {}
 
 # The set of GPUs is maintained for pretty-printing metadata in the chrome://tracing output.
 devices = {}
@@ -442,6 +450,41 @@ for filename in non_opt_args:
                     name,ts,dur,-2000,escaped_call))
                 continue
 
+            #compile(r"<<hsa-api pid:(\d+) tid:(\d+) (.*) (\(.*\)) @(\d+)")
+            match = RE_HSA_OPEN.search(line)
+            if match:
+                count_hsa_open += 1
+                pid,tid,func,args,ts = match.groups()
+                if (pid,tid) not in hsa_events:
+                    hsa_events[(pid,tid)] = []
+                if func.startswith('hsa'):
+                    hsa_events[(pid,tid)].append((func,ts))
+                else:
+                    print("Unrecognized HSA event message: '%s'" % func)
+                    sys.exit(1)
+                continue
+
+            #compile(r"  hsa-api pid:(\d+) tid:(\d+) (.*) ret=(.*)>> \+(\d+) ns")
+            match = RE_HSA_CLOSE.search(line)
+            if match:
+                get_system_ticks()
+                count_hsa_close += 1
+                pid,tid,func,retcode,ns = match.groups()
+                if (pid,tid) not in hsa_events:
+                    print("HSA event close before HSA init: (%s,%s)"%(pid,tid))
+                    sys.exit(1)
+                func_orig,ts = hsa_events[(pid,tid)].pop()
+                if not func.startswith(func_orig):
+                    print("event mismatch: '%s'.startswith('%s')" % (func,func_orig))
+                    sys.exit(1)
+                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s},\n'%(
+                    func, ts, ns, pid, tid))
+                continue
+
+            if 'hsa-api' in line:
+                count_hsa_missed += 1
+                continue
+
             vprint("unparsed line: %s" % line.strip())
             count_skipped += 1
 
@@ -503,6 +546,9 @@ out.write("""{}
 """)
 
 print("    total skipped lines: %d"%count_skipped)
+print("         open hsa lines: %d"%count_hsa_open)
+print("        close hsa lines: %d"%count_hsa_close)
+print("       missed hsa lines: %d"%count_hsa_missed)
 print("          tid hip lines: %d"%count_hip_tid)
 print("         open hip lines: %d"%count_hip_open)
 print("        close hip lines: %d"%count_hip_close)
