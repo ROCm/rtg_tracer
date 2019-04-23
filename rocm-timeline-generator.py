@@ -477,8 +477,8 @@ for filename in non_opt_args:
                 if not func.startswith(func_orig):
                     print("event mismatch: '%s'.startswith('%s')" % (func,func_orig))
                     sys.exit(1)
-                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":{"params":"%s"}},\n'%(
-                    func, ts, ns, pid, tid, args))
+                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":-3000, "tid":%s, "args":{"params":"%s"}},\n'%(
+                    func, ts, ns, tid, args))
                 continue
 
             if 'hsa-api' in line:
@@ -487,6 +487,9 @@ for filename in non_opt_args:
 
             vprint("unparsed line: %s" % line.strip())
             count_skipped += 1
+
+if count_hsa_close > 0:
+    out.write('{"name":"process_name", "ph":"M", "pid":-3000, "args":{"name":"HSA"}},\n')
 
 if count_strace_resumed + count_strace_complete > 0:
     out.write('{"name":"process_name", "ph":"M", "pid":-2000, "args":{"name":"strace/ltrace"}},\n')
