@@ -458,7 +458,7 @@ for filename in non_opt_args:
                 if (pid,tid) not in hsa_events:
                     hsa_events[(pid,tid)] = []
                 if func.startswith('hsa'):
-                    hsa_events[(pid,tid)].append((func,ts))
+                    hsa_events[(pid,tid)].append((func,args,ts))
                 else:
                     print("Unrecognized HSA event message: '%s'" % func)
                     sys.exit(1)
@@ -473,12 +473,12 @@ for filename in non_opt_args:
                 if (pid,tid) not in hsa_events:
                     print("HSA event close before HSA init: (%s,%s)"%(pid,tid))
                     sys.exit(1)
-                func_orig,ts = hsa_events[(pid,tid)].pop()
+                func_orig,args,ts = hsa_events[(pid,tid)].pop()
                 if not func.startswith(func_orig):
                     print("event mismatch: '%s'.startswith('%s')" % (func,func_orig))
                     sys.exit(1)
-                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s},\n'%(
-                    func, ts, ns, pid, tid))
+                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":{"params":"%s"}},\n'%(
+                    func, ts, ns, pid, tid, args))
                 continue
 
             if 'hsa-api' in line:
