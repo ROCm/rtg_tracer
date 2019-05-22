@@ -42,6 +42,11 @@ strace/ltrace -tttT sample output:
     1555950992.253415 __fpending(0x7f1d799ab540, 0, 0x7f1d799ac780, 0) = 0 <0.000078>
     1555950992.253523 fileno(0x7f1d799ab540)         = 2 <0.000064>
 
+RCCL non-standard timestamps
+
+rocm-framework-3:24888:25056 [1] 1558545003174220 NCCL INFO AllReduce: opCount 1 sendbuff 0x7f80b54bad00 recvbuff 0x7f81cce12200 count 1001 datatype 7 op 0 root 0 comm
+0x7f80467b9770 [nranks=2] stream 0x7f804680c090
+
 """
 
 from __future__ import print_function
@@ -66,6 +71,7 @@ RE_STRACE_RESUMED   = re.compile(r'(\d+)\.(\d+) <\.\.\. (\w+) resumed> .* = <?([
 RE_STRACE_COMPLETE  = re.compile(r"(\d+)\.(\d+) (.*) = (-?<?\w+>?) <(.*)>")
 RE_HSA_OPEN         = re.compile(r"<<hsa-api pid:(\d+) tid:(\d+) (.*) (\(.*\)) @(\d+)")
 RE_HSA_CLOSE        = re.compile(r"  hsa-api pid:(\d+) tid:(\d+) (.*) ret=(.*)>> \+(\d+) ns")
+RE_RCCL_ALLREDUCE   = re.compile(r"(.*):(\d+):(\d+) \[(\d+)\] (\d+) NCCL INFO AllReduce: opCount (.*) sendbuff (.*) recvbuff (.*) count (\d+) datatype (\d+) op (\d+) root 0 comm (.*) \[nranks=(\d+)\] stream (.*)")
 
 count_skipped = 0
 count_hip_tid = 0
@@ -90,6 +96,8 @@ count_strace_complete = 0
 count_hsa_open = 0
 count_hsa_close = 0
 count_hsa_missed = 0
+count_rccl_info_allreduce = 0
+count_rccl_missed = 0
 
 hcc_ts_ref = None
 
@@ -593,8 +601,25 @@ for filename in non_opt_args:
                 count_hsa_missed += 1
                 continue
 
+            #compile(r"(\w+):(\d+):(\d+) \[(\d+)\] (\d+) NCCL INFO AllReduce: opCount (\w+) sendbuff (.*) recvbuff (.*) count (\d+) datatype (\d+) op (\d+) root 0 comm (\d+) \[nranks=(\d+)\] stream (.*)")
+            match = RE_RCCL_ALLREDUCE.search(line)
+            if match:
+                count_rccl_info_allreduce += 1
+                host,pid,tid,device,ts,opCount,sendbuff,recvbuff,count,datatype,op,comm,nranks,stream = match.groups()
+                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":-4000, "tid":%s, "args":{"stream":"%s","comm":"%s"}},\n'%(
+                    "AllReduce count=%s datatype=%s op=%s"%(count,datatype,op),
+                    ts, 10, tid, stream, comm))
+                continue
+
+            if 'NCCL INFO' in line:
+                count_rccl_missed += 1
+                continue
+
             vprint("unparsed line: %s" % line.strip())
             count_skipped += 1
+
+if count_rccl_info_allreduce > 0:
+    out.write('{"name":"process_name", "ph":"M", "pid":-4000, "args":{"name":"RCCL"}},\n')
 
 if count_hsa_close > 0:
     out.write('{"name":"process_name", "ph":"M", "pid":-3000, "args":{"name":"HSA"}},\n')
@@ -675,6 +700,8 @@ print("      prof ts hcc lines: %d"%count_hcc_prof_ts)
 print("      prof op hcc lines: %d"%count_hcc_prof_op)
 print("         prof hcc lines: %d"%count_hcc_prof)
 print("       missed hcc lines: %d"%count_hcc_missed)
+print("        rccl info lines: %d"%count_rccl_info_allreduce)
+print("      missed rccl lines: %d"%count_rccl_missed)
 print("             JSON lines: %d"%count_json)
 print("     skipped JSON lines: %d"%count_json_skipped)
 print("unfinished strace lines: %d"%count_strace_unfinished)
