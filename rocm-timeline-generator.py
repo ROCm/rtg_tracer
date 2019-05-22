@@ -114,16 +114,44 @@ hcc_ts_ref_user = None
 # strace/ltrace need to track unfinished calls by name
 strace_unfinished = {}
 
+# do we replace hipModuleLaunchKernel et al with the actual kernel names
+replace_kernel_launch_with_name = False
+
+# organizing HIP calls into stream groups needs a pid to name mapping
+hip_stream_output = False
+hip_stream_pids = {}
+
+def print_help():
+    print("""
+rocm-timeline-generator.py
+
+arguments:
+    -g              add gap events to output
+    -h              this help message
+    -k              replace HIP kernel launch function with actual kernel names
+    -o filename     output JSON to given filename
+    -s              HIP calls with hipStream_t args are grouped separately
+    -t timestamp    user-specificed HCC timestamp reference point
+    -v              verbose console output (extra debugging)
+""")
+    sys.exit(0)
+
 try:
-    opts,non_opt_args = getopt.gnu_getopt(sys.argv[1:], "go:t:v")
+    opts,non_opt_args = getopt.gnu_getopt(sys.argv[1:], "ghko:t:v")
     output_filename = None
     show_gaps = False
     verbose = False
     for o,a in opts:
-        if o == "-o":
-            output_filename = a
-        elif o == "-g":
+        if o == "-g":
             show_gaps = True
+        elif o == "-h":
+            print_help()
+        elif o == "-o":
+            output_filename = a
+        elif o == "-k":
+            replace_kernel_launch_with_name = True
+        elif o == "-s":
+            hip_stream_output = True
         elif o == "-t":
             hcc_ts_ref_user = int(a)
         elif o == "-v":
@@ -149,7 +177,11 @@ out.write("""{
 "traceEvents": [
 """)
 
-def kern_to_json(full_string):
+def kern_name(full_string):
+    """Parse HIP kernel name information."""
+    return full_string.strip().split()[1][1:-1]
+
+def kern_to_json(full_string, use_kernel_name=True):
     """Parse HIP kernel information into an 'args' JSON object."""
     parts = full_string.strip().split()
     name = parts[1][1:-1]
@@ -157,8 +189,65 @@ def kern_to_json(full_string):
     groupDim = parts[3].split(':')[1]
     sharedMem = parts[4].split(':')[1]
     stream = parts[5].split(':')[1]
-    return '{"name":"%s", "gridDim":"%s", "groupDim":"%s", "sharedMem":"%s", "stream":"%s"}'%(
-            name, gridDim, groupDim, sharedMem, stream)
+    if use_kernel_name:
+        return '{"name":"%s", "gridDim":"%s", "groupDim":"%s", "sharedMem":"%s", "stream":"%s"}'%(
+                name, gridDim, groupDim, sharedMem, stream)
+    else:
+        return '{"gridDim":"%s", "groupDim":"%s", "sharedMem":"%s", "stream":"%s"}'%(
+                gridDim, groupDim, sharedMem, stream)
+
+def hip_args_to_json(full_string):
+    """Parse HIP call parameters into an 'args' JSON object.
+
+    Example:
+        hipMemcpyHtoDAsync (0x7fb64a635100, 0x7fbf05503500, 4004, stream:0.2)
+
+    """
+    parts = full_string.strip().split()
+    counter = 0
+    ret = '{'
+    for part in parts[1:]:
+        if counter > 0:
+            ret += ', '
+        if part[0] == '(':
+            part = part[1:]
+        if part[-1] in [')',',']:
+            part = part[0:-1]
+        if ':' in part:
+            try:
+                name,value = part.split(':', 1) # hipCtx_t args have an extra ':'
+                ret += '"%s":"%s"' % (name,value)
+            except:
+                print("uh oh")
+                print(part)
+                print(full_string)
+                raise
+        else:
+            ret += '"arg%d":"%s"' % (counter,part)
+        counter += 1
+    ret += '}'
+    return ret
+
+def hip_get_stream(full_string):
+    global hip_stream_pids
+    pidstr = None
+    parts = full_string.strip().split()
+    for part in parts:
+        if part[0] == '(':
+            part = part[1:]
+        if part[-1] in [')',',']:
+            part = part[0:-1]
+        if 'stream:' in part:
+            pidstr = part.split(':')[1]
+            break
+    if pidstr is None:
+        print("failed to retrieve stream ID from '%s'" % full_string)
+        sys.exit(1)
+    device,stream = pidstr.split('.')
+    fake_tid = int(stream)
+    fake_pid = -((int(device)+1)*10000)
+    hip_stream_pids[fake_pid] = device
+    return fake_pid,fake_tid
 
 def get_system_ticks():
     global hcc_ts_ref
@@ -302,18 +391,37 @@ for filename in non_opt_args:
                 msg,ts = hip_events[(pid,tid)].pop()
                 new_msg = new_msg.strip()
                 if not msg.startswith(new_msg):
-                    print("event mismatch: '%s'.startswith('%s')" % (item,msg))
+                    print("event mismatch: '%s'.startswith('%s')" % (msg,new_msg))
                     print(opnum)
                     sys.exit(1)
-                # we don't normally print hip function arguments, except for set device
+                # we treat hipSetDevice special, with its lone device ID argument becoming part of its name
+                # so that the chrome://tracing treats them as distinct boxes
                 if 'hipSetDevice' in msg:
                     new_msg = msg
                 if 'Kernel' in new_msg:
-                    out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
-                        new_msg, (int(ts)/1000)+hcc_ts_ref, int(ns)/1000, pid, tid, kern_to_json(msg)))
+                    if replace_kernel_launch_with_name:
+                        out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
+                            kern_name(msg), (int(ts)/1000)+hcc_ts_ref, int(ns)/1000, pid, tid, kern_to_json(msg,False)))
+                    else:
+                        out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
+                            new_msg, (int(ts)/1000)+hcc_ts_ref, int(ns)/1000, pid, tid, kern_to_json(msg)))
                 else:
-                    out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s},\n'%(
-                        new_msg, (int(ts)/1000)+hcc_ts_ref, int(ns)/1000, pid, tid))
+                    out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
+                        new_msg, (int(ts)/1000)+hcc_ts_ref, int(ns)/1000, pid, tid, hip_args_to_json(msg)))
+                # If the stream argument is available, we create a new group based on stream ID.
+                # This group will contain duplicates of HIP events, but organized as streams.
+                if hip_stream_output and 'stream:' in msg:
+                    pid,tid = hip_get_stream(msg)
+                    if 'Kernel' in new_msg:
+                        if replace_kernel_launch_with_name:
+                            out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
+                                kern_name(msg), (int(ts)/1000)+hcc_ts_ref, int(ns)/1000, pid, tid, kern_to_json(msg,False)))
+                        else:
+                            out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
+                                new_msg, (int(ts)/1000)+hcc_ts_ref, int(ns)/1000, pid, tid, kern_to_json(msg)))
+                    else:
+                        out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
+                            new_msg, (int(ts)/1000)+hcc_ts_ref, int(ns)/1000, pid, tid, hip_args_to_json(msg)))
                 continue
 
             # look for most specific HCC profile first
@@ -497,6 +605,11 @@ if count_strace_resumed + count_strace_complete > 0:
 if hip_pid:
     out.write('{"name":"process_name", "ph":"M", "pid":%s, "args":{"name":"HIP"}},\n'%hip_pid)
 
+if hip_stream_output:
+    for pid in hip_stream_pids:
+        pidstr = hip_stream_pids[pid]
+        out.write('{"name":"process_name", "ph":"M", "pid":%s, "args":{"name":"HIP Stream Device %s"}},\n'%(pid,pidstr))
+
 for fake in devices:
     dev = -(fake + 1)
     out.write('{"name":"process_name", "ph":"M", "pid":%s, "args":{"name":"HCC GPU %s"}},\n'%(fake,dev))
@@ -570,3 +683,4 @@ print("  complete strace lines: %d"%count_strace_complete)
 print("       duplicate gap ts: %d"%count_gap_duplicate_ts)
 print("      wrapped gap event: %d"%count_gap_wrapped)
 print("         okay gap event: %d"%count_gap_okay)
+
