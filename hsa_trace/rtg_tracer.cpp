@@ -10,9 +10,15 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#include <hsa/hsa_api_trace.h>
-#include <hsa/hsa_ven_amd_loader.h>
+#include <cxxabi.h>
 
+#include <hsa/hsa.h>
+#include <hsa/hsa_api_trace.h>
+#include <hsa/hsa_ven_amd_aqlprofile.h>
+#include <hsa/hsa_ven_amd_loader.h>
+#include <hsa/amd_hsa_kernel_code.h>
+
+#define USE_STREAM 1
 #define ENABLE_HSA_AMD_MEMORY_LOCK_TO_POOL 0
 #define ENABLE_HSA_AMD_RUNTIME_QUEUE_CREATE_REGISTER 0
 
@@ -27,13 +33,31 @@ static CoreApiTable gs_OrigCoreApiTable;
 // The HSA Runtime's versions of HSA ext API functions
 static AmdExtTable gs_OrigExtApiTable;
 
-#if 0
+// Callback for queue intercept.
+static void intercept_callback(const void* in_packets, uint64_t count, uint64_t user_que_idx, void* data, hsa_amd_queue_intercept_packet_writer writer);
+
 // The HSA Runtime's versions of HSA loader ext API functions
 static hsa_ven_amd_loader_1_01_pfn_t gs_OrigLoaderExtTable;
-#endif
+
+// Whether to enable queue profile tracing.
+bool enable_profile = true;
 
 // Output stream for all logging
 static FILE* stream;
+static std::ostringstream os;
+#if USE_STREAM
+#else
+// If we are buffering the writes to an ostringstream,
+// this library might not terminate cleanly via OnUnload.
+// Protect against that case here via static module object.
+static bool output_has_been_written = false;
+static struct Deleter {
+    ~Deleter() {
+        fprintf(RTG::stream, "%s", RTG::os.str().c_str());
+        RTG::output_has_been_written = true;
+    }
+} RunOnShutDown;
+#endif
 
 // Lookup which HSA functions we want to trace
 static std::unordered_map<std::string,bool> enabled_map;
@@ -147,9 +171,9 @@ static inline int pid() {
 }
 
 static inline std::string tid() {
-    std::ostringstream os;
-    os << std::this_thread::get_id();
-    return os.str();
+    std::ostringstream tid_os;
+    tid_os << std::this_thread::get_id();
+    return tid_os.str();
 }
 
 static inline suseconds_t tick() {
@@ -157,6 +181,56 @@ static inline suseconds_t tick() {
     gettimeofday(&tv, nullptr);
     return tv.tv_sec * 1e6 + tv.tv_usec;
 }
+
+#if USE_STREAM
+#define TRACE_OUT \
+fprintf(stream, "<<hsa-api pid:%d tid:%s %s %s @%lu\n", pid_, tid_.c_str(), func.c_str(), args.c_str(), tick_);
+#define LOG_STATUS_OUT \
+fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%d>> +%lu ns\n", pid_, tid_.c_str(),  func.c_str(), localStatus, ticks);
+#define LOG_UINT64_OUT \
+fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%lu>> +%lu ns\n", pid_, tid_.c_str(),  func.c_str(), localStatus, ticks);
+#define LOG_SIGNAL_OUT \
+fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%ld>> +%lu ns\n", pid_, tid_.c_str(),  func.c_str(), localStatus, ticks);
+#define LOG_VOID_OUT \
+fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=void>> +%lu ns\n", pid_, tid_.c_str(),  func.c_str(), ticks);
+#define LOG_DISPATCH \
+fprintf(stream, "  <<hsa-api pid:%d tid:%s dispatch start:%lu stop:%lu >>\n", pid_, tid_.c_str(), start_, stop_);
+#else
+#define TRACE_OUT \
+os << "<<hsa-api" \
+    << " pid:" << pid_ \
+    << " tid:" << tid_ \
+    << " " << func \
+    << " " << args \
+    << " @" << tick_ \
+    << std::endl;
+#define LOG_STATUS_OUT \
+os << "  hsa-api" \
+    << " pid:" << pid_ \
+    << " tid:" << tid_ \
+    << " " << func \
+    << " ret=" << localStatus \
+    << ">> +" << ticks << " ns" \
+    << std::endl;
+#define LOG_UINT64_OUT LOG_STATUS_OUT
+#define LOG_SIGNAL_OUT LOG_STATUS_OUT
+#define LOG_VOID_OUT \
+os << "  hsa-api" \
+    << " pid:" << pid_ \
+    << " tid:" << tid_ \
+    << " " << func \
+    << " ret=void" \
+    << ">> +" << ticks << " ns" \
+    << std::endl;
+#define LOG_DISPATCH \
+os << "  <<hsa-api" \
+    << " pid:" << pid_ \
+    << " tid:" << tid_ \
+    << " dispatch" \
+    << " start:" << start_ \
+    << " stop:" << stop_ \
+    << " >>" << std::endl;
+#endif
 
 #define TRACE(...) \
     static bool is_enabled = enabled_check(__func__); \
@@ -171,7 +245,7 @@ static inline suseconds_t tick() {
         pid_ = pid(); \
         tid_ = tid(); \
         tick_ = tick(); \
-        fprintf(stream, "<<hsa-api pid:%d tid:%s %s %s @%lu\n", pid_, tid_.c_str(), func.c_str(), args.c_str(), tick_); \
+        TRACE_OUT \
     }
 
 #define LOG_STATUS(status)                                                               \
@@ -179,8 +253,7 @@ static inline suseconds_t tick() {
         hsa_status_t localStatus = status; /*local copy so status only evaluated once*/  \
         if (is_enabled) {                                                                \
             uint64_t ticks = tick() - tick_;                                             \
-            fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%d>> +%lu ns\n",             \
-                    pid_, tid_.c_str(),  func.c_str(), localStatus, ticks);              \
+            LOG_STATUS_OUT                                                               \
         }                                                                                \
         localStatus;                                                                     \
     })
@@ -190,8 +263,7 @@ static inline suseconds_t tick() {
         hsa_signal_value_t localStatus = status; /*local copy so status only evaluated once*/  \
         if (is_enabled) {                                                                      \
             uint64_t ticks = tick() - tick_;                                                   \
-            fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%ld>> +%lu ns\n",                  \
-                    pid_, tid_.c_str(),  func.c_str(), localStatus, ticks);                    \
+            LOG_SIGNAL_OUT                                                                     \
         }                                                                                      \
         localStatus;                                                                           \
     })
@@ -201,8 +273,7 @@ static inline suseconds_t tick() {
         uint64_t localStatus = status; /*local copy so status only evaluated once*/  \
         if (is_enabled) {                                                            \
             uint64_t ticks = tick() - tick_;                                         \
-            fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%ld>> +%lu ns\n",        \
-                    pid_, tid_.c_str(),  func.c_str(), localStatus, ticks);          \
+            LOG_UINT64_OUT                                                           \
         }                                                                            \
         localStatus;                                                                 \
     })
@@ -212,8 +283,7 @@ static inline suseconds_t tick() {
         uint32_t localStatus = status; /*local copy so status only evaluated once*/  \
         if (is_enabled) {                                                            \
             uint64_t ticks = tick() - tick_;                                         \
-            fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%d>> +%lu ns\n",         \
-                    pid_, tid_.c_str(),  func.c_str(), localStatus, ticks);          \
+            LOG_STATUS_OUT                                                           \
         }                                                                            \
         localStatus;                                                                 \
     })
@@ -223,8 +293,7 @@ static inline suseconds_t tick() {
         status;                                                                \
         if (is_enabled) {                                                      \
             uint64_t ticks = tick() - tick_;                                   \
-            fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=void>> +%lu ns\n", \
-                    pid_, tid_.c_str(),  func.c_str(), ticks);                 \
+            LOG_VOID_OUT                                                       \
         }                                                                      \
     })
 
@@ -249,7 +318,6 @@ bool InitHsaTable(HsaApiTable* pTable)
            static_cast<const void*>(pTable->amd_ext_),
            sizeof(AmdExtTable));
 
-#if 0
     hsa_status_t status = HSA_STATUS_SUCCESS;
     status = gs_OrigCoreApiTable.hsa_system_get_major_extension_table_fn(
             HSA_EXTENSION_AMD_LOADER,
@@ -261,7 +329,6 @@ bool InitHsaTable(HsaApiTable* pTable)
         fprintf(stderr, "RTG HSA Tracer: Cannot get loader extension function table");
         return false;
     }
-#endif
 
     InitCoreApiTable(pTable->core_);
     InitAmdExtTable(pTable->amd_ext_);
@@ -357,9 +424,38 @@ hsa_status_t hsa_agent_major_extension_supported(uint16_t extension, hsa_agent_t
     return LOG_STATUS(gs_OrigCoreApiTable.hsa_agent_major_extension_supported_fn(extension, agent, version_major, version_minor, result));
 }
 
+struct InterceptCallbackData
+{
+    InterceptCallbackData(hsa_queue_t *queue, hsa_agent_t agent)
+        : queue(queue), agent(agent) {}
+    hsa_queue_t *queue;
+    hsa_agent_t agent;
+};
+
 hsa_status_t hsa_queue_create(hsa_agent_t agent, uint32_t size, hsa_queue_type32_t type, void (*callback)(hsa_status_t status, hsa_queue_t* source, void* data), void* data, uint32_t private_segment_size, uint32_t group_segment_size, hsa_queue_t** queue) {
-    TRACE(agent, size, type, callback, data, private_segment_size, group_segment_size, queue);
-    return LOG_STATUS(gs_OrigCoreApiTable.hsa_queue_create_fn(agent, size, type, callback, data, private_segment_size, group_segment_size, queue));
+    if (enable_profile) {
+        // call special ext api to create an interceptible queue
+        hsa_status_t status = gs_OrigExtApiTable.hsa_amd_queue_intercept_create_fn(agent, size, type, callback, data, private_segment_size, group_segment_size, queue);
+        if (status != HSA_STATUS_SUCCESS) {
+            return status;
+        }
+        // make sure profiling is enabled for the newly created queue
+        status = gs_OrigExtApiTable.hsa_amd_profiling_set_profiler_enabled_fn(*queue, true);
+        if (status != HSA_STATUS_SUCCESS) {
+            return status;
+        }
+        // set our intercept callback
+        // we leak the InterceptCallbackData instance
+        InterceptCallbackData *data = new InterceptCallbackData(*queue, agent);
+        status = gs_OrigExtApiTable.hsa_amd_queue_intercept_register_fn(
+                *queue, intercept_callback, data);
+        return status;
+    }
+    else {
+        // print as usual
+        TRACE(agent, size, type, callback, data, private_segment_size, group_segment_size, queue);
+        return LOG_STATUS(gs_OrigCoreApiTable.hsa_queue_create_fn(agent, size, type, callback, data, private_segment_size, group_segment_size, queue));
+    }
 }
 
 hsa_status_t hsa_soft_queue_create(hsa_region_t region, uint32_t size, hsa_queue_type32_t type, uint32_t features, hsa_signal_t completion_signal, hsa_queue_t** queue) {
@@ -1650,6 +1746,176 @@ static bool enabled_check(std::string func)
     return enabled_map[func];
 }
 
+// shorthands
+typedef hsa_ven_amd_aqlprofile_pfn_t pfn_t;
+typedef hsa_ven_amd_aqlprofile_event_t event_t;
+typedef hsa_ven_amd_aqlprofile_parameter_t parameter_t;
+typedef hsa_ven_amd_aqlprofile_profile_t profile_t;
+typedef hsa_ext_amd_aql_pm4_packet_t packet_t;
+typedef uint32_t packet_word_t;
+typedef uint64_t timestamp_t;
+static const packet_word_t header_type_mask = (1ul << HSA_PACKET_HEADER_WIDTH_TYPE) - 1;
+static const char* kernel_none_;
+
+static inline hsa_packet_type_t GetHeaderType(const packet_t* packet) {
+	const packet_word_t* header = reinterpret_cast<const packet_word_t*>(packet);
+	return static_cast<hsa_packet_type_t>((*header >> HSA_PACKET_HEADER_TYPE) & header_type_mask);
+}
+
+static inline const amd_kernel_code_t* GetKernelCode(
+        const hsa_kernel_dispatch_packet_t* dispatch_packet)
+{
+    const amd_kernel_code_t* kernel_code = NULL;
+    hsa_status_t status =
+        gs_OrigLoaderExtTable.hsa_ven_amd_loader_query_host_address(
+                reinterpret_cast<const void*>(dispatch_packet->kernel_object),
+                reinterpret_cast<const void**>(&kernel_code));
+    if (HSA_STATUS_SUCCESS != status) {
+        kernel_code = reinterpret_cast<amd_kernel_code_t*>(dispatch_packet->kernel_object);
+    }
+    return kernel_code;
+}
+
+static inline const char* GetKernelName(const uint64_t kernel_symbol) {
+    amd_runtime_loader_debug_info_t* dbg_info =
+        reinterpret_cast<amd_runtime_loader_debug_info_t*>(kernel_symbol);
+    const char* kernel_name = (dbg_info != NULL) ? dbg_info->kernel_name : NULL;
+
+    // Kernel name is mangled name
+    // apply __cxa_demangle() to demangle it
+    const char* funcname = NULL;
+    if (kernel_name != NULL) {
+        size_t funcnamesize = 0;
+        int status;
+        const char* ret = abi::__cxa_demangle(kernel_name, NULL, &funcnamesize, &status);
+        funcname = (ret != 0) ? ret : strdup(kernel_name);
+    }
+    if (funcname == NULL) funcname = strdup(kernel_none_);
+
+    return funcname;
+}
+
+struct SignalCallbackData
+{
+    SignalCallbackData(hsa_agent_t agent, hsa_signal_t signal, bool owner)
+        : agent(agent), signal(signal), owner(owner) {}
+    hsa_agent_t agent;
+    hsa_signal_t signal;
+    bool owner;
+};
+
+static bool signal_callback(hsa_signal_value_t value, void* arg)
+{
+    hsa_status_t status;
+    if (arg != nullptr) {
+        SignalCallbackData* data = reinterpret_cast<SignalCallbackData*>(arg);
+        long unsigned start_;
+        long unsigned stop_;
+        hsa_amd_profiling_dispatch_time_t dispatch_time{};
+        status = gs_OrigExtApiTable.hsa_amd_profiling_get_dispatch_time_fn(
+                data->agent, data->signal, &dispatch_time);
+        if (status != HSA_STATUS_SUCCESS) {
+            fprintf(stderr, "RTG HSA Tracer: signal callback dispatch time failed\n");
+        }
+        start_ = dispatch_time.start;
+        stop_ = dispatch_time.end;
+        int pid_ = pid();
+        std::string tid_ = tid();
+        LOG_DISPATCH
+        // we created the signal, we must free
+        if (data->owner) {
+            hsa_status_t status = gs_OrigCoreApiTable.hsa_signal_destroy_fn(data->signal);
+            if (status != HSA_STATUS_SUCCESS) {
+                fprintf(stderr, "RTG HSA Tracer: signal destroy failed\n");
+            }
+        }
+    }
+    return false; // do not re-use callback
+}
+
+static void submit(hsa_queue_t *queue, const void* packet) {
+    // write packet
+    const hsa_kernel_dispatch_packet_t* aql = reinterpret_cast<const hsa_kernel_dispatch_packet_t*>(packet);
+    uint32_t queueMask = queue->size - 1;
+    uint64_t index = gs_OrigCoreApiTable.hsa_queue_add_write_index_relaxed_fn(queue, 1);
+    if (index-gs_OrigCoreApiTable.hsa_queue_load_read_index_scacquire_fn(queue) >= queue->size) {
+        fprintf(stderr, "RTG HSA Tracer: command queue overflow\n");
+        return;
+    }
+    hsa_kernel_dispatch_packet_t* q_aql = 
+        &(((hsa_kernel_dispatch_packet_t*)(queue->base_address))[index & queueMask]);
+    // Copy mostly finished AQL packet into the queue
+    *q_aql = *aql;
+    // Lastly copy in the header
+    q_aql->header = aql->header;
+    // ring doorbell
+    gs_OrigCoreApiTable.hsa_signal_store_relaxed_fn(queue->doorbell_signal, index);
+}
+
+static void intercept_callback(
+        const void* in_packets, uint64_t count,
+        uint64_t user_que_idx, void* data,
+        hsa_amd_queue_intercept_packet_writer writer)
+{
+    hsa_status_t status;
+    const packet_t* packets_arr = reinterpret_cast<const packet_t*>(in_packets);
+    InterceptCallbackData *data_ = reinterpret_cast<InterceptCallbackData*>(data);
+    hsa_agent_t agent = data_->agent;
+    hsa_queue_t *queue = data_->queue;
+
+    // Traverse input packets
+    for (uint64_t j = 0; j < count; ++j) {
+        const packet_t* packet = &packets_arr[j];
+        bool to_submit = true;
+
+        // Checking for dispatch packet type
+        if (GetHeaderType(packet) == HSA_PACKET_TYPE_KERNEL_DISPATCH) {
+            const hsa_kernel_dispatch_packet_t* dispatch_packet =
+                reinterpret_cast<const hsa_kernel_dispatch_packet_t*>(packet);
+            const hsa_signal_t completion_signal = dispatch_packet->completion_signal;
+
+            // If dispatch packet does not have signal, allocate one.
+            if (dispatch_packet->completion_signal.handle == 0) {
+                hsa_signal_t signal;
+                status = gs_OrigCoreApiTable.hsa_signal_create_fn(1, 0, nullptr, &signal);
+                if (status != HSA_STATUS_SUCCESS) {
+                    fprintf(stderr, "RTG HSA Tracer: failed to allocate signal\n");
+                    continue;
+                }
+                const_cast<hsa_kernel_dispatch_packet_t*>(dispatch_packet)->completion_signal = signal;
+                status = gs_OrigExtApiTable.hsa_amd_signal_async_handler_fn(
+                        signal, HSA_SIGNAL_CONDITION_LT, 1, signal_callback,
+                        new SignalCallbackData(agent, signal, true));
+                if (status != HSA_STATUS_SUCCESS) {
+                    fprintf(stderr, "RTG HSA Tracer: hsa_amd_signal_async_handler_fn failed with new signal\n");
+                    continue;
+                }
+            }
+            else {
+                status = gs_OrigExtApiTable.hsa_amd_signal_async_handler_fn(
+                        dispatch_packet->completion_signal,
+                        HSA_SIGNAL_CONDITION_LT, 1, signal_callback,
+                        new SignalCallbackData(agent, dispatch_packet->completion_signal, false));
+                if (status != HSA_STATUS_SUCCESS) {
+                    fprintf(stderr, "RTG HSA Tracer: hsa_amd_signal_async_handler_fn failed with existing signal\n");
+                    continue;
+                }
+            }
+
+            //const amd_kernel_code_t* kernel_code = GetKernelCode(dispatch_packet);
+            //const uint64_t kernel_symbol = kernel_code->runtime_loader_kernel_symbol;
+            //const char* kernel_name = GetKernelName(kernel_symbol);
+        }
+
+        // Submitting the original packets as if profiling was not enabled
+        if (writer != NULL) {
+            writer(packet, 1);
+        } else {
+            submit(queue, packet);
+        }
+    }
+}
+
 } // namespace RTG
 
 extern "C" bool OnLoad(void *pTable,
@@ -1671,6 +1937,13 @@ extern "C" bool OnLoad(void *pTable,
     fprintf(stderr, "RTG_HSA_TRACER_FILTER=%s\n", what_to_trace);
     RTG::InitEnabledTable(what_to_trace);
 
+    const char *profile = nullptr;
+    if ((profile = getenv("RTG_HSA_TRACER_PROFILE")) == nullptr) {
+        profile = "yes";
+    }
+    fprintf(stderr, "RTG_HSA_TRACER_PROFILE=%s\n", profile);
+    RTG::enable_profile = (std::string(profile) == "yes");
+
     return RTG::InitHsaTable(reinterpret_cast<HsaApiTable*>(pTable));
 }
 
@@ -1678,6 +1951,12 @@ extern "C" void OnUnload()
 {
     fprintf(stderr, "RTG HSA Tracer: Unloading\n");
     RTG::RestoreHsaTable(RTG::gs_OrigHsaTable);
+#if USE_STREAM
+#else
+    if (!RTG::output_has_been_written) {
+        fprintf(RTG::stream, "%s", RTG::os.str().c_str());
+    }
+#endif
     fclose(RTG::stream);
 }
 
