@@ -71,6 +71,7 @@ RE_STRACE_RESUMED   = re.compile(r'(\d+)\.(\d+) <\.\.\. (\w+) resumed> .* = <?([
 RE_STRACE_COMPLETE  = re.compile(r"(\d+)\.(\d+) (.*) = (-?<?\w+>?) <(.*)>")
 RE_HSA_OPEN         = re.compile(r"<<hsa-api pid:(\d+) tid:(\d+) (.*) (\(.*\)) @(\d+)")
 RE_HSA_CLOSE        = re.compile(r"  hsa-api pid:(\d+) tid:(\d+) (.*) ret=(.*)>> \+(\d+) ns")
+RE_HSA_DISPATCH     = re.compile(r"<<hsa-api pid:(\d+) tid:(\d+) dispatch queue:(.*) agent:(\d+) name:'(.*)' start:(\d+) stop:(\d+) >>")
 RE_RCCL_ALLREDUCE   = re.compile(r"(.*):(\d+):(\d+) \[(\d+)\] (\d+) NCCL INFO AllReduce: opCount (.*) sendbuff (.*) recvbuff (.*) count (\d+) datatype (\d+) op (\d+) root 0 comm (.*) \[nranks=(\d+)\] stream (.*)")
 
 count_skipped = 0
@@ -95,9 +96,12 @@ count_strace_resumed = 0
 count_strace_complete = 0
 count_hsa_open = 0
 count_hsa_close = 0
+count_hsa_dispatch = 0
 count_hsa_missed = 0
 count_rccl_info_allreduce = 0
 count_rccl_missed = 0
+
+hsa_queues = {}
 
 hcc_ts_ref = None
 
@@ -597,8 +601,27 @@ for filename in non_opt_args:
                     func, ts, ns, tid, args))
                 continue
 
+            match = RE_HSA_DISPATCH.search(line)
+            if match:
+                get_system_ticks()
+                count_hsa_dispatch += 1
+                pid,tid,queue,agent,name,start,stop = match.groups()
+                if agent not in hsa_queues:
+                    hsa_queues[agent] = {}
+                if queue not in hsa_queues[agent]:
+                    index = len(hsa_queues[agent])
+                    hsa_queues[agent][queue] = index
+                tid = hsa_queues[agent][queue]
+                ts = (int(start)/1000)+hcc_ts_ref
+                dur = (int(stop)-int(start))/1000
+                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s},\n'%(
+                    name, ts, dur, agent, tid))
+                continue
+
             if 'hsa-api' in line:
                 count_hsa_missed += 1
+                if count_hsa_missed == 1:
+                    print(line)
                 continue
 
             #compile(r"(\w+):(\d+):(\d+) \[(\d+)\] (\d+) NCCL INFO AllReduce: opCount (\w+) sendbuff (.*) recvbuff (.*) count (\d+) datatype (\d+) op (\d+) root 0 comm (\d+) \[nranks=(\d+)\] stream (.*)")
@@ -710,4 +733,3 @@ print("  complete strace lines: %d"%count_strace_complete)
 print("       duplicate gap ts: %d"%count_gap_duplicate_ts)
 print("      wrapped gap event: %d"%count_gap_wrapped)
 print("         okay gap event: %d"%count_gap_okay)
-

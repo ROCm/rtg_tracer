@@ -194,7 +194,7 @@ fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%ld>> +%lu ns\n", pid_, tid_.c_s
 #define LOG_VOID_OUT \
 fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=void>> +%lu ns\n", pid_, tid_.c_str(),  func.c_str(), ticks);
 #define LOG_DISPATCH \
-fprintf(stream, "  <<hsa-api pid:%d tid:%s dispatch start:%lu stop:%lu >>\n", pid_, tid_.c_str(), start_, stop_);
+fprintf(stream, "<<hsa-api pid:%d tid:%s dispatch queue:%p agent:%lu name:'%s' start:%lu stop:%lu >>\n", pid_, tid_.c_str(), queue_, agent_.handle, name_, start_, stop_);
 #else
 #define TRACE_OUT \
 os << "<<hsa-api" \
@@ -227,6 +227,7 @@ os << "  <<hsa-api" \
     << " pid:" << pid_ \
     << " tid:" << tid_ \
     << " dispatch" \
+    << " name:'" << name_ << "'"\
     << " start:" << start_ \
     << " stop:" << stop_ \
     << " >>" << std::endl;
@@ -1776,18 +1777,18 @@ static inline const amd_kernel_code_t* GetKernelCode(
     return kernel_code;
 }
 
-static inline const char* GetKernelName(const uint64_t kernel_symbol) {
+static inline char* GetKernelName(const uint64_t kernel_symbol) {
     amd_runtime_loader_debug_info_t* dbg_info =
         reinterpret_cast<amd_runtime_loader_debug_info_t*>(kernel_symbol);
     const char* kernel_name = (dbg_info != NULL) ? dbg_info->kernel_name : NULL;
 
     // Kernel name is mangled name
     // apply __cxa_demangle() to demangle it
-    const char* funcname = NULL;
+    char* funcname = NULL;
     if (kernel_name != NULL) {
         size_t funcnamesize = 0;
         int status;
-        const char* ret = abi::__cxa_demangle(kernel_name, NULL, &funcnamesize, &status);
+        char* ret = abi::__cxa_demangle(kernel_name, NULL, &funcnamesize, &status);
         funcname = (ret != 0) ? ret : strdup(kernel_name);
     }
     if (funcname == NULL) funcname = strdup(kernel_none_);
@@ -1797,8 +1798,10 @@ static inline const char* GetKernelName(const uint64_t kernel_symbol) {
 
 struct SignalCallbackData
 {
-    SignalCallbackData(hsa_agent_t agent, hsa_signal_t signal, bool owner)
-        : agent(agent), signal(signal), owner(owner) {}
+    SignalCallbackData(char *name, hsa_queue_t* queue, hsa_agent_t agent, hsa_signal_t signal, bool owner)
+        : name(name), queue(queue), agent(agent), signal(signal), owner(owner) {}
+    char *name;
+    hsa_queue_t* queue;
     hsa_agent_t agent;
     hsa_signal_t signal;
     bool owner;
@@ -1815,13 +1818,21 @@ static bool signal_callback(hsa_signal_value_t value, void* arg)
         status = gs_OrigExtApiTable.hsa_amd_profiling_get_dispatch_time_fn(
                 data->agent, data->signal, &dispatch_time);
         if (status != HSA_STATUS_SUCCESS) {
-            fprintf(stderr, "RTG HSA Tracer: signal callback dispatch time failed\n");
+            const char *msg;
+            gs_OrigCoreApiTable.hsa_status_string_fn(status, &msg);
+            fprintf(stderr, "RTG HSA Tracer: signal callback dispatch time failed: %s\n", msg);
         }
-        start_ = dispatch_time.start;
-        stop_ = dispatch_time.end;
-        int pid_ = pid();
-        std::string tid_ = tid();
-        LOG_DISPATCH
+        else {
+            start_ = dispatch_time.start;
+            stop_ = dispatch_time.end;
+            int pid_ = pid();
+            std::string tid_ = tid();
+            char *name_ = data->name;
+            hsa_agent_t agent_ = data->agent;
+            hsa_queue_t* queue_ = data->queue;
+            LOG_DISPATCH
+            std::free(name_);
+        }
         // we created the signal, we must free
         if (data->owner) {
             hsa_status_t status = gs_OrigCoreApiTable.hsa_signal_destroy_fn(data->signal);
@@ -1829,6 +1840,7 @@ static bool signal_callback(hsa_signal_value_t value, void* arg)
                 fprintf(stderr, "RTG HSA Tracer: signal destroy failed\n");
             }
         }
+        delete data;
     }
     return false; // do not re-use callback
 }
@@ -1874,6 +1886,10 @@ static void intercept_callback(
                 reinterpret_cast<const hsa_kernel_dispatch_packet_t*>(packet);
             const hsa_signal_t completion_signal = dispatch_packet->completion_signal;
 
+            const amd_kernel_code_t* kernel_code = GetKernelCode(dispatch_packet);
+            const uint64_t kernel_symbol = kernel_code->runtime_loader_kernel_symbol;
+            char* kernel_name = GetKernelName(kernel_symbol);
+
             // If dispatch packet does not have signal, allocate one.
             if (dispatch_packet->completion_signal.handle == 0) {
                 hsa_signal_t signal;
@@ -1885,7 +1901,7 @@ static void intercept_callback(
                 const_cast<hsa_kernel_dispatch_packet_t*>(dispatch_packet)->completion_signal = signal;
                 status = gs_OrigExtApiTable.hsa_amd_signal_async_handler_fn(
                         signal, HSA_SIGNAL_CONDITION_LT, 1, signal_callback,
-                        new SignalCallbackData(agent, signal, true));
+                        new SignalCallbackData(kernel_name, queue, agent, signal, true));
                 if (status != HSA_STATUS_SUCCESS) {
                     fprintf(stderr, "RTG HSA Tracer: hsa_amd_signal_async_handler_fn failed with new signal\n");
                     continue;
@@ -1895,16 +1911,13 @@ static void intercept_callback(
                 status = gs_OrigExtApiTable.hsa_amd_signal_async_handler_fn(
                         dispatch_packet->completion_signal,
                         HSA_SIGNAL_CONDITION_LT, 1, signal_callback,
-                        new SignalCallbackData(agent, dispatch_packet->completion_signal, false));
+                        new SignalCallbackData(
+                            kernel_name, queue, agent, dispatch_packet->completion_signal, false));
                 if (status != HSA_STATUS_SUCCESS) {
                     fprintf(stderr, "RTG HSA Tracer: hsa_amd_signal_async_handler_fn failed with existing signal\n");
                     continue;
                 }
             }
-
-            //const amd_kernel_code_t* kernel_code = GetKernelCode(dispatch_packet);
-            //const uint64_t kernel_symbol = kernel_code->runtime_loader_kernel_symbol;
-            //const char* kernel_name = GetKernelName(kernel_symbol);
         }
 
         // Submitting the original packets as if profiling was not enabled
