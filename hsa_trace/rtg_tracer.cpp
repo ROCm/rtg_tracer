@@ -195,6 +195,8 @@ fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%ld>> +%lu ns\n", pid_, tid_.c_s
 fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=void>> +%lu ns\n", pid_, tid_.c_str(),  func.c_str(), ticks);
 #define LOG_DISPATCH \
 fprintf(stream, "<<hsa-api pid:%d tid:%s dispatch queue:%p agent:%lu signal:%lu name:'%s' start:%lu stop:%lu >>\n", pid_, tid_.c_str(), queue_, agent_.handle, signal_.handle, name_, start_, stop_);
+#define LOG_BARRIER \
+fprintf(stream, "<<hsa-api pid:%d tid:%s barrier queue:%p agent:%lu signal:%lu start:%lu stop:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu >>\n", pid_, tid_.c_str(), queue_, agent_.handle, signal_.handle, start_, stop_, data->dep1, data->dep2, data->dep3, data->dep4, data->dep5);
 #else
 #define TRACE_OUT \
 os << "<<hsa-api" \
@@ -233,6 +235,22 @@ os << "  <<hsa-api" \
     << " name:'" << name_ << "'"\
     << " start:" << start_ \
     << " stop:" << stop_ \
+    << " >>" << std::endl;
+#define LOG_BARRIER \
+os << "  <<hsa-api" \
+    << " pid:" << pid_ \
+    << " tid:" << tid_ \
+    << " barrier" \
+    << " queue:'" << queue_ << "'"\
+    << " agent:'" << agent_.handle << "'"\
+    << " signal:'" << signal_.handle << "'"\
+    << " start:" << start_ \
+    << " stop:" << stop_ \
+    << " dep1:" << data->dep1 \
+    << " dep2:" << data->dep2 \
+    << " dep3:" << data->dep3 \
+    << " dep4:" << data->dep4 \
+    << " dep5:" << data->dep5 \
     << " >>" << std::endl;
 #endif
 
@@ -1801,13 +1819,32 @@ static inline char* GetKernelName(const uint64_t kernel_symbol) {
 
 struct SignalCallbackData
 {
-    SignalCallbackData(char *name, hsa_queue_t* queue, hsa_agent_t agent, hsa_signal_t signal, bool owner)
-        : name(name), queue(queue), agent(agent), signal(signal), owner(owner) {}
+    SignalCallbackData(char *name, hsa_queue_t* queue, hsa_agent_t agent, hsa_signal_t signal, bool owns_signal)
+        : name(name), queue(queue), agent(agent), signal(signal), owns_signal(owns_signal),
+            is_barrier(false), dep1(0), dep2(0), dep3(0), dep4(0), dep5(0)
+    {}
+
+    SignalCallbackData(char *name, hsa_queue_t* queue, hsa_agent_t agent, hsa_signal_t signal, bool owns_signal, const hsa_barrier_and_packet_t* packet)
+        : name(name), queue(queue), agent(agent), signal(signal), owns_signal(owns_signal),
+            is_barrier(true),
+            dep1(packet->dep_signal[0].handle),
+            dep2(packet->dep_signal[1].handle),
+            dep3(packet->dep_signal[2].handle),
+            dep4(packet->dep_signal[3].handle),
+            dep5(packet->dep_signal[4].handle)
+    {}
+
     char *name;
     hsa_queue_t* queue;
     hsa_agent_t agent;
     hsa_signal_t signal;
-    bool owner;
+    bool owns_signal;
+    bool is_barrier;
+    long unsigned dep1;
+    long unsigned dep2;
+    long unsigned dep3;
+    long unsigned dep4;
+    long unsigned dep5;
 };
 
 static bool signal_callback(hsa_signal_value_t value, void* arg)
@@ -1834,11 +1871,16 @@ static bool signal_callback(hsa_signal_value_t value, void* arg)
             hsa_agent_t agent_ = data->agent;
             hsa_queue_t* queue_ = data->queue;
             hsa_signal_t signal_ = data->signal;
-            LOG_DISPATCH
-            std::free(name_);
+            if (data->is_barrier) {
+                LOG_BARRIER
+            }
+            else {
+                LOG_DISPATCH
+                std::free(name_);
+            }
         }
         // we created the signal, we must free
-        if (data->owner) {
+        if (data->owns_signal) {
             hsa_status_t status = gs_OrigCoreApiTable.hsa_signal_destroy_fn(data->signal);
             if (status != HSA_STATUS_SUCCESS) {
                 fprintf(stderr, "RTG HSA Tracer: signal destroy failed\n");
@@ -1927,26 +1969,25 @@ static void intercept_callback(
             }
         }
         else if (type == HSA_PACKET_TYPE_BARRIER_AND || type == HSA_PACKET_TYPE_BARRIER_OR) {
-            const hsa_kernel_dispatch_packet_t* dispatch_packet =
-                reinterpret_cast<const hsa_kernel_dispatch_packet_t*>(packet);
-            const hsa_signal_t completion_signal = dispatch_packet->completion_signal;
+            const hsa_barrier_and_packet_t* barrier_packet =
+                reinterpret_cast<const hsa_barrier_and_packet_t*>(packet);
+            const hsa_signal_t completion_signal = barrier_packet->completion_signal;
 
-            // to simplify our implementation,
-            // we dup the name so later code can free a valid pointer
-            char* kernel_name = strdup("barrier");
+            char* kernel_name = nullptr;
 
             // If dispatch packet does not have signal, allocate one.
-            if (dispatch_packet->completion_signal.handle == 0) {
+            if (barrier_packet->completion_signal.handle == 0) {
                 hsa_signal_t signal;
                 status = gs_OrigCoreApiTable.hsa_signal_create_fn(1, 0, nullptr, &signal);
                 if (status != HSA_STATUS_SUCCESS) {
                     fprintf(stderr, "RTG HSA Tracer: failed to allocate signal\n");
                     continue;
                 }
-                const_cast<hsa_kernel_dispatch_packet_t*>(dispatch_packet)->completion_signal = signal;
+                const_cast<hsa_barrier_and_packet_t*>(barrier_packet)->completion_signal = signal;
                 status = gs_OrigExtApiTable.hsa_amd_signal_async_handler_fn(
                         signal, HSA_SIGNAL_CONDITION_LT, 1, signal_callback,
-                        new SignalCallbackData(kernel_name, queue, agent, signal, true));
+                        new SignalCallbackData(kernel_name, queue, agent, signal,
+                            true, barrier_packet));
                 if (status != HSA_STATUS_SUCCESS) {
                     fprintf(stderr, "RTG HSA Tracer: hsa_amd_signal_async_handler_fn failed with new signal\n");
                     continue;
@@ -1954,10 +1995,11 @@ static void intercept_callback(
             }
             else {
                 status = gs_OrigExtApiTable.hsa_amd_signal_async_handler_fn(
-                        dispatch_packet->completion_signal,
+                        barrier_packet->completion_signal,
                         HSA_SIGNAL_CONDITION_LT, 1, signal_callback,
                         new SignalCallbackData(
-                            kernel_name, queue, agent, dispatch_packet->completion_signal, false));
+                            kernel_name, queue, agent, barrier_packet->completion_signal,
+                            false, barrier_packet));
                 if (status != HSA_STATUS_SUCCESS) {
                     fprintf(stderr, "RTG HSA Tracer: hsa_amd_signal_async_handler_fn failed with existing signal\n");
                     continue;
