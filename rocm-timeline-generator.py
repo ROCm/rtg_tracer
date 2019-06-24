@@ -73,6 +73,7 @@ RE_HSA_OPEN         = re.compile(r"<<hsa-api pid:(\d+) tid:(\d+) (.*) (\(.*\)) @
 RE_HSA_CLOSE        = re.compile(r"  hsa-api pid:(\d+) tid:(\d+) (.*) ret=(.*)>> \+(\d+) ns")
 RE_HSA_DISPATCH     = re.compile(r"<<hsa-api pid:(\d+) tid:(\d+) dispatch queue:(.*) agent:(\d+) signal:(\d+) name:'(.*)' start:(\d+) stop:(\d+) >>")
 RE_HSA_BARRIER      = re.compile(r"<<hsa-api pid:(\d+) tid:(\d+) barrier queue:(.*) agent:(\d+) signal:(\d+) start:(\d+) stop:(\d+) dep1:(\d+) dep2:(\d+) dep3:(\d+) dep4:(\d+) dep5:(\d+) >>")
+RE_HSA_COPY         = re.compile(r"<<hsa-api pid:(\d+) tid:(\d+) copy agent:(\d+) signal:(\d+) start:(\d+) stop:(\d+) dep1:(\d+) dep2:(\d+) dep3:(\d+) dep4:(\d+) dep5:(\d+) >>")
 RE_RCCL_ALLREDUCE   = re.compile(r"(.*):(\d+):(\d+) \[(\d+)\] (\d+) NCCL INFO AllReduce: opCount (.*) sendbuff (.*) recvbuff (.*) count (\d+) datatype (\d+) op (\d+) root 0 comm (.*) \[nranks=(\d+)\] stream (.*)")
 
 count_skipped = 0
@@ -99,6 +100,7 @@ count_hsa_open = 0
 count_hsa_close = 0
 count_hsa_dispatch = 0
 count_hsa_barrier = 0
+count_hsa_copy = 0
 count_hsa_missed = 0
 count_rccl_info_allreduce = 0
 count_rccl_missed = 0
@@ -638,6 +640,22 @@ for filename in non_opt_args:
                     name, ts, dur, agent, tid, dep1, dep2, dep3, dep4, dep5))
                 continue
 
+            match = RE_HSA_COPY.search(line)
+            if match:
+                get_system_ticks()
+                count_hsa_copy += 1
+                name = 'copy'
+                pid,tid,agent,signal,start,stop,dep1,dep2,dep3,dep4,dep5 = match.groups()
+                if agent not in hsa_queues:
+                    hsa_queues[agent] = {}
+                #tid = hsa_queues[agent][queue]
+                tid = -1
+                ts = (int(start)/1000)+hcc_ts_ref
+                dur = (int(stop)-int(start))/1000
+                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":{"dep1":"%s","dep2":"%s","dep3":"%s","dep4":"%s","dep5":"%s"}},\n'%(
+                    name, ts, dur, agent, tid, dep1, dep2, dep3, dep4, dep5))
+                continue
+
             if 'hsa-api' in line:
                 count_hsa_missed += 1
                 if count_hsa_missed == 1:
@@ -666,6 +684,10 @@ if count_rccl_info_allreduce > 0:
 
 if count_hsa_close > 0:
     out.write('{"name":"process_name", "ph":"M", "pid":-3000, "args":{"name":"HSA"}},\n')
+
+if count_hsa_dispatch or count_hsa_barrier or count_hsa_copy:
+    for agent in hsa_queues:
+        out.write('{"name":"process_name", "ph":"M", "pid":%s, "args":{"name":"HSA Agent %s"}},\n'%(agent,agent))
 
 if count_strace_resumed + count_strace_complete > 0:
     out.write('{"name":"process_name", "ph":"M", "pid":-2000, "args":{"name":"strace/ltrace"}},\n')
@@ -734,6 +756,7 @@ print("         open hsa lines: %d"%count_hsa_open)
 print("        close hsa lines: %d"%count_hsa_close)
 print("     dispatch hsa lines: %d"%count_hsa_dispatch)
 print("      barrier hsa lines: %d"%count_hsa_barrier)
+print("         copy hsa lines: %d"%count_hsa_copy)
 print("       missed hsa lines: %d"%count_hsa_missed)
 print("          tid hip lines: %d"%count_hip_tid)
 print("         open hip lines: %d"%count_hip_open)
