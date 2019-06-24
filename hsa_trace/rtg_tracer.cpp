@@ -67,7 +67,7 @@ static void InitAmdExtTable(AmdExtTable* table);
 static void InitEnabledTable(std::string what_to_trace);
 static void InitEnabledTableCore(bool value);
 static void InitEnabledTableExtApi(bool value);
-static bool enabled_check(std::string func);
+static inline bool enabled_check(std::string func);
 
 // Helper functions to convert function arguments into strings.
 // Handles POD data types as well as enumerations.
@@ -194,7 +194,7 @@ fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%ld>> +%lu ns\n", pid_, tid_.c_s
 #define LOG_VOID_OUT \
 fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=void>> +%lu ns\n", pid_, tid_.c_str(),  func.c_str(), ticks);
 #define LOG_DISPATCH \
-fprintf(stream, "<<hsa-api pid:%d tid:%s dispatch queue:%p agent:%lu name:'%s' start:%lu stop:%lu >>\n", pid_, tid_.c_str(), queue_, agent_.handle, name_, start_, stop_);
+fprintf(stream, "<<hsa-api pid:%d tid:%s dispatch queue:%p agent:%lu signal:%lu name:'%s' start:%lu stop:%lu >>\n", pid_, tid_.c_str(), queue_, agent_.handle, signal_.handle, name_, start_, stop_);
 #else
 #define TRACE_OUT \
 os << "<<hsa-api" \
@@ -227,6 +227,9 @@ os << "  <<hsa-api" \
     << " pid:" << pid_ \
     << " tid:" << tid_ \
     << " dispatch" \
+    << " queue:'" << queue_ << "'"\
+    << " agent:'" << agent_.handle << "'"\
+    << " signal:'" << signal_.handle << "'"\
     << " name:'" << name_ << "'"\
     << " start:" << start_ \
     << " stop:" << stop_ \
@@ -1742,7 +1745,7 @@ static void InitEnabledTableExtApi(bool value) {
 #endif
 }
 
-static bool enabled_check(std::string func)
+static inline bool enabled_check(std::string func)
 {
     return enabled_map[func];
 }
@@ -1830,6 +1833,7 @@ static bool signal_callback(hsa_signal_value_t value, void* arg)
             char *name_ = data->name;
             hsa_agent_t agent_ = data->agent;
             hsa_queue_t* queue_ = data->queue;
+            hsa_signal_t signal_ = data->signal;
             LOG_DISPATCH
             std::free(name_);
         }
@@ -1845,6 +1849,7 @@ static bool signal_callback(hsa_signal_value_t value, void* arg)
     return false; // do not re-use callback
 }
 
+#if 0
 static void submit(hsa_queue_t *queue, const void* packet) {
     // write packet
     const hsa_kernel_dispatch_packet_t* aql = reinterpret_cast<const hsa_kernel_dispatch_packet_t*>(packet);
@@ -1863,6 +1868,7 @@ static void submit(hsa_queue_t *queue, const void* packet) {
     // ring doorbell
     gs_OrigCoreApiTable.hsa_signal_store_relaxed_fn(queue->doorbell_signal, index);
 }
+#endif
 
 static void intercept_callback(
         const void* in_packets, uint64_t count,
@@ -1879,9 +1885,10 @@ static void intercept_callback(
     for (uint64_t j = 0; j < count; ++j) {
         const packet_t* packet = &packets_arr[j];
         bool to_submit = true;
+        hsa_packet_type_t type = GetHeaderType(packet);
 
         // Checking for dispatch packet type
-        if (GetHeaderType(packet) == HSA_PACKET_TYPE_KERNEL_DISPATCH) {
+        if (type == HSA_PACKET_TYPE_KERNEL_DISPATCH) {
             const hsa_kernel_dispatch_packet_t* dispatch_packet =
                 reinterpret_cast<const hsa_kernel_dispatch_packet_t*>(packet);
             const hsa_signal_t completion_signal = dispatch_packet->completion_signal;
@@ -1919,13 +1926,59 @@ static void intercept_callback(
                 }
             }
         }
+        else if (type == HSA_PACKET_TYPE_BARRIER_AND || type == HSA_PACKET_TYPE_BARRIER_OR) {
+            const hsa_kernel_dispatch_packet_t* dispatch_packet =
+                reinterpret_cast<const hsa_kernel_dispatch_packet_t*>(packet);
+            const hsa_signal_t completion_signal = dispatch_packet->completion_signal;
+
+            // to simplify our implementation,
+            // we dup the name so later code can free a valid pointer
+            char* kernel_name = strdup("barrier");
+
+            // If dispatch packet does not have signal, allocate one.
+            if (dispatch_packet->completion_signal.handle == 0) {
+                hsa_signal_t signal;
+                status = gs_OrigCoreApiTable.hsa_signal_create_fn(1, 0, nullptr, &signal);
+                if (status != HSA_STATUS_SUCCESS) {
+                    fprintf(stderr, "RTG HSA Tracer: failed to allocate signal\n");
+                    continue;
+                }
+                const_cast<hsa_kernel_dispatch_packet_t*>(dispatch_packet)->completion_signal = signal;
+                status = gs_OrigExtApiTable.hsa_amd_signal_async_handler_fn(
+                        signal, HSA_SIGNAL_CONDITION_LT, 1, signal_callback,
+                        new SignalCallbackData(kernel_name, queue, agent, signal, true));
+                if (status != HSA_STATUS_SUCCESS) {
+                    fprintf(stderr, "RTG HSA Tracer: hsa_amd_signal_async_handler_fn failed with new signal\n");
+                    continue;
+                }
+            }
+            else {
+                status = gs_OrigExtApiTable.hsa_amd_signal_async_handler_fn(
+                        dispatch_packet->completion_signal,
+                        HSA_SIGNAL_CONDITION_LT, 1, signal_callback,
+                        new SignalCallbackData(
+                            kernel_name, queue, agent, dispatch_packet->completion_signal, false));
+                if (status != HSA_STATUS_SUCCESS) {
+                    fprintf(stderr, "RTG HSA Tracer: hsa_amd_signal_async_handler_fn failed with existing signal\n");
+                    continue;
+                }
+            }
+        }
 
         // Submitting the original packets as if profiling was not enabled
+#if 0
         if (writer != NULL) {
             writer(packet, 1);
         } else {
             submit(queue, packet);
         }
+#else
+        if (writer == NULL) {
+            fprintf(stderr, "RTG HSA Tracer: fatal, intercept callback missing writer\n");
+            exit(EXIT_FAILURE);
+        }
+        writer(packet, 1);
+#endif
     }
 }
 

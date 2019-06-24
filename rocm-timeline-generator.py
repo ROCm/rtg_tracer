@@ -71,7 +71,7 @@ RE_STRACE_RESUMED   = re.compile(r'(\d+)\.(\d+) <\.\.\. (\w+) resumed> .* = <?([
 RE_STRACE_COMPLETE  = re.compile(r"(\d+)\.(\d+) (.*) = (-?<?\w+>?) <(.*)>")
 RE_HSA_OPEN         = re.compile(r"<<hsa-api pid:(\d+) tid:(\d+) (.*) (\(.*\)) @(\d+)")
 RE_HSA_CLOSE        = re.compile(r"  hsa-api pid:(\d+) tid:(\d+) (.*) ret=(.*)>> \+(\d+) ns")
-RE_HSA_DISPATCH     = re.compile(r"<<hsa-api pid:(\d+) tid:(\d+) dispatch queue:(.*) agent:(\d+) name:'(.*)' start:(\d+) stop:(\d+) >>")
+RE_HSA_DISPATCH     = re.compile(r"<<hsa-api pid:(\d+) tid:(\d+) dispatch queue:(.*) agent:(\d+) signal:(\d+) name:'(.*)' start:(\d+) stop:(\d+) >>")
 RE_RCCL_ALLREDUCE   = re.compile(r"(.*):(\d+):(\d+) \[(\d+)\] (\d+) NCCL INFO AllReduce: opCount (.*) sendbuff (.*) recvbuff (.*) count (\d+) datatype (\d+) op (\d+) root 0 comm (.*) \[nranks=(\d+)\] stream (.*)")
 
 count_skipped = 0
@@ -605,7 +605,7 @@ for filename in non_opt_args:
             if match:
                 get_system_ticks()
                 count_hsa_dispatch += 1
-                pid,tid,queue,agent,name,start,stop = match.groups()
+                pid,tid,queue,agent,signal,name,start,stop = match.groups()
                 if agent not in hsa_queues:
                     hsa_queues[agent] = {}
                 if queue not in hsa_queues[agent]:
@@ -712,6 +712,7 @@ out.write("""{}
 print("    total skipped lines: %d"%count_skipped)
 print("         open hsa lines: %d"%count_hsa_open)
 print("        close hsa lines: %d"%count_hsa_close)
+print("     dispatch hsa lines: %d"%count_hsa_dispatch)
 print("       missed hsa lines: %d"%count_hsa_missed)
 print("          tid hip lines: %d"%count_hip_tid)
 print("         open hip lines: %d"%count_hip_open)
