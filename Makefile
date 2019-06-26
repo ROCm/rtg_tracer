@@ -1,7 +1,9 @@
-SUBDIRS := $(wildcard */.)
+all:
+	$(MAKE) -C get_system_ticks
+	$(MAKE) -C hsa_trace
 
-all: $(SUBDIRS)
-$(SUBDIRS):
-	$(MAKE) -C $@
+clean:
+	$(MAKE) -C get_system_ticks clean
+	$(MAKE) -C hsa_trace clean
 
-.PHONY: all $(SUBDIRS)
+.PHONY: all clean
