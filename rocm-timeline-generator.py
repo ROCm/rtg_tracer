@@ -105,6 +105,7 @@ count_hsa_missed = 0
 count_rccl_info_allreduce = 0
 count_rccl_missed = 0
 
+hsa_pids = {}
 hsa_queues = {}
 
 hcc_ts_ref = None
@@ -598,11 +599,13 @@ for filename in non_opt_args:
                     print("HSA event close before HSA init: (%s,%s)"%(pid,tid))
                     sys.exit(1)
                 func_orig,args,ts = hsa_events[(pid,tid)].pop()
+                pid = -int(pid)
+                hsa_pids[pid] = None
                 if not func.startswith(func_orig):
                     print("event mismatch: '%s'.startswith('%s')" % (func,func_orig))
                     sys.exit(1)
-                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":-3000, "tid":%s, "args":{"params":"%s"}},\n'%(
-                    func, ts, ns, tid, args))
+                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%d, "tid":%s, "args":{"params":"%s"}},\n'%(
+                    func, ts, ns, pid, tid, args))
                 continue
 
             match = RE_HSA_DISPATCH.search(line)
@@ -682,8 +685,9 @@ for filename in non_opt_args:
 if count_rccl_info_allreduce > 0:
     out.write('{"name":"process_name", "ph":"M", "pid":-4000, "args":{"name":"RCCL"}},\n')
 
-if count_hsa_close > 0:
-    out.write('{"name":"process_name", "ph":"M", "pid":-3000, "args":{"name":"HSA"}},\n')
+if hsa_pids:
+    for pid in hsa_pids:
+        out.write('{"name":"process_name", "ph":"M", "pid":%d, "args":{"name":"HSA"}},\n'%pid)
 
 if count_hsa_dispatch or count_hsa_barrier or count_hsa_copy:
     for agent in hsa_queues:

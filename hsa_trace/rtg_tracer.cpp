@@ -170,6 +170,12 @@ static inline int pid() {
     return getpid();
 }
 
+static inline std::string pidstr() {
+    std::ostringstream pid_os;
+    pid_os << pid();
+    return pid_os.str();
+}
+
 static inline std::string tid() {
     std::ostringstream tid_os;
     tid_os << std::this_thread::get_id();
@@ -2123,13 +2129,17 @@ extern "C" bool OnLoad(void *pTable,
         uint64_t runtimeVersion, uint64_t failedToolCount,
         const char *const *pFailedToolNames)
 {
-    const char *outname = nullptr;
+    std::string outname("hsa_trace.txt");
+    const char *outname_env = nullptr;
     fprintf(stderr, "RTG HSA Tracer: Loading\n");
-    if ((outname = getenv("RTG_HSA_TRACER_FILENAME")) == nullptr) {
-        outname = "hsa_trace.txt";
+    if ((outname_env = getenv("RTG_HSA_TRACER_FILENAME")) != nullptr) {
+        outname = outname_env;
     }
-    fprintf(stderr, "RTG_HSA_TRACER_FILENAME=%s\n", outname);
-    RTG::stream = fopen(outname, "w");
+    // PID is needed to avoid clashses in multi-process use cases
+    outname += ".";
+    outname += RTG::pidstr();
+    fprintf(stderr, "RTG_HSA_TRACER_FILENAME=%s\n", outname.c_str());
+    RTG::stream = fopen(outname.c_str(), "w");
 
     const char *what_to_trace = nullptr;
     if ((what_to_trace = getenv("RTG_HSA_TRACER_FILTER")) == nullptr) {
