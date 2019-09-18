@@ -87,7 +87,7 @@ count_hcc_prof_ts = 0
 count_hcc_prof_op = 0
 count_hcc_prof = 0
 count_hcc_missed = 0
-hip_pid = 0
+hip_pids = {}
 count_json = 0
 count_json_skipped = 0
 count_gap_duplicate_ts = 0
@@ -107,6 +107,7 @@ count_rccl_missed = 0
 
 hsa_pids = {}
 hsa_queues = {}
+agent_to_pid = {}
 
 hcc_ts_ref = None
 
@@ -364,7 +365,7 @@ for filename in non_opt_args:
             if match:
                 count_hip_tid += 1
                 pid,tid,short_tid,hex_tid = match.groups()
-                hip_pid = pid
+                hip_pids[pid] = None
                 if short_tid in hip_events:
                     print("Duplicate short_tid found in HIP event %s" % short_tid)
                     sys.exit(1)
@@ -613,6 +614,7 @@ for filename in non_opt_args:
                 get_system_ticks()
                 count_hsa_dispatch += 1
                 pid,tid,queue,agent,signal,name,start,stop = match.groups()
+                agent_to_pid[agent] = pid
                 if agent not in hsa_queues:
                     hsa_queues[agent] = {}
                 if queue not in hsa_queues[agent]:
@@ -631,6 +633,7 @@ for filename in non_opt_args:
                 count_hsa_barrier += 1
                 name = 'barrier'
                 pid,tid,queue,agent,signal,start,stop,dep1,dep2,dep3,dep4,dep5 = match.groups()
+                agent_to_pid[agent] = pid
                 if agent not in hsa_queues:
                     hsa_queues[agent] = {}
                 if queue not in hsa_queues[agent]:
@@ -649,6 +652,7 @@ for filename in non_opt_args:
                 count_hsa_copy += 1
                 name = 'copy'
                 pid,tid,agent,signal,start,stop,dep1,dep2,dep3,dep4,dep5 = match.groups()
+                agent_to_pid[agent] = pid
                 if agent not in hsa_queues:
                     hsa_queues[agent] = {}
                 #tid = hsa_queues[agent][queue]
@@ -691,13 +695,14 @@ if hsa_pids:
 
 if count_hsa_dispatch or count_hsa_barrier or count_hsa_copy:
     for agent in hsa_queues:
-        out.write('{"name":"process_name", "ph":"M", "pid":%s, "args":{"name":"HSA Agent %s"}},\n'%(agent,agent))
+        out.write('{"name":"process_name", "ph":"M", "pid":%s, "args":{"name":"HSA Agent for %s"}},\n'%(agent,agent_to_pid[agent]))
 
 if count_strace_resumed + count_strace_complete > 0:
     out.write('{"name":"process_name", "ph":"M", "pid":-2000, "args":{"name":"strace/ltrace"}},\n')
 
-if hip_pid:
-    out.write('{"name":"process_name", "ph":"M", "pid":%s, "args":{"name":"HIP"}},\n'%hip_pid)
+if hip_pids:
+    for pid in hip_pids:
+        out.write('{"name":"process_name", "ph":"M", "pid":%s, "args":{"name":"HIP"}},\n'%pid)
 
 if hip_stream_output:
     for pid in hip_stream_pids:
