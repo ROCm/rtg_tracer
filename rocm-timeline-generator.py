@@ -116,6 +116,9 @@ hcc_ts_ref = None
 # The hipLaunchKernel message should amend the preceeding kernel launch info.
 hip_events = {}
 
+# HIP's hipExtLaunchMultiKernelMultiDevice will nest many calls to hipLaunchKernel
+hip_multikernel = {}
+
 # HSA can nest its calls.
 hsa_events = {}
 
@@ -370,6 +373,7 @@ for filename in non_opt_args:
                     print("Duplicate short_tid found in HIP event %s" % short_tid)
                     sys.exit(1)
                 hip_events[(pid,tid)] = []
+                hip_multikernel[(pid,tid)] = False
                 continue
 
             match = RE_HIP_OPEN.search(line)
@@ -381,18 +385,32 @@ for filename in non_opt_args:
                     sys.exit(1)
                 if msg.startswith('hip'):
                     hip_events[(pid,tid)].append((msg,ts))
+                    if 'hipExtLaunchMultiKernelMultiDevice' in msg:
+                        assert (pid,tid) in hip_multikernel
+                        hip_multikernel[(pid,tid)] = True
                 elif 'hipLaunchKernel' in msg:
-                    # hipLaunchKernel doesn't print a closing HIP event, so
-                    # last item in hip event stack gets an updated msg
+                    # hipLaunchKernel doesn't print a closing HIP event
                     count_hip_open -= 1
-                    old_msg,old_ts = hip_events[(pid,tid)][-1]
-                    if 'LaunchKernel' not in old_msg:
-                        print("hipLaunchKernel didn't nest as expected into '%s'" % old_msg)
-                        sys.exit(1)
-                    hip_api = old_msg.split()[0]
-                    assert hip_api.startswith('hip')
-                    new_msg = " ".join(msg.strip().split()[3:])
-                    hip_events[(pid,tid)][-1] = ("%s %s" % (hip_api,new_msg),old_ts)
+                    # we might be inside a multi-kernel launch block
+                    if hip_multikernel[(pid,tid)]:
+                        msg = " ".join(msg.strip().split()[3:])
+                        msg = "spacer %s" % msg # because kern_to_json expects a bigger string to split
+                        if replace_kernel_launch_with_name:
+                            out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
+                                kern_name(msg), (int(ts)/1000)+hcc_ts_ref, int(ns)/1000, pid, tid, kern_to_json(msg,False)))
+                        else:
+                            out.write('{"name":"hipLaunchKernel", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
+                                (int(ts)/1000)+hcc_ts_ref, int(ns)/1000, pid, tid, kern_to_json(msg)))
+                    else:
+                        # last item in hip event stack gets an updated msg
+                        old_msg,old_ts = hip_events[(pid,tid)][-1]
+                        if 'LaunchKernel' not in old_msg:
+                            print("hipLaunchKernel didn't nest as expected into '%s'" % old_msg)
+                            sys.exit(1)
+                        hip_api = old_msg.split()[0]
+                        assert hip_api.startswith('hip')
+                        new_msg = " ".join(msg.strip().split()[3:])
+                        hip_events[(pid,tid)][-1] = ("%s %s" % (hip_api,new_msg),old_ts)
                 else:
                     print("Unrecognized HIP event message: '%s'" % msg)
                     sys.exit(1)
@@ -412,11 +430,14 @@ for filename in non_opt_args:
                     print("event mismatch: '%s'.startswith('%s')" % (msg,new_msg))
                     print(opnum)
                     sys.exit(1)
+                if 'hipExtLaunchMultiKernelMultiDevice' in msg:
+                    assert (pid,tid) in hip_multikernel
+                    hip_multikernel[(pid,tid)] = False
                 # we treat hipSetDevice special, with its lone device ID argument becoming part of its name
                 # so that the chrome://tracing treats them as distinct boxes
                 if 'hipSetDevice' in msg:
                     new_msg = msg
-                if 'Kernel' in new_msg:
+                if 'Kernel' in new_msg and 'hipExtLaunchMultiKernelMultiDevice' not in new_msg:
                     if replace_kernel_launch_with_name:
                         out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
                             kern_name(msg), (int(ts)/1000)+hcc_ts_ref, int(ns)/1000, pid, tid, kern_to_json(msg,False)))
