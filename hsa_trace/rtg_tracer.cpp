@@ -200,9 +200,9 @@ fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%ld>> +%lu us\n", pid_, tid_.c_s
 #define LOG_VOID_OUT \
 fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=void>> +%lu us\n", pid_, tid_.c_str(),  func.c_str(), ticks);
 #define LOG_DISPATCH \
-fprintf(stream, "<<hsa-api pid:%d tid:%s dispatch queue:%p agent:%lu signal:%lu name:'%s' start:%lu stop:%lu >>\n", pid_, tid_.c_str(), queue_, agent_.handle, signal_.handle, name_, start_, stop_);
+fprintf(stream, "<<hsa-api pid:%d tid:%s dispatch queue:%lu agent:%lu signal:%lu name:'%s' start:%lu stop:%lu >>\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, name_, start_, stop_);
 #define LOG_BARRIER \
-fprintf(stream, "<<hsa-api pid:%d tid:%s barrier queue:%p agent:%lu signal:%lu start:%lu stop:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu >>\n", pid_, tid_.c_str(), queue_, agent_.handle, signal_.handle, start_, stop_, data->dep1, data->dep2, data->dep3, data->dep4, data->dep5);
+fprintf(stream, "<<hsa-api pid:%d tid:%s barrier queue:%lu agent:%lu signal:%lu start:%lu stop:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu >>\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, start_, stop_, data->dep1, data->dep2, data->dep3, data->dep4, data->dep5);
 #define LOG_COPY \
 fprintf(stream, "<<hsa-api pid:%d tid:%s copy agent:%lu signal:%lu start:%lu stop:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu >>\n", pid_, tid_.c_str(), agent_.handle, signal_.handle, start_, stop_, data->dep1, data->dep2, data->dep3, data->dep4, data->dep5);
 #else
@@ -237,7 +237,7 @@ os << "  <<hsa-api" \
     << " pid:" << pid_ \
     << " tid:" << tid_ \
     << " dispatch" \
-    << " queue:'" << queue_ << "'"\
+    << " queue:'" << queue_->id << "'"\
     << " agent:'" << agent_.handle << "'"\
     << " signal:'" << signal_.handle << "'"\
     << " name:'" << name_ << "'"\
@@ -249,7 +249,7 @@ os << "  <<hsa-api" \
     << " pid:" << pid_ \
     << " tid:" << tid_ \
     << " barrier" \
-    << " queue:'" << queue_ << "'"\
+    << " queue:'" << queue_->id << "'"\
     << " agent:'" << agent_.handle << "'"\
     << " signal:'" << signal_.handle << "'"\
     << " start:" << start_ \
