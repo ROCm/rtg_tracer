@@ -107,7 +107,6 @@ count_rccl_missed = 0
 
 hsa_pids = {}
 hsa_queues = {}
-agent_to_pid = {}
 
 hcc_ts_ref = None
 
@@ -321,6 +320,9 @@ def get_system_ticks():
                 print("get_system_ticks returned different offset than user-specified: %s != %s" % (hcc_ts_ref, hcc_ts_ref_user))
                 print("using user-specified value")
             hcc_ts_ref = hcc_ts_ref_user
+
+def hash_pid_agent(pid, agent):
+    return int(agent)/int(pid)
 
 for filename in non_opt_args:
     if not os.path.isfile(filename):
@@ -635,17 +637,18 @@ for filename in non_opt_args:
                 get_system_ticks()
                 count_hsa_dispatch += 1
                 pid,tid,queue,agent,signal,name,start,stop = match.groups()
-                agent_to_pid[agent] = pid
-                if agent not in hsa_queues:
-                    hsa_queues[agent] = {}
-                if queue not in hsa_queues[agent]:
-                    index = len(hsa_queues[agent])
-                    hsa_queues[agent][queue] = index
-                tid = hsa_queues[agent][queue]
+                new_pid = hash_pid_agent(pid,agent)
+                key = (pid,agent)
+                if key not in hsa_queues:
+                    hsa_queues[key] = {}
+                if queue not in hsa_queues[key]:
+                    index = len(hsa_queues[key])
+                    hsa_queues[key][queue] = index
+                tid = hsa_queues[key][queue]
                 ts = (int(start)/1000)+hcc_ts_ref
                 dur = (int(stop)-int(start))/1000
                 out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s},\n'%(
-                    name, ts, dur, agent, tid))
+                    name, ts, dur, new_pid, tid))
                 continue
 
             match = RE_HSA_BARRIER.search(line)
@@ -654,17 +657,18 @@ for filename in non_opt_args:
                 count_hsa_barrier += 1
                 name = 'barrier'
                 pid,tid,queue,agent,signal,start,stop,dep1,dep2,dep3,dep4,dep5 = match.groups()
-                agent_to_pid[agent] = pid
-                if agent not in hsa_queues:
-                    hsa_queues[agent] = {}
-                if queue not in hsa_queues[agent]:
-                    index = len(hsa_queues[agent])
-                    hsa_queues[agent][queue] = index
-                tid = hsa_queues[agent][queue]
+                new_pid = hash_pid_agent(pid,agent)
+                key = (pid,agent)
+                if key not in hsa_queues:
+                    hsa_queues[key] = {}
+                if queue not in hsa_queues[key]:
+                    index = len(hsa_queues[key])
+                    hsa_queues[key][queue] = index
+                tid = hsa_queues[key][queue]
                 ts = (int(start)/1000)+hcc_ts_ref
                 dur = (int(stop)-int(start))/1000
                 out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":{"dep1":"%s","dep2":"%s","dep3":"%s","dep4":"%s","dep5":"%s"}},\n'%(
-                    name, ts, dur, agent, tid, dep1, dep2, dep3, dep4, dep5))
+                    name, ts, dur, new_pid, tid, dep1, dep2, dep3, dep4, dep5))
                 continue
 
             match = RE_HSA_COPY.search(line)
@@ -673,15 +677,16 @@ for filename in non_opt_args:
                 count_hsa_copy += 1
                 name = 'copy'
                 pid,tid,agent,signal,start,stop,dep1,dep2,dep3,dep4,dep5 = match.groups()
-                agent_to_pid[agent] = pid
-                if agent not in hsa_queues:
-                    hsa_queues[agent] = {}
-                #tid = hsa_queues[agent][queue]
+                new_pid = hash_pid_agent(pid,agent)
+                key = (pid,agent)
+                if key not in hsa_queues:
+                    hsa_queues[key] = {}
+                #tid = hsa_queues[key][queue]
                 tid = -1
                 ts = (int(start)/1000)+hcc_ts_ref
                 dur = (int(stop)-int(start))/1000
                 out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":{"dep1":"%s","dep2":"%s","dep3":"%s","dep4":"%s","dep5":"%s"}},\n'%(
-                    name, ts, dur, agent, tid, dep1, dep2, dep3, dep4, dep5))
+                    name, ts, dur, new_pid, tid, dep1, dep2, dep3, dep4, dep5))
                 continue
 
             if 'hsa-api' in line:
@@ -715,8 +720,8 @@ if hsa_pids:
         out.write('{"name":"process_name", "ph":"M", "pid":%d, "args":{"name":"HSA"}},\n'%pid)
 
 if count_hsa_dispatch or count_hsa_barrier or count_hsa_copy:
-    for agent in hsa_queues:
-        out.write('{"name":"process_name", "ph":"M", "pid":%s, "args":{"name":"HSA Agent for %s"}},\n'%(agent,agent_to_pid[agent]))
+    for pid,agent in hsa_queues:
+        out.write('{"name":"process_name", "ph":"M", "pid":%s, "args":{"name":"HSA Agent for pid %s agent %s"}},\n'%(hash_pid_agent(pid,agent),pid,agent))
 
 if count_strace_resumed + count_strace_complete > 0:
     out.write('{"name":"process_name", "ph":"M", "pid":-2000, "args":{"name":"strace/ltrace"}},\n')
