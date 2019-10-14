@@ -190,21 +190,21 @@ static inline suseconds_t tick() {
 
 #if USE_STREAM
 #define TRACE_OUT \
-fprintf(stream, "<<hsa-api pid:%d tid:%s %s %s @%lu\n", pid_, tid_.c_str(), func.c_str(), args.c_str(), tick_);
+fprintf(stream, "<<hsa-api pid:%d tid:%s %s %s @%lu\n", pid_, tid_.c_str(), func.c_str(), args.c_str(), tick_); fflush(stream);
 #define LOG_STATUS_OUT \
-fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%d>> +%lu us\n", pid_, tid_.c_str(),  func.c_str(), localStatus, ticks);
+fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%d>> +%lu us\n", pid_, tid_.c_str(),  func.c_str(), localStatus, ticks); fflush(stream);
 #define LOG_UINT64_OUT \
-fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%lu>> +%lu us\n", pid_, tid_.c_str(),  func.c_str(), localStatus, ticks);
+fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%lu>> +%lu us\n", pid_, tid_.c_str(),  func.c_str(), localStatus, ticks); fflush(stream);
 #define LOG_SIGNAL_OUT \
-fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%ld>> +%lu us\n", pid_, tid_.c_str(),  func.c_str(), localStatus, ticks);
+fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%ld>> +%lu us\n", pid_, tid_.c_str(),  func.c_str(), localStatus, ticks); fflush(stream);
 #define LOG_VOID_OUT \
-fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=void>> +%lu us\n", pid_, tid_.c_str(),  func.c_str(), ticks);
+fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=void>> +%lu us\n", pid_, tid_.c_str(),  func.c_str(), ticks); fflush(stream);
 #define LOG_DISPATCH \
-fprintf(stream, "<<hsa-api pid:%d tid:%s dispatch queue:%lu agent:%lu signal:%lu name:'%s' start:%lu stop:%lu >>\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, name_, start_, stop_);
+fprintf(stream, "<<hsa-api pid:%d tid:%s dispatch queue:%lu agent:%lu signal:%lu name:'%s' start:%lu stop:%lu >>\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, name_, start_, stop_); fflush(stream);
 #define LOG_BARRIER \
-fprintf(stream, "<<hsa-api pid:%d tid:%s barrier queue:%lu agent:%lu signal:%lu start:%lu stop:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu >>\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, start_, stop_, data->dep1, data->dep2, data->dep3, data->dep4, data->dep5);
+fprintf(stream, "<<hsa-api pid:%d tid:%s barrier queue:%lu agent:%lu signal:%lu start:%lu stop:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu >>\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, start_, stop_, data->dep1, data->dep2, data->dep3, data->dep4, data->dep5); fflush(stream);
 #define LOG_COPY \
-fprintf(stream, "<<hsa-api pid:%d tid:%s copy agent:%lu signal:%lu start:%lu stop:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu >>\n", pid_, tid_.c_str(), agent_.handle, signal_.handle, start_, stop_, data->dep1, data->dep2, data->dep3, data->dep4, data->dep5);
+fprintf(stream, "<<hsa-api pid:%d tid:%s copy agent:%lu signal:%lu start:%lu stop:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu >>\n", pid_, tid_.c_str(), agent_.handle, signal_.handle, start_, stop_, data->dep1, data->dep2, data->dep3, data->dep4, data->dep5); fflush(stream);
 #else
 #define TRACE_OUT \
 os << "<<hsa-api" \
