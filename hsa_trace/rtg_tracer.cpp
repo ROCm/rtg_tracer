@@ -192,13 +192,13 @@ static inline suseconds_t tick() {
 #define TRACE_OUT \
 fprintf(stream, "<<hsa-api pid:%d tid:%s %s %s @%lu\n", pid_, tid_.c_str(), func.c_str(), args.c_str(), tick_);
 #define LOG_STATUS_OUT \
-fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%d>> +%lu ns\n", pid_, tid_.c_str(),  func.c_str(), localStatus, ticks);
+fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%d>> +%lu us\n", pid_, tid_.c_str(),  func.c_str(), localStatus, ticks);
 #define LOG_UINT64_OUT \
-fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%lu>> +%lu ns\n", pid_, tid_.c_str(),  func.c_str(), localStatus, ticks);
+fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%lu>> +%lu us\n", pid_, tid_.c_str(),  func.c_str(), localStatus, ticks);
 #define LOG_SIGNAL_OUT \
-fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%ld>> +%lu ns\n", pid_, tid_.c_str(),  func.c_str(), localStatus, ticks);
+fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%ld>> +%lu us\n", pid_, tid_.c_str(),  func.c_str(), localStatus, ticks);
 #define LOG_VOID_OUT \
-fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=void>> +%lu ns\n", pid_, tid_.c_str(),  func.c_str(), ticks);
+fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=void>> +%lu us\n", pid_, tid_.c_str(),  func.c_str(), ticks);
 #define LOG_DISPATCH \
 fprintf(stream, "<<hsa-api pid:%d tid:%s dispatch queue:%p agent:%lu signal:%lu name:'%s' start:%lu stop:%lu >>\n", pid_, tid_.c_str(), queue_, agent_.handle, signal_.handle, name_, start_, stop_);
 #define LOG_BARRIER \
@@ -220,7 +220,7 @@ os << "  hsa-api" \
     << " tid:" << tid_ \
     << " " << func \
     << " ret=" << localStatus \
-    << ">> +" << ticks << " ns" \
+    << ">> +" << ticks << " us" \
     << std::endl;
 #define LOG_UINT64_OUT LOG_STATUS_OUT
 #define LOG_SIGNAL_OUT LOG_STATUS_OUT
@@ -230,7 +230,7 @@ os << "  hsa-api" \
     << " tid:" << tid_ \
     << " " << func \
     << " ret=void" \
-    << ">> +" << ticks << " ns" \
+    << ">> +" << ticks << " us" \
     << std::endl;
 #define LOG_DISPATCH \
 os << "  <<hsa-api" \
