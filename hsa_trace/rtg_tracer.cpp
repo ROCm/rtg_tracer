@@ -43,7 +43,7 @@ static hsa_ven_amd_loader_1_01_pfn_t gs_OrigLoaderExtTable;
 bool enable_profile = true;
 
 // Whether to print when a dispatch is queued.
-bool enable_dispatch_start = false;
+bool enable_dispatch_start = true;
 
 // Output stream for all logging
 static FILE* stream;
@@ -2202,15 +2202,15 @@ extern "C" bool OnLoad(void *pTable,
 
     const char *dispatch_start = nullptr;
     if ((dispatch_start = getenv("RTG_HSA_TRACER_DISPATCH_START")) == nullptr) {
-        dispatch_start = "no";
+        dispatch_start = "yes";
     }
     else if (strlen(dispatch_start) < 1) {
-        dispatch_start = "no";
+        dispatch_start = "yes";
     }
     fprintf(stderr, "RTG_HSA_TRACER_DISPATCH_START=%s\n", dispatch_start);
     char check = *dispatch_start;
-    if (check == 'y' || check == 'Y' || check == '1') {
-        RTG::enable_dispatch_start = true;
+    if (check == 'n' || check == 'N' || check == '0') {
+        RTG::enable_dispatch_start = false;
     }
 
     return RTG::InitHsaTable(reinterpret_cast<HsaApiTable*>(pTable));
