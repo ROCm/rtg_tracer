@@ -71,8 +71,10 @@ RE_STRACE_RESUMED   = re.compile(r'(\d+)\.(\d+) <\.\.\. (\w+) resumed> .* = <?([
 RE_STRACE_COMPLETE  = re.compile(r"(\d+)\.(\d+) (.*) = (-?<?\w+>?) <(.*)>")
 RE_HSA_OPEN         = re.compile(r"<<hsa-api pid:(\d+) tid:(\d+) (.*) (\(.*\)) @(\d+)")
 RE_HSA_CLOSE        = re.compile(r"  hsa-api pid:(\d+) tid:(\d+) (.*) ret=(.*)>> \+(\d+)") # used to capture ' ns' at end, but units were wrong in HSA tracer library
-RE_HSA_DISPATCH     = re.compile(r"<<hsa-api pid:(\d+) tid:(\d+) dispatch queue:(.*) agent:(\d+) signal:(\d+) name:'(.*)' start:(\d+) stop:(\d+) >>")
-RE_HSA_BARRIER      = re.compile(r"<<hsa-api pid:(\d+) tid:(\d+) barrier queue:(.*) agent:(\d+) signal:(\d+) start:(\d+) stop:(\d+) dep1:(\d+) dep2:(\d+) dep3:(\d+) dep4:(\d+) dep5:(\d+) >>")
+RE_HSA_DISPATCH_HOST= re.compile(r"<<hsa-api pid:(\d+) tid:(\d+) dispatch queue:(.*) agent:(\d+) signal:(\d+) name:'(.*)' tick:(\d+) id:(\d+) >>")
+RE_HSA_DISPATCH     = re.compile(r"<<hsa-api pid:(\d+) tid:(\d+) dispatch queue:(.*) agent:(\d+) signal:(\d+) name:'(.*)' start:(\d+) stop:(\d+) id:(\d+) >>")
+RE_HSA_BARRIER_HOST = re.compile(r"<<hsa-api pid:(\d+) tid:(\d+) barrier queue:(.*) agent:(\d+) signal:(\d+) dep1:(\d+) dep2:(\d+) dep3:(\d+) dep4:(\d+) dep5:(\d+) id:(\d+) >>")
+RE_HSA_BARRIER      = re.compile(r"<<hsa-api pid:(\d+) tid:(\d+) barrier queue:(.*) agent:(\d+) signal:(\d+) start:(\d+) stop:(\d+) dep1:(\d+) dep2:(\d+) dep3:(\d+) dep4:(\d+) dep5:(\d+) id:(\d+) >>")
 RE_HSA_COPY         = re.compile(r"<<hsa-api pid:(\d+) tid:(\d+) copy agent:(\d+) signal:(\d+) start:(\d+) stop:(\d+) dep1:(\d+) dep2:(\d+) dep3:(\d+) dep4:(\d+) dep5:(\d+) >>")
 RE_RCCL_ALLREDUCE   = re.compile(r"(.*):(\d+):(\d+) \[(\d+)\] (\d+) NCCL INFO AllReduce: opCount (.*) sendbuff (.*) recvbuff (.*) count (\d+) datatype (\d+) op (\d+) root 0 comm (.*) \[nranks=(\d+)\] stream (.*)")
 
@@ -98,7 +100,9 @@ count_strace_resumed = 0
 count_strace_complete = 0
 count_hsa_open = 0
 count_hsa_close = 0
+count_hsa_dispatch_host = 0
 count_hsa_dispatch = 0
+count_hsa_barrier_host = 0
 count_hsa_barrier = 0
 count_hsa_copy = 0
 count_hsa_missed = 0
@@ -157,19 +161,22 @@ arguments:
     sys.exit(0)
 
 try:
-    opts,non_opt_args = getopt.gnu_getopt(sys.argv[1:], "ghko:t:v")
+    opts,non_opt_args = getopt.gnu_getopt(sys.argv[1:], "fghko:t:v")
     output_filename = None
     show_gaps = False
+    show_flow = False
     verbose = False
     for o,a in opts:
-        if o == "-g":
+        if o == "-f":
+            show_flow = True
+        elif o == "-g":
             show_gaps = True
         elif o == "-h":
             print_help()
-        elif o == "-o":
-            output_filename = a
         elif o == "-k":
             replace_kernel_launch_with_name = True
+        elif o == "-o":
+            output_filename = a
         elif o == "-s":
             hip_stream_output = True
         elif o == "-t":
@@ -632,11 +639,31 @@ for filename in non_opt_args:
                     func, ts, ns, pid, tid, args))
                 continue
 
+            match = RE_HSA_DISPATCH_HOST.search(line)
+            if match:
+                get_system_ticks()
+                count_hsa_dispatch_host += 1
+                pid,tid,queue,agent,signal,name,tick,did = match.groups()
+                key = (pid,agent)
+                if key not in hsa_queues:
+                    hsa_queues[key] = {}
+                if queue not in hsa_queues[key]:
+                    index = len(hsa_queues[key])
+                    hsa_queues[key][queue] = index
+                tid = hsa_queues[key][queue]
+                pid = -int(pid)
+                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":1, "pid":%s, "tid":%s},\n'%(
+                    name, ts, pid, tid))
+                if show_flow:
+                    out.write('{"name":"%s", "cat":"dispatch", "ph":"s", "ts":%s, "pid":%s, "tid":%s, "id":%s},\n'%(
+                        name, ts, pid, tid, did))
+                continue
+
             match = RE_HSA_DISPATCH.search(line)
             if match:
                 get_system_ticks()
                 count_hsa_dispatch += 1
-                pid,tid,queue,agent,signal,name,start,stop = match.groups()
+                pid,tid,queue,agent,signal,name,start,stop,did = match.groups()
                 new_pid = hash_pid_agent(pid,agent)
                 key = (pid,agent)
                 if key not in hsa_queues:
@@ -649,6 +676,30 @@ for filename in non_opt_args:
                 dur = (int(stop)-int(start))/1000
                 out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s},\n'%(
                     name, ts, dur, new_pid, tid))
+                if show_flow:
+                    out.write('{"name":"%s", "cat":"dispatch", "ph":"f", "ts":%s, "pid":%s, "tid":%s, "id":%s},\n'%(
+                        name, ts, new_pid, tid, did))
+                continue
+
+            match = RE_HSA_BARRIER_HOST.search(line)
+            if match:
+                get_system_ticks()
+                count_hsa_barrier_host += 1
+                name = 'barrier'
+                pid,tid,queue,agent,signal,dep1,dep2,dep3,dep4,dep5,did = match.groups()
+                key = (pid,agent)
+                if key not in hsa_queues:
+                    hsa_queues[key] = {}
+                if queue not in hsa_queues[key]:
+                    index = len(hsa_queues[key])
+                    hsa_queues[key][queue] = index
+                tid = hsa_queues[key][queue]
+                pid = -int(pid)
+                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":1, "pid":%s, "tid":%s, "args":{"dep1":"%s","dep2":"%s","dep3":"%s","dep4":"%s","dep5":"%s"}},\n'%(
+                    name, ts, pid, tid, dep1, dep2, dep3, dep4, dep5))
+                if show_flow:
+                    out.write('{"name":"%s", "cat":"barrier", "ph":"s", "ts":%s, "pid":%s, "tid":%s, "id":%s},\n'%(
+                        name, ts, pid, tid, did))
                 continue
 
             match = RE_HSA_BARRIER.search(line)
@@ -656,7 +707,7 @@ for filename in non_opt_args:
                 get_system_ticks()
                 count_hsa_barrier += 1
                 name = 'barrier'
-                pid,tid,queue,agent,signal,start,stop,dep1,dep2,dep3,dep4,dep5 = match.groups()
+                pid,tid,queue,agent,signal,start,stop,dep1,dep2,dep3,dep4,dep5,did = match.groups()
                 new_pid = hash_pid_agent(pid,agent)
                 key = (pid,agent)
                 if key not in hsa_queues:
@@ -669,6 +720,9 @@ for filename in non_opt_args:
                 dur = (int(stop)-int(start))/1000
                 out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":{"dep1":"%s","dep2":"%s","dep3":"%s","dep4":"%s","dep5":"%s"}},\n'%(
                     name, ts, dur, new_pid, tid, dep1, dep2, dep3, dep4, dep5))
+                if show_flow:
+                    out.write('{"name":"%s", "cat":"barrier", "ph":"f", "ts":%s, "pid":%s, "tid":%s, "id":%s},\n'%(
+                        name, ts, new_pid, tid, did))
                 continue
 
             match = RE_HSA_COPY.search(line)
@@ -789,7 +843,9 @@ out.write("""{}
 print("    total skipped lines: %d"%count_skipped)
 print("         open hsa lines: %d"%count_hsa_open)
 print("        close hsa lines: %d"%count_hsa_close)
+print("host dispatch hsa lines: %d"%count_hsa_dispatch_host)
 print("     dispatch hsa lines: %d"%count_hsa_dispatch)
+print(" host barrier hsa lines: %d"%count_hsa_barrier_host)
 print("      barrier hsa lines: %d"%count_hsa_barrier)
 print("         copy hsa lines: %d"%count_hsa_copy)
 print("       missed hsa lines: %d"%count_hsa_missed)

@@ -42,6 +42,9 @@ static hsa_ven_amd_loader_1_01_pfn_t gs_OrigLoaderExtTable;
 // Whether to enable queue profile tracing.
 bool enable_profile = true;
 
+// Whether to print when a dispatch is queued.
+bool enable_dispatch_start = false;
+
 // Output stream for all logging
 static FILE* stream;
 static std::ostringstream os;
@@ -182,10 +185,23 @@ static inline std::string tid() {
     return tid_os.str();
 }
 
+#if 0
 static inline suseconds_t tick() {
     struct timeval tv;
     gettimeofday(&tv, nullptr);
     return tv.tv_sec * 1e6 + tv.tv_usec;
+}
+#else
+static inline uint64_t tick() {
+    using namespace std::chrono;
+    return high_resolution_clock::now().time_since_epoch() / microseconds(1);
+}
+#endif
+
+// dispatch ID
+static inline unsigned long did() {
+    static unsigned long id = 0;
+    return id++;
 }
 
 #if USE_STREAM
@@ -199,10 +215,14 @@ fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%lu>> +%lu us\n", pid_, tid_.c_s
 fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%ld>> +%lu us\n", pid_, tid_.c_str(),  func.c_str(), localStatus, ticks); fflush(stream);
 #define LOG_VOID_OUT \
 fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=void>> +%lu us\n", pid_, tid_.c_str(),  func.c_str(), ticks); fflush(stream);
+#define LOG_DISPATCH_BEGIN \
+fprintf(stream, "<<hsa-api pid:%d tid:%s dispatch queue:%lu agent:%lu signal:%lu name:'%s' tick:%lu id:%lu >>\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, name_, tick_, id_);
 #define LOG_DISPATCH \
-fprintf(stream, "<<hsa-api pid:%d tid:%s dispatch queue:%lu agent:%lu signal:%lu name:'%s' start:%lu stop:%lu >>\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, name_, start_, stop_); fflush(stream);
+fprintf(stream, "<<hsa-api pid:%d tid:%s dispatch queue:%lu agent:%lu signal:%lu name:'%s' start:%lu stop:%lu id:%lu >>\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, name_, start_, stop_, id_); fflush(stream);
+#define LOG_BARRIER_BEGIN \
+fprintf(stream, "<<hsa-api pid:%d tid:%s barrier queue:%lu agent:%lu signal:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu id:%lu >>\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, dep1, dep2, dep3, dep4, dep5, id_); fflush(stream);
 #define LOG_BARRIER \
-fprintf(stream, "<<hsa-api pid:%d tid:%s barrier queue:%lu agent:%lu signal:%lu start:%lu stop:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu >>\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, start_, stop_, data->dep1, data->dep2, data->dep3, data->dep4, data->dep5); fflush(stream);
+fprintf(stream, "<<hsa-api pid:%d tid:%s barrier queue:%lu agent:%lu signal:%lu start:%lu stop:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu id:%lu >>\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, start_, stop_, data->dep1, data->dep2, data->dep3, data->dep4, data->dep5, data->id_); fflush(stream);
 #define LOG_COPY \
 fprintf(stream, "<<hsa-api pid:%d tid:%s copy agent:%lu signal:%lu start:%lu stop:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu >>\n", pid_, tid_.c_str(), agent_.handle, signal_.handle, start_, stop_, data->dep1, data->dep2, data->dep3, data->dep4, data->dep5); fflush(stream);
 #else
@@ -347,8 +367,19 @@ struct SignalCallbackData
 {
     SignalCallbackData(char *name, hsa_queue_t* queue, hsa_agent_t agent, hsa_signal_t signal, bool owns_signal)
         : name(name), queue(queue), agent(agent), signal(signal), owns_signal(owns_signal),
-            is_copy(false), is_barrier(false), dep1(0), dep2(0), dep3(0), dep4(0), dep5(0)
-    {}
+            is_copy(false), is_barrier(false), dep1(0), dep2(0), dep3(0), dep4(0), dep5(0), id_(did())
+    {
+        if (RTG::enable_dispatch_start) {
+            long unsigned tick_ = tick();
+            int pid_ = pid();
+            std::string tid_ = tid();
+            char *name_ = name;
+            hsa_agent_t agent_ = agent;
+            hsa_queue_t* queue_ = queue;
+            hsa_signal_t signal_ = signal;
+            LOG_DISPATCH_BEGIN
+        }
+    }
 
     SignalCallbackData(hsa_agent_t agent, hsa_signal_t signal, uint32_t num_dep_signals, const hsa_signal_t* dep_signals)
         : name(nullptr), queue(nullptr), agent(agent), signal(signal), owns_signal(false),
@@ -369,8 +400,20 @@ struct SignalCallbackData
             dep2(packet->dep_signal[1].handle),
             dep3(packet->dep_signal[2].handle),
             dep4(packet->dep_signal[3].handle),
-            dep5(packet->dep_signal[4].handle)
-    {}
+            dep5(packet->dep_signal[4].handle),
+            id_(did())
+    {
+        if (RTG::enable_dispatch_start) {
+            long unsigned tick_ = tick();
+            int pid_ = pid();
+            std::string tid_ = tid();
+            const char *name_ = "barrier";
+            hsa_agent_t agent_ = agent;
+            hsa_queue_t* queue_ = queue;
+            hsa_signal_t signal_ = signal;
+            LOG_BARRIER_BEGIN
+        }
+    }
 
     bool compute_profile() {
         hsa_status_t status;
@@ -417,6 +460,7 @@ struct SignalCallbackData
     long unsigned dep5;
     long unsigned start;
     long unsigned stop;
+    long unsigned id_;
 };
 
 static bool signal_callback(hsa_signal_value_t value, void* arg)
@@ -440,6 +484,7 @@ static bool signal_callback(hsa_signal_value_t value, void* arg)
                 LOG_COPY
             }
             else {
+                long unsigned id_ = data->id_;
                 LOG_DISPATCH
                 std::free(name_);
             }
@@ -2154,6 +2199,19 @@ extern "C" bool OnLoad(void *pTable,
     }
     fprintf(stderr, "RTG_HSA_TRACER_PROFILE=%s\n", profile);
     RTG::enable_profile = (std::string(profile) == "yes");
+
+    const char *dispatch_start = nullptr;
+    if ((dispatch_start = getenv("RTG_HSA_TRACER_DISPATCH_START")) == nullptr) {
+        dispatch_start = "no";
+    }
+    else if (strlen(dispatch_start) < 1) {
+        dispatch_start = "no";
+    }
+    fprintf(stderr, "RTG_HSA_TRACER_DISPATCH_START=%s\n", dispatch_start);
+    char check = *dispatch_start;
+    if (check == 'y' || check == 'Y' || check == '1') {
+        RTG::enable_dispatch_start = true;
+    }
 
     return RTG::InitHsaTable(reinterpret_cast<HsaApiTable*>(pTable));
 }
