@@ -40,12 +40,12 @@ def crappyhist(a, bins=50, width=140):
             width=width))
     print('{:12.5f}  |'.format(b[bins]))
 
-use_streaming_parser = False
+use_streaming_parser = True
 if len(sys.argv) < 2:
     print("missing filename")
     sys.exit(1)
 if len(sys.argv) > 2:
-    use_streaming_parser = True
+    use_streaming_parser = False
 filename = sys.argv[1]
 
 # things we might need later
