@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <iostream>
 #include <iomanip>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -71,6 +72,16 @@ static void InitEnabledTable(std::string what_to_trace);
 static void InitEnabledTableCore(bool value);
 static void InitEnabledTableExtApi(bool value);
 static inline bool enabled_check(std::string func);
+
+// Executables loading tracking
+//typedef std::recursive_mutex mutex_t;
+typedef std::mutex mutex_t;
+static mutex_t mutex_;
+typedef std::unordered_map<uint64_t, const char*> symbols_map_t;
+static symbols_map_t* symbols_map_;
+static const char* GetKernelNameRef(uint64_t addr);
+static hsa_status_t hsa_executable_freeze_interceptor(hsa_executable_t executable, const char *options);
+static hsa_status_t executable_symbols_cb(hsa_executable_t exec, hsa_executable_symbol_t symbol, void *data);
 
 // Helper functions to convert function arguments into strings.
 // Handles POD data types as well as enumerations.
@@ -365,7 +376,7 @@ os << "  <<hsa-api" \
 
 struct SignalCallbackData
 {
-    SignalCallbackData(char *name, hsa_queue_t* queue, hsa_agent_t agent, hsa_signal_t signal, bool owns_signal)
+    SignalCallbackData(const char *name, hsa_queue_t* queue, hsa_agent_t agent, hsa_signal_t signal, bool owns_signal)
         : name(name), queue(queue), agent(agent), signal(signal), owns_signal(owns_signal),
             is_copy(false), is_barrier(false), dep1(0), dep2(0), dep3(0), dep4(0), dep5(0), id_(did())
     {
@@ -373,7 +384,7 @@ struct SignalCallbackData
             long unsigned tick_ = tick();
             int pid_ = pid();
             std::string tid_ = tid();
-            char *name_ = name;
+            const char *name_ = name;
             hsa_agent_t agent_ = agent;
             hsa_queue_t* queue_ = queue;
             hsa_signal_t signal_ = signal;
@@ -446,7 +457,7 @@ struct SignalCallbackData
         return true;
     }
 
-    char *name;
+    const char *name;
     hsa_queue_t* queue;
     hsa_agent_t agent;
     hsa_signal_t signal;
@@ -473,7 +484,7 @@ static bool signal_callback(hsa_signal_value_t value, void* arg)
             long unsigned stop_ = data->stop;
             int pid_ = pid();
             std::string tid_ = tid();
-            char *name_ = data->name;
+            const char *name_ = data->name;
             hsa_agent_t agent_ = data->agent;
             hsa_queue_t* queue_ = data->queue;
             hsa_signal_t signal_ = data->signal;
@@ -486,7 +497,6 @@ static bool signal_callback(hsa_signal_value_t value, void* arg)
             else {
                 long unsigned id_ = data->id_;
                 LOG_DISPATCH
-                std::free(name_);
             }
         }
         // we created the signal, we must free
@@ -659,7 +669,9 @@ hsa_status_t hsa_queue_create(hsa_agent_t agent, uint32_t size, hsa_queue_type32
         InterceptCallbackData *data = new InterceptCallbackData(*queue, agent);
         status = gs_OrigExtApiTable.hsa_amd_queue_intercept_register_fn(
                 *queue, intercept_callback, data);
-        return status;
+        // print as usual
+        TRACE(agent, size, type, callback, data, private_segment_size, group_segment_size, queue);
+        return LOG_STATUS(status);
     }
     else {
         // print as usual
@@ -1163,7 +1175,12 @@ hsa_status_t hsa_executable_load_agent_code_object(hsa_executable_t executable, 
 
 hsa_status_t hsa_executable_freeze(hsa_executable_t executable, const char *options) {
     TRACE(executable, options);
-    return LOG_STATUS(gs_OrigCoreApiTable.hsa_executable_freeze_fn(executable, options));
+    if (enable_profile) {
+        return LOG_STATUS(hsa_executable_freeze_interceptor(executable, options));
+    }
+    else {
+        return LOG_STATUS(gs_OrigCoreApiTable.hsa_executable_freeze_fn(executable, options));
+    }
 }
 
 hsa_status_t hsa_executable_get_info(hsa_executable_t executable, hsa_executable_info_t attribute, void *value) {
@@ -1508,13 +1525,10 @@ hsa_status_t hsa_amd_memory_async_copy(void* dst, hsa_agent_t dst_agent, const v
                 fprintf(stderr, "RTG HSA Tracer: hsa_amd_signal_async_handler_fn failed in hsa_amd_memory_async_copy\n");
             }
         }
-        return gs_OrigExtApiTable.hsa_amd_memory_async_copy_fn(dst, dst_agent, src, src_agent, size, num_dep_signals, dep_signals, completion_signal);
     }
-    else {
-        // print as usual
-        TRACE(dst, dst_agent, src, src_agent, size, num_dep_signals, dep_signals, completion_signal);
-        return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_memory_async_copy_fn(dst, dst_agent, src, src_agent, size, num_dep_signals, dep_signals, completion_signal));
-    }
+    // print as usual
+    TRACE(dst, dst_agent, src, src_agent, size, num_dep_signals, dep_signals, completion_signal);
+    return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_memory_async_copy_fn(dst, dst_agent, src, src_agent, size, num_dep_signals, dep_signals, completion_signal));
 }
 
 // Mirrors Amd Extension Apis
@@ -1533,11 +1547,9 @@ hsa_status_t hsa_amd_memory_async_copy_rect(const hsa_pitched_ptr_t* dst, const 
         }
         return gs_OrigExtApiTable.hsa_amd_memory_async_copy_rect_fn(dst, dst_offset, src, src_offset, range, copy_agent, dir, num_dep_signals, dep_signals, completion_signal);
     }
-    else {
-        // print as usual
-        TRACE(dst, dst_offset, src, src_offset, range, copy_agent, dir, num_dep_signals, dep_signals, completion_signal);
-        return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_memory_async_copy_rect_fn(dst, dst_offset, src, src_offset, range, copy_agent, dir, num_dep_signals, dep_signals, completion_signal));
-    }
+    // print as usual
+    TRACE(dst, dst_offset, src, src_offset, range, copy_agent, dir, num_dep_signals, dep_signals, completion_signal);
+    return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_memory_async_copy_rect_fn(dst, dst_offset, src, src_offset, range, copy_agent, dir, num_dep_signals, dep_signals, completion_signal));
 }
 
 // Mirrors Amd Extension Apis
@@ -2001,64 +2013,84 @@ typedef uint64_t timestamp_t;
 static const packet_word_t header_type_mask = (1ul << HSA_PACKET_HEADER_WIDTH_TYPE) - 1;
 static const char* kernel_none_;
 
-static inline hsa_packet_type_t GetHeaderType(const packet_t* packet) {
-	const packet_word_t* header = reinterpret_cast<const packet_word_t*>(packet);
-	return static_cast<hsa_packet_type_t>((*header >> HSA_PACKET_HEADER_TYPE) & header_type_mask);
+#define CHECK_STATUS(msg, status) do {  \
+    if (status != HSA_STATUS_SUCCESS) { \
+        fprintf(stderr, msg);           \
+        abort();                        \
+    }                                   \
+} while (false)
+
+static hsa_status_t executable_symbols_cb(hsa_executable_t exec, hsa_executable_symbol_t symbol, void *data) {
+    hsa_symbol_kind_t value = (hsa_symbol_kind_t)0;
+    hsa_status_t status = gs_OrigCoreApiTable.hsa_executable_symbol_get_info_fn(symbol, HSA_EXECUTABLE_SYMBOL_INFO_TYPE, &value);
+    CHECK_STATUS("Error in getting symbol info", status);
+    if (value == HSA_SYMBOL_KIND_KERNEL) {
+        uint64_t addr = 0;
+        uint32_t len = 0;
+        status = gs_OrigCoreApiTable.hsa_executable_symbol_get_info_fn(symbol, HSA_EXECUTABLE_SYMBOL_INFO_KERNEL_OBJECT, &addr);
+        CHECK_STATUS("Error in getting kernel object", status);
+        status = gs_OrigCoreApiTable.hsa_executable_symbol_get_info_fn(symbol, HSA_EXECUTABLE_SYMBOL_INFO_NAME_LENGTH, &len);
+        CHECK_STATUS("Error in getting name len", status);
+        char *name = new char[len + 1];
+        status = gs_OrigCoreApiTable.hsa_executable_symbol_get_info_fn(symbol, HSA_EXECUTABLE_SYMBOL_INFO_NAME, name);
+        CHECK_STATUS("Error in getting kernel name", status);
+        name[len] = 0;
+        auto ret = symbols_map_->insert({addr, name});
+        if (ret.second == false) {
+            delete[] ret.first->second;
+            ret.first->second = name;
+        }
+    }
+    return HSA_STATUS_SUCCESS;
 }
 
-static inline const amd_kernel_code_t* GetKernelCode(
-        const hsa_kernel_dispatch_packet_t* dispatch_packet)
-{
+static hsa_status_t hsa_executable_freeze_interceptor(hsa_executable_t executable, const char *options) {
+    std::lock_guard<mutex_t> lck(mutex_);
+    if (symbols_map_ == NULL) symbols_map_ = new symbols_map_t;
+    hsa_status_t status = gs_OrigCoreApiTable.hsa_executable_iterate_symbols_fn(executable, executable_symbols_cb, NULL);
+    CHECK_STATUS("Error in iterating executable symbols", status);
+    return gs_OrigCoreApiTable.hsa_executable_freeze_fn(executable, options);
+}
+
+static inline hsa_packet_type_t GetHeaderType(const packet_t* packet) {
+    const packet_word_t* header = reinterpret_cast<const packet_word_t*>(packet);
+    return static_cast<hsa_packet_type_t>((*header >> HSA_PACKET_HEADER_TYPE) & header_type_mask);
+}
+
+static inline const amd_kernel_code_t* GetKernelCode(uint64_t kernel_object) {
     const amd_kernel_code_t* kernel_code = NULL;
     hsa_status_t status =
         gs_OrigLoaderExtTable.hsa_ven_amd_loader_query_host_address(
-                reinterpret_cast<const void*>(dispatch_packet->kernel_object),
+                reinterpret_cast<const void*>(kernel_object),
                 reinterpret_cast<const void**>(&kernel_code));
     if (HSA_STATUS_SUCCESS != status) {
-        kernel_code = reinterpret_cast<amd_kernel_code_t*>(dispatch_packet->kernel_object);
+        kernel_code = reinterpret_cast<amd_kernel_code_t*>(kernel_object);
     }
     return kernel_code;
 }
 
-static inline char* GetKernelName(const uint64_t kernel_symbol) {
-    amd_runtime_loader_debug_info_t* dbg_info =
-        reinterpret_cast<amd_runtime_loader_debug_info_t*>(kernel_symbol);
-    const char* kernel_name = (dbg_info != NULL) ? dbg_info->kernel_name : NULL;
-
-    // Kernel name is mangled name
-    // apply __cxa_demangle() to demangle it
-    char* funcname = NULL;
-    if (kernel_name != NULL) {
-        size_t funcnamesize = 0;
-        int status;
-        char* ret = abi::__cxa_demangle(kernel_name, NULL, &funcnamesize, &status);
-        funcname = (ret != 0) ? ret : strdup(kernel_name);
+static inline const char* GetKernelNameRef(uint64_t addr) {
+    std::lock_guard<mutex_t> lck(mutex_);
+    const auto it = symbols_map_->find(addr);
+    if (it == symbols_map_->end()) {
+        fprintf(stderr, "RTG HSA Tracer: kernel addr (0x%lx) is not found\n", addr);
+        abort();
     }
-    if (funcname == NULL) funcname = strdup(kernel_none_);
-
-    return funcname;
+    return it->second;
 }
 
-#if 0
-static void submit(hsa_queue_t *queue, const void* packet) {
-    // write packet
-    const hsa_kernel_dispatch_packet_t* aql = reinterpret_cast<const hsa_kernel_dispatch_packet_t*>(packet);
-    uint32_t queueMask = queue->size - 1;
-    uint64_t index = gs_OrigCoreApiTable.hsa_queue_add_write_index_relaxed_fn(queue, 1);
-    if (index-gs_OrigCoreApiTable.hsa_queue_load_read_index_scacquire_fn(queue) >= queue->size) {
-        fprintf(stderr, "RTG HSA Tracer: command queue overflow\n");
-        return;
-    }
-    hsa_kernel_dispatch_packet_t* q_aql = 
-        &(((hsa_kernel_dispatch_packet_t*)(queue->base_address))[index & queueMask]);
-    // Copy mostly finished AQL packet into the queue
-    *q_aql = *aql;
-    // Lastly copy in the header
-    q_aql->header = aql->header;
-    // ring doorbell
-    gs_OrigCoreApiTable.hsa_signal_store_relaxed_fn(queue->doorbell_signal, index);
+// Demangle C++ symbol name
+static const char* cpp_demangle(const char* symname) {
+    size_t size = 0;
+    int status;
+    const char* ret = abi::__cxa_demangle(symname, NULL, &size, &status);
+    return (ret != 0) ? ret : strdup(symname);
 }
-#endif
+
+static const char* QueryKernelName(uint64_t kernel_object, const amd_kernel_code_t* kernel_code) {
+    const char* kernel_symname = GetKernelNameRef(kernel_object);
+    return cpp_demangle(kernel_symname);
+}
 
 static void intercept_callback(
         const void* in_packets, uint64_t count,
@@ -2083,9 +2115,10 @@ static void intercept_callback(
                 reinterpret_cast<const hsa_kernel_dispatch_packet_t*>(packet);
             const hsa_signal_t completion_signal = dispatch_packet->completion_signal;
 
-            const amd_kernel_code_t* kernel_code = GetKernelCode(dispatch_packet);
+            uint64_t kernel_object = dispatch_packet->kernel_object;
+            const amd_kernel_code_t* kernel_code = GetKernelCode(kernel_object);
             const uint64_t kernel_symbol = kernel_code->runtime_loader_kernel_symbol;
-            char* kernel_name = GetKernelName(kernel_symbol);
+            const char* kernel_name = QueryKernelName(kernel_object, kernel_code);
 
             // If dispatch packet does not have signal, allocate one.
             if (dispatch_packet->completion_signal.handle == 0) {
