@@ -203,12 +203,18 @@ static inline suseconds_t tick() {
     gettimeofday(&tv, nullptr);
     return tv.tv_sec * 1e6 + tv.tv_usec;
 }
-#else
+#endif
+#if 0
 static inline uint64_t tick() {
     using namespace std::chrono;
     return high_resolution_clock::now().time_since_epoch() / microseconds(1);
 }
 #endif
+uint64_t tick() {
+    struct timespec tp;
+    ::clock_gettime(CLOCK_MONOTONIC, &tp);
+    return (uint64_t)tp.tv_sec * (1000ULL * 1000ULL * 1000ULL) + (uint64_t)tp.tv_nsec;
+}
 
 // dispatch ID
 static inline unsigned long did() {

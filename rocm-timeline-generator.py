@@ -125,8 +125,6 @@ count_rccl_missed = 0
 hsa_pids = {}
 hsa_queues = {}
 
-hcc_ts_ref = None
-
 # HIP can nest its calls, so the opnum is not reliable (bug in HIP trace).
 # Also, hipLaunchKernel is printed without a closing HIP print.
 # The hipLaunchKernel message should amend the preceeding kernel launch info.
@@ -152,9 +150,6 @@ devices = {}
 # Per device HCC timestamps, for gap analysis
 gaps = {}
 gap_names = {}
-
-# if get_system_ticks fails to compile, or user knows that the offset should be
-hcc_ts_ref_user = None
 
 # strace/ltrace need to track unfinished calls by name
 strace_unfinished = {}
@@ -200,8 +195,6 @@ try:
             output_filename = a
         elif o == "-s":
             hip_stream_output = True
-        elif o == "-t":
-            hcc_ts_ref_user = int(a)
         elif o == "-v":
             verbose = True
         else:
@@ -297,58 +290,6 @@ def hip_get_stream(full_string):
     hip_stream_pids[fake_pid] = device
     return fake_pid,fake_tid
 
-def get_system_ticks():
-    global hcc_ts_ref
-    if hcc_ts_ref is None:
-        print("HCC to Unix timestamp reference not found prior to first attempt to output HCC event")
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "get_system_ticks")
-        if not os.path.exists(os.path.join(path, "get_system_ticks")):
-            print("attempting to compile get_system_ticks program")
-            print("cd '%s'; make clean all" % path)
-            make_process = subprocess.Popen("make clean all", shell=True, cwd=path)
-            if make_process.wait() != 0:
-                print("failed to compile get_system_ticks")
-                if hcc_ts_ref_user is None:
-                    sys.exit(2) # no alternative way to specify offset
-                else:
-                    print("this is okay since hcc timestamp reference was specified manually")
-                    hcc_ts_ref = hcc_ts_ref_user
-                    return
-            else:
-                print("done")
-        print("attempting to run get_system_ticks program")
-        ticks_process = subprocess.Popen("./get_system_ticks", shell=True, cwd=path, stdout=subprocess.PIPE)
-        if ticks_process.wait() != 0:
-            print("failed to run get_system_ticks program")
-            print(path)
-            if hcc_ts_ref_user is None:
-                sys.exit(2)
-            else:
-                print("this is okay since hcc timestamp reference was specified manually")
-                hcc_ts_ref = hcc_ts_ref_user
-                return
-        else:
-            print("done")
-        try:
-            output = ticks_process.stdout.readlines()
-            offset = output[2].split()[1]
-            out.write("\n")
-            hcc_ts_ref = int(offset)
-        except:
-            print("Failed to parse output of get_system_ticks:")
-            for line in output: print(line)
-            if hcc_ts_ref_user is None:
-                sys.exit(2)
-            else:
-                print("this is okay since hcc timestamp reference was specified manually")
-                hcc_ts_ref = hcc_ts_ref_user
-                return
-        if hcc_ts_ref_user is not None:
-            if hcc_ts_ref != hcc_ts_ref_user:
-                print("get_system_ticks returned different offset than user-specified: %s != %s" % (hcc_ts_ref, hcc_ts_ref_user))
-                print("using user-specified value")
-            hcc_ts_ref = hcc_ts_ref_user
-
 def hash_pid_agent(pid, agent):
     return int(agent)/int(pid)
 
@@ -388,12 +329,6 @@ for filename in non_opt_args:
         for line in input_file:
             match = None
 
-            match = RE_HCC_TS_REF.search(line)
-            if match:
-                unix_ts,gpu_ts = match.groups()
-                hcc_ts_ref = int(unix_ts) - (int(gpu_ts)/1000)
-                print("hcc_ts_ref=%d" % hcc_ts_ref)
-
             match = RE_HIP_TID.search(line)
             if match:
                 count_hip_tid += 1
@@ -427,10 +362,10 @@ for filename in non_opt_args:
                         msg = "spacer %s" % msg # because kern_to_json expects a bigger string to split
                         if replace_kernel_launch_with_name:
                             out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
-                                kern_name(msg), (int(ts)/1000)+hcc_ts_ref, int(ns)/1000, pid, tid, kern_to_json(msg,False)))
+                                kern_name(msg), (int(ts)/1000), int(ns)/1000, pid, tid, kern_to_json(msg,False)))
                         else:
                             out.write('{"name":"hipLaunchKernel", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
-                                (int(ts)/1000)+hcc_ts_ref, int(ns)/1000, pid, tid, kern_to_json(msg)))
+                                (int(ts)/1000), int(ns)/1000, pid, tid, kern_to_json(msg)))
                     else:
                         # last item in hip event stack gets an updated msg
                         old_msg,old_ts = hip_events[(pid,tid)][-1]
@@ -448,7 +383,6 @@ for filename in non_opt_args:
 
             match = RE_HIP_CLOSE.search(line)
             if match:
-                get_system_ticks()
                 count_hip_close += 1
                 pid,tid,opnum,new_msg,retcode,retstr,ns = match.groups()
                 if (pid,tid) not in hip_events:
@@ -470,13 +404,13 @@ for filename in non_opt_args:
                 if 'Kernel' in new_msg and 'hipExtLaunchMultiKernelMultiDevice' not in new_msg:
                     if replace_kernel_launch_with_name:
                         out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
-                            kern_name(msg), (int(ts)/1000)+hcc_ts_ref, int(ns)/1000, pid, tid, kern_to_json(msg,False)))
+                            kern_name(msg), (int(ts)/1000), int(ns)/1000, pid, tid, kern_to_json(msg,False)))
                     else:
                         out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
-                            new_msg, (int(ts)/1000)+hcc_ts_ref, int(ns)/1000, pid, tid, kern_to_json(msg)))
+                            new_msg, (int(ts)/1000), int(ns)/1000, pid, tid, kern_to_json(msg)))
                 else:
                     out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
-                        new_msg, (int(ts)/1000)+hcc_ts_ref, int(ns)/1000, pid, tid, hip_args_to_json(msg)))
+                        new_msg, (int(ts)/1000), int(ns)/1000, pid, tid, hip_args_to_json(msg)))
                 # If the stream argument is available, we create a new group based on stream ID.
                 # This group will contain duplicates of HIP events, but organized as streams.
                 if hip_stream_output and 'stream:' in msg:
@@ -484,20 +418,19 @@ for filename in non_opt_args:
                     if 'Kernel' in new_msg:
                         if replace_kernel_launch_with_name:
                             out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
-                                kern_name(msg), (int(ts)/1000)+hcc_ts_ref, int(ns)/1000, pid, tid, kern_to_json(msg,False)))
+                                kern_name(msg), (int(ts)/1000), int(ns)/1000, pid, tid, kern_to_json(msg,False)))
                         else:
                             out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
-                                new_msg, (int(ts)/1000)+hcc_ts_ref, int(ns)/1000, pid, tid, kern_to_json(msg)))
+                                new_msg, (int(ts)/1000), int(ns)/1000, pid, tid, kern_to_json(msg)))
                     else:
                         out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
-                            new_msg, (int(ts)/1000)+hcc_ts_ref, int(ns)/1000, pid, tid, hip_args_to_json(msg)))
+                            new_msg, (int(ts)/1000), int(ns)/1000, pid, tid, hip_args_to_json(msg)))
                 continue
 
             # look for most specific HCC profile first
 
             match = RE_HCC_PROF_TS_OPX.search(line)
             if match:
-                get_system_ticks()
                 count_hcc_prof_ts_opx += 1
                 optype,msg,us,start,stop,opnum,extra = match.groups()
                 extra = ' '.join(extra.strip().split()).strip() # normalize whitespace in extra text
@@ -515,7 +448,7 @@ for filename in non_opt_args:
                     args = '{"seqNum":%s, "extra":"%s"}' % (seqnum,extra)
                 else:
                     args = '{"seqNum":%s}' % seqnum
-                ts = (int(start)/1000)+hcc_ts_ref
+                ts = (int(start)/1000)
                 dur = (int(stop)-int(start))/1000
                 #ts = int(start)
                 #dur = int(stop)-int(start)
@@ -542,7 +475,6 @@ for filename in non_opt_args:
 
             match = RE_HCC_PROF_TS_OP.search(line)
             if match:
-                get_system_ticks()
                 count_hcc_prof_ts_op += 1
                 optype,msg,us,start,stop,opnum = match.groups()
                 opnum_parts = opnum.split('.')
@@ -557,7 +489,7 @@ for filename in non_opt_args:
                 seqnum = opnum_parts[2]
                 args = '{"seqNum":%s}' % seqnum
                 out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
-                    msg, (int(start)/1000)+hcc_ts_ref, (int(stop)-int(start))/1000, pid, tid, args))
+                    msg, (int(start)/1000), (int(stop)-int(start))/1000, pid, tid, args))
                 continue
 
             match = RE_HCC_PROF_TS.search(line)
@@ -644,7 +576,6 @@ for filename in non_opt_args:
             #compile(r"  hsa-api pid:(\d+) tid:(\d+) (.*) ret=(.*)>> \+(\d+) ns")
             match = RE_HSA_CLOSE.search(line)
             if match:
-                get_system_ticks()
                 count_hsa_close += 1
                 pid,tid,func,retcode,ns = match.groups()
                 if (pid,tid) not in hsa_events:
@@ -653,6 +584,8 @@ for filename in non_opt_args:
                 func_orig,args,ts = hsa_events[(pid,tid)].pop()
                 pid = -int(pid)
                 hsa_pids[pid] = None
+                ts = int(ts)/1000
+                ns = int(ns)/1000
                 if not func.startswith(func_orig):
                     print("event mismatch: '%s'.startswith('%s')" % (func,func_orig))
                     sys.exit(1)
@@ -662,7 +595,6 @@ for filename in non_opt_args:
 
             match = RE_HSA_DISPATCH_HOST.search(line)
             if match:
-                get_system_ticks()
                 count_hsa_dispatch_host += 1
                 pid,tid,queue,agent,signal,name,tick,did = match.groups()
                 key = (pid,agent)
@@ -673,6 +605,7 @@ for filename in non_opt_args:
                     hsa_queues[key][queue] = index
                 tid = hsa_queues[key][queue]
                 pid = -int(pid)
+                tick = int(tick)/1000
                 out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":1, "pid":%s, "tid":%s},\n'%(
                     name, tick, pid, tid))
                 if show_flow:
@@ -682,7 +615,6 @@ for filename in non_opt_args:
 
             match = RE_HSA_DISPATCH.search(line)
             if match:
-                get_system_ticks()
                 count_hsa_dispatch += 1
                 pid,tid,queue,agent,signal,name,start,stop,did = match.groups()
                 new_pid = hash_pid_agent(pid,agent)
@@ -693,7 +625,7 @@ for filename in non_opt_args:
                     index = len(hsa_queues[key])
                     hsa_queues[key][queue] = index
                 tid = hsa_queues[key][queue]
-                ts = (int(start)/1000)+hcc_ts_ref
+                ts = (int(start)/1000)
                 dur = (int(stop)-int(start))/1000
                 out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s},\n'%(
                     name, ts, dur, new_pid, tid))
@@ -704,7 +636,6 @@ for filename in non_opt_args:
 
             match = RE_HSA_BARRIER_HOST.search(line)
             if match:
-                get_system_ticks()
                 count_hsa_barrier_host += 1
                 name = 'barrier'
                 pid,tid,queue,agent,signal,dep1,dep2,dep3,dep4,dep5,tick,did = match.groups()
@@ -716,6 +647,7 @@ for filename in non_opt_args:
                     hsa_queues[key][queue] = index
                 tid = hsa_queues[key][queue]
                 pid = -int(pid)
+                tick = int(tick)/1000
                 out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":1, "pid":%s, "tid":%s, "args":{"dep1":"%s","dep2":"%s","dep3":"%s","dep4":"%s","dep5":"%s"}},\n'%(
                     name, tick, pid, tid, dep1, dep2, dep3, dep4, dep5))
                 if show_flow:
@@ -725,7 +657,6 @@ for filename in non_opt_args:
 
             match = RE_HSA_BARRIER.search(line)
             if match:
-                get_system_ticks()
                 count_hsa_barrier += 1
                 name = 'barrier'
                 pid,tid,queue,agent,signal,start,stop,dep1,dep2,dep3,dep4,dep5,did = match.groups()
@@ -737,7 +668,7 @@ for filename in non_opt_args:
                     index = len(hsa_queues[key])
                     hsa_queues[key][queue] = index
                 tid = hsa_queues[key][queue]
-                ts = (int(start)/1000)+hcc_ts_ref
+                ts = (int(start)/1000)
                 dur = (int(stop)-int(start))/1000
                 out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":{"dep1":"%s","dep2":"%s","dep3":"%s","dep4":"%s","dep5":"%s"}},\n'%(
                     name, ts, dur, new_pid, tid, dep1, dep2, dep3, dep4, dep5))
@@ -748,7 +679,6 @@ for filename in non_opt_args:
 
             match = RE_HSA_COPY.search(line)
             if match:
-                get_system_ticks()
                 count_hsa_copy += 1
                 name = 'copy'
                 pid,tid,agent,signal,start,stop,dep1,dep2,dep3,dep4,dep5 = match.groups()
@@ -758,7 +688,7 @@ for filename in non_opt_args:
                     hsa_queues[key] = {}
                 #tid = hsa_queues[key][queue]
                 tid = -1
-                ts = (int(start)/1000)+hcc_ts_ref
+                ts = (int(start)/1000)
                 dur = (int(stop)-int(start))/1000
                 out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":{"dep1":"%s","dep2":"%s","dep3":"%s","dep4":"%s","dep5":"%s"}},\n'%(
                     name, ts, dur, new_pid, tid, dep1, dep2, dep3, dep4, dep5))
@@ -809,8 +739,11 @@ for filename in non_opt_args:
                     print("event name mismatch: %s != %s" % (hipname, prev_hipname))
                     print(line)
                     sys.exit(1)
+                # VDI outputs NS / 100
+                prev_ts = int(prev_ts) / 10
+                ts = int(ts) / 10
                 out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":-1234, "tid":%s},\n'%(
-                    hipname, prev_ts, int(ts)-int(prev_ts), int(tid, 16)))
+                    hipname, prev_ts, ts-prev_ts, int(tid, 16)))
                 continue
 
             match = RE_VDI_MSG.search(line)
@@ -835,6 +768,9 @@ if hsa_pids:
 if count_hsa_dispatch or count_hsa_barrier or count_hsa_copy:
     for pid,agent in hsa_queues:
         out.write('{"name":"process_name", "ph":"M", "pid":%s, "args":{"name":"HSA Agent for pid %s agent %s"}},\n'%(hash_pid_agent(pid,agent),pid,agent))
+
+if count_vdi_close:
+    out.write('{"name":"process_name", "ph":"M", "pid":-1234, "args":{"name":"HIP/VDI"}},\n')
 
 if count_strace_resumed + count_strace_complete > 0:
     out.write('{"name":"process_name", "ph":"M", "pid":-2000, "args":{"name":"strace/ltrace"}},\n')
