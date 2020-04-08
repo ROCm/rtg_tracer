@@ -43,6 +43,7 @@ static hsa_ven_amd_loader_1_01_pfn_t gs_OrigLoaderExtTable;
 
 // Whether to enable queue profile tracing.
 bool enable_profile = true;
+bool enable_rpt = false;
 
 // Whether to print when a dispatch is queued.
 bool enable_dispatch_start = true;
@@ -221,6 +222,20 @@ static inline unsigned long did() {
     static unsigned long id = 0;
     return id++;
 }
+
+// copied from hcc runtime's HCC_PROFILE=2
+#define LOG_PROFILE(start, end, type, tag, msg) \
+{\
+    std::stringstream sstream;\
+    sstream << "profile: " << std::setw(7) << type << ";\t" \
+                         << std::setw(40) << tag\
+                         << ";\t" << std::fixed << std::setw(6) << std::setprecision(1) << (end-start)/1000.0 << " us;";\
+    sstream << "\t" << start << ";\t" << end << ";";\
+    sstream <<  msg << "\n";\
+    fprintf(stream, "%s", sstream.str().c_str());\
+}
+#define LOG_RPT LOG_PROFILE(start_, stop_, type_, tag_, msg_)
+    //std::cerr << sstream.str();\
 
 #if USE_STREAM
 #define TRACE_OUT \
@@ -515,15 +530,38 @@ static bool signal_callback(hsa_signal_value_t value, void* arg)
             hsa_agent_t agent_ = data->agent;
             hsa_queue_t* queue_ = data->queue;
             hsa_signal_t signal_ = data->signal;
-            if (data->is_barrier) {
-                LOG_BARRIER
-            }
-            else if (data->is_copy) {
-                LOG_COPY
+            if (enable_rpt) {
+                const char *type_;
+                const char *tag_;
+                const char *msg_;
+                if (data->is_barrier) {
+                    type_ = "barrier";
+                    tag_ = "";
+                    msg_ = "";
+                }
+                else if (data->is_copy) {
+                    type_ = "copy";
+                    tag_ = "";
+                    msg_ = "";
+                }
+                else {
+                    type_ = "kernel";
+                    tag_ = data->name;
+                    msg_ = "";
+                }
+                LOG_RPT
             }
             else {
-                long unsigned id_ = data->id_;
-                LOG_DISPATCH
+                if (data->is_barrier) {
+                    LOG_BARRIER
+                }
+                else if (data->is_copy) {
+                    LOG_COPY
+                }
+                else {
+                    long unsigned id_ = data->id_;
+                    LOG_DISPATCH
+                }
             }
         }
         // we created the signal, we must free
@@ -2129,7 +2167,12 @@ static const char* cpp_demangle(const char* symname) {
 
 static const char* QueryKernelName(uint64_t kernel_object, const amd_kernel_code_t* kernel_code) {
     const char* kernel_symname = GetKernelNameRef(kernel_object);
-    return cpp_demangle(kernel_symname);
+    if (RTG::enable_rpt) {
+        return kernel_symname;
+    }
+    else {
+        return cpp_demangle(kernel_symname);
+    }
 }
 
 static void intercept_callback(
@@ -2234,31 +2277,40 @@ extern "C" bool OnLoad(void *pTable,
     fprintf(stderr, "RTG_HSA_TRACER_FILENAME=%s\n", outname.c_str());
     RTG::stream = fopen(outname.c_str(), "w");
 
-    const char *what_to_trace = nullptr;
-    if ((what_to_trace = getenv("RTG_HSA_TRACER_FILTER")) == nullptr) {
-        what_to_trace = "core";
-    }
-    fprintf(stderr, "RTG_HSA_TRACER_FILTER=%s\n", what_to_trace);
-    RTG::InitEnabledTable(what_to_trace);
-
-    const char *profile = nullptr;
-    if ((profile = getenv("RTG_HSA_TRACER_PROFILE")) == nullptr) {
-        profile = "yes";
-    }
-    fprintf(stderr, "RTG_HSA_TRACER_PROFILE=%s\n", profile);
-    RTG::enable_profile = (std::string(profile) == "yes");
-
-    const char *dispatch_start = nullptr;
-    if ((dispatch_start = getenv("RTG_HSA_TRACER_DISPATCH_START")) == nullptr) {
-        dispatch_start = "yes";
-    }
-    else if (strlen(dispatch_start) < 1) {
-        dispatch_start = "yes";
-    }
-    fprintf(stderr, "RTG_HSA_TRACER_DISPATCH_START=%s\n", dispatch_start);
-    char check = *dispatch_start;
-    if (check == 'n' || check == 'N' || check == '0') {
+    if (getenv("RTG_HSA_TRACER_RPT") || getenv("HCC_PROFILE")) {
+        fprintf(stderr, "RTG HSA Tracer: HCC_PROFILE=2 mode\n");
+        RTG::InitEnabledTable("none");
+        RTG::enable_profile = true;
+        RTG::enable_rpt = true;
         RTG::enable_dispatch_start = false;
+    }
+    else {
+        const char *what_to_trace = nullptr;
+        if ((what_to_trace = getenv("RTG_HSA_TRACER_FILTER")) == nullptr) {
+            what_to_trace = "core";
+        }
+        fprintf(stderr, "RTG_HSA_TRACER_FILTER=%s\n", what_to_trace);
+        RTG::InitEnabledTable(what_to_trace);
+
+        const char *profile = nullptr;
+        if ((profile = getenv("RTG_HSA_TRACER_PROFILE")) == nullptr) {
+            profile = "yes";
+        }
+        fprintf(stderr, "RTG_HSA_TRACER_PROFILE=%s\n", profile);
+        RTG::enable_profile = (std::string(profile) == "yes");
+
+        const char *dispatch_start = nullptr;
+        if ((dispatch_start = getenv("RTG_HSA_TRACER_DISPATCH_START")) == nullptr) {
+            dispatch_start = "yes";
+        }
+        else if (strlen(dispatch_start) < 1) {
+            dispatch_start = "yes";
+        }
+        fprintf(stderr, "RTG_HSA_TRACER_DISPATCH_START=%s\n", dispatch_start);
+        char check = *dispatch_start;
+        if (check == 'n' || check == 'N' || check == '0') {
+            RTG::enable_dispatch_start = false;
+        }
     }
 
     return RTG::InitHsaTable(reinterpret_cast<HsaApiTable*>(pTable));
