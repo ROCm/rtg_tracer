@@ -277,6 +277,28 @@ static inline unsigned long did() {
 #define LOG_RPT LOG_PROFILE(start_, stop_, type_, tag_, msg_)
     //std::cerr << sstream.str();\
 
+#define DISABLE_LOGGING 0
+#if DISABLE_LOGGING
+
+#define TRACE_OUT
+#define LOG_STATUS_OUT
+#define LOG_UINT64_OUT
+#define LOG_SIGNAL_OUT
+#define LOG_VOID_OUT
+#define LOG_DISPATCH_BEGIN
+#define LOG_DISPATCH
+#define LOG_BARRIER_BEGIN
+#define LOG_BARRIER
+#define LOG_COPY
+#define TRACE(...)
+#define LOG_STATUS(status) ({ hsa_status_t localStatus = status; localStatus; })
+#define LOG_SIGNAL(status) ({ hsa_signal_value_t localStatus = status; localStatus; })
+#define LOG_UINT64(status) ({ uint64_t localStatus = status; localStatus; })
+#define LOG_UINT32(status) ({ uint32_t localStatus = status; localStatus; })
+#define LOG_VOID(status) ({ status; })
+
+#else // DISABLE_LOGGING
+
 #if USE_STREAM
 #define TRACE_OUT \
 fprintf(stream, "<<hsa-api pid:%d tid:%s %s %s @%lu\n", pid_, tid_.c_str(), func.c_str(), args.c_str(), tick_); fflush(stream);
@@ -434,6 +456,8 @@ os << "  <<hsa-api" \
             LOG_VOID_OUT                                                       \
         }                                                                      \
     })
+
+#endif // DISABLE_LOGGING
 
 
 struct SignalCallbackData
