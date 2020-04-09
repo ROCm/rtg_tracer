@@ -21,7 +21,9 @@
 #include <hsa/amd_hsa_kernel_code.h>
 #include <hsa/amd_hsa_signal.h>
 
-#define USE_STREAM 1
+#include <reckless/file_writer.hpp>
+#include <reckless/severity_log.hpp>
+
 #define ENABLE_HSA_AMD_MEMORY_LOCK_TO_POOL 0
 #define ENABLE_HSA_AMD_RUNTIME_QUEUE_CREATE_REGISTER 0
 
@@ -50,21 +52,16 @@ bool enable_rpt = false;
 bool enable_dispatch_start = true;
 
 // Output stream for all logging
-static FILE* stream;
-static std::ostringstream os;
-#if USE_STREAM
-#else
-// If we are buffering the writes to an ostringstream,
-// this library might not terminate cleanly via OnUnload.
-// Protect against that case here via static module object.
-static bool output_has_been_written = false;
-static struct Deleter {
-    ~Deleter() {
-        fprintf(RTG::stream, "%s", RTG::os.str().c_str());
-        RTG::output_has_been_written = true;
-    }
-} RunOnShutDown;
-#endif
+using log_t = reckless::severity_log<reckless::indent<4>, ' '>;
+//using log_t = reckless::severity_log<
+//    reckless::indent<4>,       // 4 spaces of indent
+//    ' ',                       // Field separator
+//    reckless::severity_field,  // Show severity marker (D/I/W/E) first
+//    reckless::timestamp_field  // Then timestamp field
+//    >;
+
+reckless::file_writer *stream;
+log_t g_log;
 
 // Lookup which HSA functions we want to trace
 static std::unordered_map<std::string,bool> enabled_map;
@@ -272,10 +269,9 @@ static inline unsigned long did() {
     sstream << "\t" << start << ";\t" << end << ";";\
     sstream << "\t" << "#" << agent_id_ << "." << queue_id_ << "." << seq_num_ << ";"; \
     sstream <<  msg << "\n";\
-    fprintf(stream, "%s", sstream.str().c_str());\
+    g_log.info("%s", sstream.str());\
 }
 #define LOG_RPT LOG_PROFILE(start_, stop_, type_, tag_, msg_)
-    //std::cerr << sstream.str();\
 
 #define DISABLE_LOGGING 0
 #if DISABLE_LOGGING
@@ -283,6 +279,7 @@ static inline unsigned long did() {
 #define TRACE_OUT
 #define LOG_STATUS_OUT
 #define LOG_UINT64_OUT
+#define LOG_UINT32_OUT
 #define LOG_SIGNAL_OUT
 #define LOG_VOID_OUT
 #define LOG_DISPATCH_BEGIN
@@ -299,98 +296,28 @@ static inline unsigned long did() {
 
 #else // DISABLE_LOGGING
 
-#if USE_STREAM
 #define TRACE_OUT \
-fprintf(stream, "<<hsa-api pid:%d tid:%s %s %s @%lu\n", pid_, tid_.c_str(), func.c_str(), args.c_str(), tick_); fflush(stream);
+g_log.info("<<hsa-api pid:%d tid:%s %s %s @%d", pid_, tid_, func, args, tick_); g_log.flush();
 #define LOG_STATUS_OUT \
-fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%d>> +%lu us\n", pid_, tid_.c_str(),  func.c_str(), localStatus, ticks); fflush(stream);
+g_log.info("  hsa-api pid:%d tid:%s %s ret=%d>> +%d us", pid_, tid_, func, localStatus, ticks); g_log.flush();
 #define LOG_UINT64_OUT \
-fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%lu>> +%lu us\n", pid_, tid_.c_str(),  func.c_str(), localStatus, ticks); fflush(stream);
+g_log.info("  hsa-api pid:%d tid:%s %s ret=%d>> +%d us", pid_, tid_, func, localStatus, ticks); g_log.flush();
+#define LOG_UINT32_OUT \
+g_log.info("  hsa-api pid:%d tid:%s %s ret=%u>> +%d us", pid_, tid_, func, localStatus, ticks); g_log.flush();
 #define LOG_SIGNAL_OUT \
-fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%ld>> +%lu us\n", pid_, tid_.c_str(),  func.c_str(), localStatus, ticks); fflush(stream);
+g_log.info("  hsa-api pid:%d tid:%s %s ret=%ld>> +%d us", pid_, tid_, func, localStatus, ticks); g_log.flush();
 #define LOG_VOID_OUT \
-fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=void>> +%lu us\n", pid_, tid_.c_str(),  func.c_str(), ticks); fflush(stream);
+g_log.info("  hsa-api pid:%d tid:%s %s ret=void>> +%d us", pid_, tid_, func, ticks); g_log.flush();
 #define LOG_DISPATCH_BEGIN \
-fprintf(stream, "<<hsa-api pid:%d tid:%s dispatch queue:%lu agent:%lu signal:%lu name:'%s' tick:%lu id:%lu >>\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, name_, tick_, id_);
+g_log.info("<<hsa-api pid:%d tid:%s dispatch queue:%d agent:%d signal:%d name:'%s' tick:%d id:%d >>", pid_, tid_, queue_, agent_, signal_, name_, tick_, id_); g_log.flush();
 #define LOG_DISPATCH \
-fprintf(stream, "<<hsa-api pid:%d tid:%s dispatch queue:%lu agent:%lu signal:%lu name:'%s' start:%lu stop:%lu id:%lu >>\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, name_, start_, stop_, id_); fflush(stream);
+g_log.info("<<hsa-api pid:%d tid:%s dispatch queue:%d agent:%d signal:%d name:'%s' start:%d stop:%d id:%d >>", pid_, tid_, queue_, agent_, signal_, name_, start_, stop_, id_); g_log.flush();
 #define LOG_BARRIER_BEGIN \
-fprintf(stream, "<<hsa-api pid:%d tid:%s barrier queue:%lu agent:%lu signal:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu tick:%lu id:%lu >>\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, dep1, dep2, dep3, dep4, dep5, tick_, id_); fflush(stream);
+g_log.info("<<hsa-api pid:%d tid:%s barrier queue:%d agent:%d signal:%d dep1:%d dep2:%d dep3:%d dep4:%d dep5:%d tick:%d id:%d >>", pid_, tid_, queue_, agent_, signal_, dep1, dep2, dep3, dep4, dep5, tick_, id_); g_log.flush();
 #define LOG_BARRIER \
-fprintf(stream, "<<hsa-api pid:%d tid:%s barrier queue:%lu agent:%lu signal:%lu start:%lu stop:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu id:%lu >>\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, start_, stop_, data->dep1, data->dep2, data->dep3, data->dep4, data->dep5, data->id_); fflush(stream);
+g_log.info("<<hsa-api pid:%d tid:%s barrier queue:%d agent:%d signal:%d start:%d stop:%d dep1:%d dep2:%d dep3:%d dep4:%d dep5:%d id:%d >>", pid_, tid_, queue_, agent_, signal_, start_, stop_, data->dep1, data->dep2, data->dep3, data->dep4, data->dep5, data->id_); g_log.flush();
 #define LOG_COPY \
-fprintf(stream, "<<hsa-api pid:%d tid:%s copy agent:%lu signal:%lu start:%lu stop:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu >>\n", pid_, tid_.c_str(), agent_.handle, signal_.handle, start_, stop_, data->dep1, data->dep2, data->dep3, data->dep4, data->dep5); fflush(stream);
-#else
-#define TRACE_OUT \
-os << "<<hsa-api" \
-    << " pid:" << pid_ \
-    << " tid:" << tid_ \
-    << " " << func \
-    << " " << args \
-    << " @" << tick_ \
-    << std::endl;
-#define LOG_STATUS_OUT \
-os << "  hsa-api" \
-    << " pid:" << pid_ \
-    << " tid:" << tid_ \
-    << " " << func \
-    << " ret=" << localStatus \
-    << ">> +" << ticks << " us" \
-    << std::endl;
-#define LOG_UINT64_OUT LOG_STATUS_OUT
-#define LOG_SIGNAL_OUT LOG_STATUS_OUT
-#define LOG_VOID_OUT \
-os << "  hsa-api" \
-    << " pid:" << pid_ \
-    << " tid:" << tid_ \
-    << " " << func \
-    << " ret=void" \
-    << ">> +" << ticks << " us" \
-    << std::endl;
-#define LOG_DISPATCH \
-os << "  <<hsa-api" \
-    << " pid:" << pid_ \
-    << " tid:" << tid_ \
-    << " dispatch" \
-    << " queue:'" << queue_->id << "'"\
-    << " agent:'" << agent_.handle << "'"\
-    << " signal:'" << signal_.handle << "'"\
-    << " name:'" << name_ << "'"\
-    << " start:" << start_ \
-    << " stop:" << stop_ \
-    << " >>" << std::endl;
-#define LOG_BARRIER \
-os << "  <<hsa-api" \
-    << " pid:" << pid_ \
-    << " tid:" << tid_ \
-    << " barrier" \
-    << " queue:'" << queue_->id << "'"\
-    << " agent:'" << agent_.handle << "'"\
-    << " signal:'" << signal_.handle << "'"\
-    << " start:" << start_ \
-    << " stop:" << stop_ \
-    << " dep1:" << data->dep1 \
-    << " dep2:" << data->dep2 \
-    << " dep3:" << data->dep3 \
-    << " dep4:" << data->dep4 \
-    << " dep5:" << data->dep5 \
-    << " >>" << std::endl;
-#define LOG_COPY \
-os << "  <<hsa-api" \
-    << " pid:" << pid_ \
-    << " tid:" << tid_ \
-    << " copy" \
-    << " agent:'" << agent_.handle << "'"\
-    << " signal:'" << signal_.handle << "'"\
-    << " start:" << start_ \
-    << " stop:" << stop_ \
-    << " dep1:" << data->dep1 \
-    << " dep2:" << data->dep2 \
-    << " dep3:" << data->dep3 \
-    << " dep4:" << data->dep4 \
-    << " dep5:" << data->dep5 \
-    << " >>" << std::endl;
-#endif
+g_log.info("<<hsa-api pid:%d tid:%s copy agent:%d signal:%d start:%d stop:%d dep1:%d dep2:%d dep3:%d dep4:%d dep5:%d >>", pid_, tid_, agent_, signal_, start_, stop_, data->dep1, data->dep2, data->dep3, data->dep4, data->dep5); g_log.flush();
 
 #define TRACE(...) \
     static bool is_enabled = enabled_check(__func__); \
@@ -443,7 +370,7 @@ os << "  <<hsa-api" \
         uint32_t localStatus = status; /*local copy so status only evaluated once*/  \
         if (is_enabled) {                                                            \
             uint64_t ticks = tick() - tick_;                                         \
-            LOG_STATUS_OUT                                                           \
+            LOG_UINT32_OUT                                                           \
         }                                                                            \
         localStatus;                                                                 \
     })
@@ -470,10 +397,10 @@ struct SignalCallbackData
             long unsigned tick_ = tick();
             int pid_ = pid();
             std::string tid_ = tid();
-            const char *name_ = name;
-            hsa_agent_t agent_ = agent;
-            hsa_queue_t* queue_ = queue;
-            hsa_signal_t signal_ = signal;
+            std::string name_ = name;
+            uint64_t agent_ = agent.handle;
+            uint64_t queue_ = queue->id;
+            uint64_t signal_ = signal.handle;
             LOG_DISPATCH_BEGIN
         }
     }
@@ -505,10 +432,10 @@ struct SignalCallbackData
             long unsigned tick_ = tick();
             int pid_ = pid();
             std::string tid_ = tid();
-            const char *name_ = "barrier";
-            hsa_agent_t agent_ = agent;
-            hsa_queue_t* queue_ = queue;
-            hsa_signal_t signal_ = signal;
+            std::string name_ = "barrier";
+            uint64_t agent_ = agent.handle;
+            uint64_t queue_ = queue->id;
+            uint64_t signal_ = signal.handle;
             LOG_BARRIER_BEGIN
         }
     }
@@ -564,7 +491,7 @@ struct SignalCallbackData
         return true;
     }
 
-    const char *name;
+    std::string name;
     InterceptCallbackData *data;
     hsa_queue_t* queue;
     hsa_agent_t agent;
@@ -593,14 +520,14 @@ static bool signal_callback(hsa_signal_value_t value, void* arg)
             long unsigned stop_ = data->stop;
             int pid_ = pid();
             std::string tid_ = tid();
-            const char *name_ = data->name;
-            hsa_agent_t agent_ = data->agent;
-            hsa_queue_t* queue_ = data->queue;
-            hsa_signal_t signal_ = data->signal;
+            std::string name_ = data->name;
+            uint64_t agent_ = data->agent.handle;
+            uint64_t queue_ = data->queue->id;
+            uint64_t signal_ = data->signal.handle;
             if (enable_rpt) {
-                const char *type_;
-                const char *tag_;
-                const char *msg_;
+                std::string type_;
+                std::string tag_;
+                std::string msg_;
                 int agent_id_ = 0;
                 int queue_id_ = 0;
                 int seq_num_ = 0;
@@ -2343,7 +2270,8 @@ extern "C" bool OnLoad(void *pTable,
     outname += ".";
     outname += RTG::pidstr();
     fprintf(stderr, "RTG_HSA_TRACER_FILENAME=%s\n", outname.c_str());
-    RTG::stream = fopen(outname.c_str(), "w");
+    RTG::stream = new reckless::file_writer(outname.c_str());
+    RTG::g_log.open(RTG::stream);
 
     if (getenv("RTG_HSA_TRACER_RPT") || getenv("HCC_PROFILE")) {
         fprintf(stderr, "RTG HSA Tracer: HCC_PROFILE=2 mode\n");
@@ -2388,11 +2316,5 @@ extern "C" void OnUnload()
 {
     fprintf(stderr, "RTG HSA Tracer: Unloading\n");
     RTG::RestoreHsaTable(RTG::gs_OrigHsaTable);
-#if USE_STREAM
-#else
-    if (!RTG::output_has_been_written) {
-        fprintf(RTG::stream, "%s", RTG::os.str().c_str());
-    }
-#endif
-    fclose(RTG::stream);
+    delete RTG::stream;
 }
