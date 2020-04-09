@@ -1,3 +1,4 @@
+#include <atomic>
 #include <cstdio>
 #include <iostream>
 #include <iomanip>
@@ -78,12 +79,50 @@ static inline bool enabled_check(std::string func);
 // Executables loading tracking
 //typedef std::recursive_mutex mutex_t;
 typedef std::mutex mutex_t;
-static mutex_t mutex_;
+static mutex_t kernel_name_mutex_;
 typedef std::unordered_map<uint64_t, const char*> symbols_map_t;
 static symbols_map_t* symbols_map_;
 static const char* GetKernelNameRef(uint64_t addr);
 static hsa_status_t hsa_executable_freeze_interceptor(hsa_executable_t executable, const char *options);
 static hsa_status_t executable_symbols_cb(hsa_executable_t exec, hsa_executable_symbol_t symbol, void *data);
+
+// For tracking agents and streams with 0-based index.
+static mutex_t agent_mutex_;
+typedef struct AgentInfo_s {
+    int agent_index;
+    int __queue;
+    std::unordered_map<uint64_t, int> queue_index;
+} AgentInfo_t;
+static std::unordered_map<uint64_t, AgentInfo_t*> agent_info_map;
+
+static void get_agent_queue_indexes(hsa_agent_t agent, hsa_queue_t *queue, int &agent_index, int &queue_index)
+{
+    static int __agent = 0;
+    std::lock_guard<mutex_t> lck(agent_mutex_);
+    if (agent_info_map.count(agent.handle) == 0) {
+        agent_info_map[agent.handle] = new AgentInfo_t{__agent++,0};
+    }
+    auto *info = agent_info_map[agent.handle];
+    if (info->queue_index.count(queue->id) == 0) {
+        info->queue_index[queue->id] = info->__queue++;
+    }
+    agent_index = info->agent_index;
+    queue_index = info->queue_index[queue->id];
+}
+
+struct InterceptCallbackData
+{
+    InterceptCallbackData(hsa_queue_t *queue, hsa_agent_t agent)
+        : queue(queue), agent(agent), agent_index(0), queue_index(0), seq_index(0)
+    {
+        get_agent_queue_indexes(agent, queue, agent_index, queue_index);
+    }
+    hsa_queue_t *queue;
+    hsa_agent_t agent;
+    int agent_index;
+    int queue_index;
+    std::atomic<int> seq_index;
+};
 
 // Helper functions to convert function arguments into strings.
 // Handles POD data types as well as enumerations.
@@ -231,6 +270,7 @@ static inline unsigned long did() {
                          << std::setw(40) << tag\
                          << ";\t" << std::fixed << std::setw(6) << std::setprecision(1) << (end-start)/1000.0 << " us;";\
     sstream << "\t" << start << ";\t" << end << ";";\
+    sstream << "\t" << "#" << agent_id_ << "." << queue_id_ << "." << seq_num_ << ";"; \
     sstream <<  msg << "\n";\
     fprintf(stream, "%s", sstream.str().c_str());\
 }
@@ -398,9 +438,9 @@ os << "  <<hsa-api" \
 
 struct SignalCallbackData
 {
-    SignalCallbackData(const char *name, hsa_queue_t* queue, hsa_agent_t agent, hsa_signal_t signal, hsa_signal_t orig_signal)
-        : name(name), queue(queue), agent(agent), signal(signal), orig_signal(orig_signal),
-            is_copy(false), is_barrier(false), dep1(0), dep2(0), dep3(0), dep4(0), dep5(0), id_(did())
+    SignalCallbackData(const char *name, InterceptCallbackData *data, hsa_signal_t signal, hsa_signal_t orig_signal)
+        : name(name), data(data), queue(data->queue), agent(data->agent), signal(signal), orig_signal(orig_signal),
+            is_copy(false), is_barrier(false), dep1(0), dep2(0), dep3(0), dep4(0), dep5(0), id_(did()), seq_num_(data->seq_index++)
     {
         if (RTG::enable_dispatch_start) {
             long unsigned tick_ = tick();
@@ -425,8 +465,8 @@ struct SignalCallbackData
             dep5(num_dep_signals>4 ? dep_signals[4].handle : 0)
     {}
 
-    SignalCallbackData(hsa_queue_t* queue, hsa_agent_t agent, hsa_signal_t signal, hsa_signal_t orig_signal, const hsa_barrier_and_packet_t* packet)
-        : name(nullptr), queue(queue), agent(agent), signal(signal), orig_signal(orig_signal),
+    SignalCallbackData(InterceptCallbackData *data, hsa_signal_t signal, hsa_signal_t orig_signal, const hsa_barrier_and_packet_t* packet)
+        : name(nullptr), data(data), queue(data->queue), agent(data->agent), signal(signal), orig_signal(orig_signal),
             is_copy(false),
             is_barrier(true),
             dep1(packet->dep_signal[0].handle),
@@ -434,7 +474,8 @@ struct SignalCallbackData
             dep3(packet->dep_signal[2].handle),
             dep4(packet->dep_signal[3].handle),
             dep5(packet->dep_signal[4].handle),
-            id_(did())
+            id_(did()),
+            seq_num_(data->seq_index++)
     {
         if (RTG::enable_dispatch_start) {
             long unsigned tick_ = tick();
@@ -500,6 +541,7 @@ struct SignalCallbackData
     }
 
     const char *name;
+    InterceptCallbackData *data;
     hsa_queue_t* queue;
     hsa_agent_t agent;
     hsa_signal_t signal;
@@ -514,6 +556,7 @@ struct SignalCallbackData
     long unsigned start;
     long unsigned stop;
     long unsigned id_;
+    int seq_num_;
 };
 
 static bool signal_callback(hsa_signal_value_t value, void* arg)
@@ -534,10 +577,16 @@ static bool signal_callback(hsa_signal_value_t value, void* arg)
                 const char *type_;
                 const char *tag_;
                 const char *msg_;
+                int agent_id_ = 0;
+                int queue_id_ = 0;
+                int seq_num_ = 0;
                 if (data->is_barrier) {
                     type_ = "barrier";
                     tag_ = "";
                     msg_ = "";
+                    agent_id_ = data->data->agent_index;
+                    queue_id_ = data->data->queue_index;
+                    seq_num_ = data->seq_num_;
                 }
                 else if (data->is_copy) {
                     type_ = "copy";
@@ -548,6 +597,9 @@ static bool signal_callback(hsa_signal_value_t value, void* arg)
                     type_ = "kernel";
                     tag_ = data->name;
                     msg_ = "";
+                    agent_id_ = data->data->agent_index;
+                    queue_id_ = data->data->queue_index;
+                    seq_num_ = data->seq_num_;
                 }
                 LOG_RPT
             }
@@ -711,14 +763,6 @@ hsa_status_t hsa_agent_major_extension_supported(uint16_t extension, hsa_agent_t
     TRACE(extension, agent, version_major, version_minor, result);
     return LOG_STATUS(gs_OrigCoreApiTable.hsa_agent_major_extension_supported_fn(extension, agent, version_major, version_minor, result));
 }
-
-struct InterceptCallbackData
-{
-    InterceptCallbackData(hsa_queue_t *queue, hsa_agent_t agent)
-        : queue(queue), agent(agent) {}
-    hsa_queue_t *queue;
-    hsa_agent_t agent;
-};
 
 hsa_status_t hsa_queue_create(hsa_agent_t agent, uint32_t size, hsa_queue_type32_t type, void (*callback)(hsa_status_t status, hsa_queue_t* source, void* data), void* data, uint32_t private_segment_size, uint32_t group_segment_size, hsa_queue_t** queue) {
     if (enable_profile) {
@@ -2123,7 +2167,7 @@ static hsa_status_t executable_symbols_cb(hsa_executable_t exec, hsa_executable_
 }
 
 static hsa_status_t hsa_executable_freeze_interceptor(hsa_executable_t executable, const char *options) {
-    std::lock_guard<mutex_t> lck(mutex_);
+    std::lock_guard<mutex_t> lck(kernel_name_mutex_);
     if (symbols_map_ == NULL) symbols_map_ = new symbols_map_t;
     hsa_status_t status = gs_OrigCoreApiTable.hsa_executable_iterate_symbols_fn(executable, executable_symbols_cb, NULL);
     CHECK_STATUS("Error in iterating executable symbols", status);
@@ -2148,7 +2192,7 @@ static inline const amd_kernel_code_t* GetKernelCode(uint64_t kernel_object) {
 }
 
 static inline const char* GetKernelNameRef(uint64_t addr) {
-    std::lock_guard<mutex_t> lck(mutex_);
+    std::lock_guard<mutex_t> lck(kernel_name_mutex_);
     const auto it = symbols_map_->find(addr);
     if (it == symbols_map_->end()) {
         fprintf(stderr, "RTG HSA Tracer: kernel addr (0x%lx) is not found\n", addr);
@@ -2214,7 +2258,7 @@ static void intercept_callback(
             const_cast<hsa_kernel_dispatch_packet_t*>(dispatch_packet)->completion_signal = signal;
             status = gs_OrigExtApiTable.hsa_amd_signal_async_handler_fn(
                     signal, HSA_SIGNAL_CONDITION_LT, 1, signal_callback,
-                    new SignalCallbackData(kernel_name, queue, agent, signal, orig_signal));
+                    new SignalCallbackData(kernel_name, data_, signal, orig_signal));
             if (status != HSA_STATUS_SUCCESS) {
                 fprintf(stderr, "RTG HSA Tracer: hsa_amd_signal_async_handler_fn failed with new signal\n");
                 continue;
@@ -2235,7 +2279,7 @@ static void intercept_callback(
             const_cast<hsa_barrier_and_packet_t*>(barrier_packet)->completion_signal = signal;
             status = gs_OrigExtApiTable.hsa_amd_signal_async_handler_fn(
                     signal, HSA_SIGNAL_CONDITION_LT, 1, signal_callback,
-                    new SignalCallbackData(queue, agent, signal, orig_signal, barrier_packet));
+                    new SignalCallbackData(data_, signal, orig_signal, barrier_packet));
             if (status != HSA_STATUS_SUCCESS) {
                 fprintf(stderr, "RTG HSA Tracer: hsa_amd_signal_async_handler_fn failed with new signal\n");
                 continue;
