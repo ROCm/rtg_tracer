@@ -787,8 +787,8 @@ hsa_status_t hsa_agent_major_extension_supported(uint16_t extension, hsa_agent_t
 
 hsa_status_t hsa_queue_create(hsa_agent_t agent, uint32_t size, hsa_queue_type32_t type, void (*callback)(hsa_status_t status, hsa_queue_t* source, void* data), void* data, uint32_t private_segment_size, uint32_t group_segment_size, hsa_queue_t** queue) {
     if (enable_profile) {
-        // call special ext api to create an interceptible queue, twice as big as requested since we insert two packets for every one
-        hsa_status_t status = gs_OrigExtApiTable.hsa_amd_queue_intercept_create_fn(agent, size*2, type, callback, data, private_segment_size, group_segment_size, queue);
+        // call special ext api to create an interceptible queue
+        hsa_status_t status = gs_OrigExtApiTable.hsa_amd_queue_intercept_create_fn(agent, size, type, callback, data, private_segment_size, group_segment_size, queue);
         if (status != HSA_STATUS_SUCCESS) {
             return status;
         }
