@@ -589,8 +589,13 @@ for filename in non_opt_args:
                 if not func.startswith(func_orig):
                     print("event mismatch: '%s'.startswith('%s')" % (func,func_orig))
                     sys.exit(1)
-                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%d, "tid":%s, "args":{"params":"%s"}},\n'%(
-                    func, ts, ns, pid, tid, args))
+                if '\\' in args:
+                    print("HSA event with bad escape character")
+                    out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%d, "tid":%s},\n'%(
+                        func, ts, ns, pid, tid))
+                else:
+                    out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%d, "tid":%s, "args":{"params":"%s"}},\n'%(
+                        func, ts, ns, pid, tid, args))
                 continue
 
             match = RE_HSA_DISPATCH_HOST.search(line)
