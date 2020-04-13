@@ -44,10 +44,18 @@ static hsa_ven_amd_loader_1_01_pfn_t gs_OrigLoaderExtTable;
 
 // Whether to enable queue profile tracing.
 bool enable_profile = true;
+bool enable_profile_copy = false;
 bool enable_rpt = false;
 
 // Whether to print when a dispatch is queued.
 bool enable_dispatch_start = true;
+
+unsigned int host_count_dispatches = 0;
+unsigned int host_count_barriers = 0;
+unsigned int host_count_copies = 0;
+unsigned int cb_count_dispatches = 0;
+unsigned int cb_count_barriers = 0;
+unsigned int cb_count_copies = 0;
 
 // Output stream for all logging
 static FILE* stream;
@@ -631,13 +639,16 @@ static bool signal_callback(hsa_signal_value_t value, void* arg)
             }
             else {
                 if (data->is_barrier) {
+                    ++cb_count_barriers;
                     LOG_BARRIER
                 }
                 else if (data->is_copy) {
+                    ++cb_count_copies;
                     LOG_COPY
                 }
                 else {
                     long unsigned id_ = data->id_;
+                    ++cb_count_dispatches;
                     LOG_DISPATCH
                 }
             }
@@ -686,7 +697,7 @@ bool InitHsaTable(HsaApiTable* pTable)
     InitCoreApiTable(pTable->core_);
     InitAmdExtTable(pTable->amd_ext_);
 
-    if (enable_profile) {
+    if (enable_profile_copy) {
         status = hsa_amd_profiling_async_copy_enable(true);
         if (status != HSA_STATUS_SUCCESS) {
             fprintf(stderr, "RTG HSA Tracer: hsa_amd_profiling_async_copy_enable failed\n");
@@ -1662,7 +1673,8 @@ hsa_status_t hsa_amd_memory_pool_free(void* ptr) {
 
 // Mirrors Amd Extension Apis
 hsa_status_t hsa_amd_memory_async_copy(void* dst, hsa_agent_t dst_agent, const void* src, hsa_agent_t src_agent, size_t size, uint32_t num_dep_signals, const hsa_signal_t* dep_signals, hsa_signal_t completion_signal) {
-    if (enable_profile) {
+    ++RTG::host_count_copies;
+    if (enable_profile_copy) {
         if (completion_signal.handle == 0) {
             fprintf(stderr, "RTG HSA Tracer: hsa_amd_memory_async_copy no signal\n");
         }
@@ -1687,7 +1699,8 @@ hsa_status_t hsa_amd_memory_async_copy(void* dst, hsa_agent_t dst_agent, const v
 
 // Mirrors Amd Extension Apis
 hsa_status_t hsa_amd_memory_async_copy_rect(const hsa_pitched_ptr_t* dst, const hsa_dim3_t* dst_offset, const hsa_pitched_ptr_t* src, const hsa_dim3_t* src_offset, const hsa_dim3_t* range, hsa_agent_t copy_agent, hsa_amd_copy_direction_t dir, uint32_t num_dep_signals, const hsa_signal_t* dep_signals, hsa_signal_t completion_signal) {
-    if (enable_profile) {
+    ++RTG::host_count_copies;
+    if (enable_profile_copy) {
         if (completion_signal.handle == 0) {
             fprintf(stderr, "RTG HSA Tracer: hsa_amd_memory_async_copy_rect no signal\n");
         }
@@ -2294,6 +2307,7 @@ static void intercept_callback(
 
         // Checking for dispatch packet type
         if (type == HSA_PACKET_TYPE_KERNEL_DISPATCH) {
+            ++RTG::host_count_dispatches;
             const hsa_kernel_dispatch_packet_t* dispatch_packet =
                 reinterpret_cast<const hsa_kernel_dispatch_packet_t*>(packet);
 
@@ -2320,6 +2334,7 @@ static void intercept_callback(
             }
         }
         else if (type == HSA_PACKET_TYPE_BARRIER_AND) {
+            ++RTG::host_count_barriers;
             const hsa_barrier_and_packet_t* barrier_packet =
                 reinterpret_cast<const hsa_barrier_and_packet_t*>(packet);
 
@@ -2416,6 +2431,13 @@ extern "C" bool OnLoad(void *pTable,
         RTG::enable_profile = true;
         RTG::enable_rpt = true;
         RTG::enable_dispatch_start = false;
+
+        const char *profile_copy = nullptr;
+        if ((profile_copy = getenv("RTG_HSA_TRACER_PROFILE_COPY")) == nullptr) {
+            profile_copy = "no";
+        }
+        fprintf(stderr, "RTG_HSA_TRACER_PROFILE_COPY=%s\n", profile_copy);
+        RTG::enable_profile_copy = !(std::string(profile_copy) == "no");
     }
     else {
         const char *what_to_trace = nullptr;
@@ -2431,6 +2453,13 @@ extern "C" bool OnLoad(void *pTable,
         }
         fprintf(stderr, "RTG_HSA_TRACER_PROFILE=%s\n", profile);
         RTG::enable_profile = (std::string(profile) == "yes");
+
+        const char *profile_copy = nullptr;
+        if ((profile_copy = getenv("RTG_HSA_TRACER_PROFILE_COPY")) == nullptr) {
+            profile_copy = "no";
+        }
+        fprintf(stderr, "RTG_HSA_TRACER_PROFILE_COPY=%s\n", profile_copy);
+        RTG::enable_profile_copy = !(std::string(profile_copy) == "no");
 
         const char *dispatch_start = nullptr;
         if ((dispatch_start = getenv("RTG_HSA_TRACER_DISPATCH_START")) == nullptr) {
@@ -2460,4 +2489,16 @@ extern "C" void OnUnload()
     }
 #endif
     fclose(RTG::stream);
+}
+
+__attribute__((destructor)) static void destroy() {
+    fprintf(stderr, "RTG HSA Tracer: Destructing\n");
+    if (RTG::enable_profile || RTG::enable_profile_copy) {
+        fprintf(stderr, "RTG HSA Tracer: host_count_dispatches=%u\n", RTG::host_count_dispatches);
+        fprintf(stderr, "RTG HSA Tracer:   cb_count_dispatches=%u\n", RTG::cb_count_dispatches);
+        fprintf(stderr, "RTG HSA Tracer:   host_count_barriers=%u\n", RTG::host_count_barriers);
+        fprintf(stderr, "RTG HSA Tracer:     cb_count_barriers=%u\n", RTG::cb_count_barriers);
+        fprintf(stderr, "RTG HSA Tracer:     host_count_copies=%u\n", RTG::host_count_copies);
+        fprintf(stderr, "RTG HSA Tracer:       cb_count_copies=%u\n", RTG::cb_count_copies);
+    }
 }
