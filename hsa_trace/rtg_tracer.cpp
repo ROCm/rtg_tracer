@@ -615,6 +615,7 @@ static bool signal_callback(hsa_signal_value_t value, void* arg)
                 int queue_id_ = 0;
                 int seq_num_ = 0;
                 if (data->is_barrier) {
+                    ++cb_count_barriers;
                     type_ = "barrier";
                     tag_ = "";
                     msg_ = "";
@@ -623,11 +624,13 @@ static bool signal_callback(hsa_signal_value_t value, void* arg)
                     seq_num_ = data->seq_num_;
                 }
                 else if (data->is_copy) {
+                    ++cb_count_copies;
                     type_ = "copy";
                     tag_ = "";
                     msg_ = "";
                 }
                 else {
+                    ++cb_count_dispatches;
                     type_ = "kernel";
                     tag_ = data->name;
                     msg_ = "";
