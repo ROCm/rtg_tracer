@@ -526,7 +526,6 @@ struct SignalCallbackData
 #if 0
         // race?  checking signals before timestamps are written, they will be zero
         amd_signal_t *wtf = reinterpret_cast<amd_signal_t*>(signal.handle);
-        amd_signal_t *orig_wtf = reinterpret_cast<amd_signal_t*>(orig_signal.handle);
         useconds_t delay = 1;
         while (wtf->start_ts == 0 || wtf->end_ts == 0) {
             usleep(delay);
@@ -534,8 +533,6 @@ struct SignalCallbackData
             if (delay > 1000000) break; // stop after total of 1 second backoff
         }
         // copy timestamps to original signal
-        orig_wtf->start_ts = wtf->start_ts;
-        orig_wtf->end_ts = wtf->end_ts;
         if (wtf->start_ts == 0) {
             fprintf(stderr, "RTG HSA Tracer: signal callback missing start_ts: %lu\n", signal.handle);
             return false;
@@ -2503,5 +2500,13 @@ __attribute__((destructor)) static void destroy() {
         fprintf(stderr, "RTG HSA Tracer:     cb_count_barriers=%u\n", RTG::cb_count_barriers);
         fprintf(stderr, "RTG HSA Tracer:     host_count_copies=%u\n", RTG::host_count_copies);
         fprintf(stderr, "RTG HSA Tracer:       cb_count_copies=%u\n", RTG::cb_count_copies);
+    }
+    for (int i=0; i<5; ++i) {
+        if (RTG::host_count_dispatches != RTG::cb_count_dispatches
+                || RTG::host_count_barriers != RTG::cb_count_barriers) {
+            fprintf(stderr, "RTG HSA Tracer: not all callbacks have completed, waiting... dispatches %u vs %u barriers %u vs %u\n",
+                    RTG::host_count_dispatches, RTG::cb_count_dispatches, RTG::host_count_barriers, RTG::cb_count_barriers);
+            sleep(2);
+        }
     }
 }
