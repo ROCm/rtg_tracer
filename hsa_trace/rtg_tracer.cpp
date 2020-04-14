@@ -120,13 +120,14 @@ static void get_agent_queue_indexes(hsa_agent_t agent, hsa_queue_t *queue, int &
 
 struct InterceptCallbackData
 {
-    InterceptCallbackData(hsa_queue_t *queue, hsa_agent_t agent)
-        : queue(queue), agent(agent), agent_index(0), queue_index(0), seq_index(0)
+    InterceptCallbackData(hsa_queue_t *queue, hsa_agent_t agent, hsa_queue_t *signal_queue)
+        : queue(queue), agent(agent), signal_queue(signal_queue), agent_index(0), queue_index(0), seq_index(0)
     {
         get_agent_queue_indexes(agent, queue, agent_index, queue_index);
     }
     hsa_queue_t *queue;
     hsa_agent_t agent;
+    hsa_queue_t *signal_queue;
     int agent_index;
     int queue_index;
     std::atomic<int> seq_index;
@@ -653,11 +654,13 @@ static bool signal_callback(hsa_signal_value_t value, void* arg)
                 }
             }
         }
+#if 0
         // we created the signal, we must free
         hsa_status_t status = gs_OrigCoreApiTable.hsa_signal_destroy_fn(data->signal);
         if (status != HSA_STATUS_SUCCESS) {
             fprintf(stderr, "RTG HSA Tracer: signal destroy failed\n");
         }
+#endif
         delete data;
     }
     return false; // do not re-use callback
@@ -798,8 +801,20 @@ hsa_status_t hsa_agent_major_extension_supported(uint16_t extension, hsa_agent_t
 
 hsa_status_t hsa_queue_create(hsa_agent_t agent, uint32_t size, hsa_queue_type32_t type, void (*callback)(hsa_status_t status, hsa_queue_t* source, void* data), void* data, uint32_t private_segment_size, uint32_t group_segment_size, hsa_queue_t** queue) {
     if (enable_profile) {
+        hsa_status_t status;
+        hsa_queue_t *signal_queue;
+        // create a regular queue; this is for our fake signaling queue
+        status = gs_OrigCoreApiTable.hsa_queue_create_fn(agent, size, type, nullptr, nullptr, private_segment_size, group_segment_size, &signal_queue);
+        if (status != HSA_STATUS_SUCCESS) {
+            return status;
+        }
+        // make sure profiling is enabled for the newly created queue
+        status = gs_OrigExtApiTable.hsa_amd_profiling_set_profiler_enabled_fn(signal_queue, true);
+        if (status != HSA_STATUS_SUCCESS) {
+            return status;
+        }
         // call special ext api to create an interceptible queue
-        hsa_status_t status = gs_OrigExtApiTable.hsa_amd_queue_intercept_create_fn(agent, size, type, callback, data, private_segment_size, group_segment_size, queue);
+        status = gs_OrigExtApiTable.hsa_amd_queue_intercept_create_fn(agent, size, type, callback, data, private_segment_size, group_segment_size, queue);
         if (status != HSA_STATUS_SUCCESS) {
             return status;
         }
@@ -810,7 +825,7 @@ hsa_status_t hsa_queue_create(hsa_agent_t agent, uint32_t size, hsa_queue_type32
         }
         // set our intercept callback
         // we leak the InterceptCallbackData instance
-        InterceptCallbackData *data = new InterceptCallbackData(*queue, agent);
+        InterceptCallbackData *data = new InterceptCallbackData(*queue, agent, signal_queue);
         status = gs_OrigExtApiTable.hsa_amd_queue_intercept_register_fn(
                 *queue, intercept_callback, data);
         // print as usual
@@ -891,38 +906,22 @@ uint64_t hsa_queue_cas_write_index_screlease(const hsa_queue_t* queue, uint64_t 
 
 uint64_t hsa_queue_add_write_index_scacq_screl(const hsa_queue_t* queue, uint64_t value) {
     TRACE(queue, value);
-    if (value != 1) {
-        fprintf(stderr, "RTG HSA Tracer: add write index value!=1\n");
-        exit(EXIT_FAILURE);
-    }
-    return LOG_UINT64(gs_OrigCoreApiTable.hsa_queue_add_write_index_scacq_screl_fn(queue, 2));
+    return LOG_UINT64(gs_OrigCoreApiTable.hsa_queue_add_write_index_scacq_screl_fn(queue, value));
 }
 
 uint64_t hsa_queue_add_write_index_scacquire(const hsa_queue_t* queue, uint64_t value) {
     TRACE(queue, value);
-    if (value != 1) {
-        fprintf(stderr, "RTG HSA Tracer: add write index value!=1\n");
-        exit(EXIT_FAILURE);
-    }
-    return LOG_UINT64(gs_OrigCoreApiTable.hsa_queue_add_write_index_scacquire_fn(queue, 2));
+    return LOG_UINT64(gs_OrigCoreApiTable.hsa_queue_add_write_index_scacquire_fn(queue, value));
 }
 
 uint64_t hsa_queue_add_write_index_relaxed(const hsa_queue_t* queue, uint64_t value) {
     TRACE(queue, value);
-    if (value != 1) {
-        fprintf(stderr, "RTG HSA Tracer: add write index value!=1\n");
-        exit(EXIT_FAILURE);
-    }
-    return LOG_UINT64(gs_OrigCoreApiTable.hsa_queue_add_write_index_relaxed_fn(queue, 2));
+    return LOG_UINT64(gs_OrigCoreApiTable.hsa_queue_add_write_index_relaxed_fn(queue, value));
 }
 
 uint64_t hsa_queue_add_write_index_screlease(const hsa_queue_t* queue, uint64_t value) {
     TRACE(queue, value);
-    if (value != 1) {
-        fprintf(stderr, "RTG HSA Tracer: add write index value!=1\n");
-        exit(EXIT_FAILURE);
-    }
-    return LOG_UINT64(gs_OrigCoreApiTable.hsa_queue_add_write_index_screlease_fn(queue, 2));
+    return LOG_UINT64(gs_OrigCoreApiTable.hsa_queue_add_write_index_screlease_fn(queue, value));
 }
 
 void hsa_queue_store_read_index_relaxed(const hsa_queue_t* queue, uint64_t value) {
@@ -2274,12 +2273,12 @@ static const uint16_t kInvalidHeader = (HSA_PACKET_TYPE_INVALID << HSA_PACKET_HE
     (HSA_FENCE_SCOPE_NONE << HSA_PACKET_HEADER_ACQUIRE_FENCE_SCOPE) |
     (HSA_FENCE_SCOPE_NONE << HSA_PACKET_HEADER_RELEASE_FENCE_SCOPE);
 
-static const uint16_t kBarrierHeader = (HSA_PACKET_TYPE_BARRIER_OR << HSA_PACKET_HEADER_TYPE) |
+static const uint16_t kBarrierHeader = (HSA_PACKET_TYPE_BARRIER_AND << HSA_PACKET_HEADER_TYPE) |
     (1 << HSA_PACKET_HEADER_BARRIER) |
     (HSA_FENCE_SCOPE_NONE << HSA_PACKET_HEADER_ACQUIRE_FENCE_SCOPE) |
     (HSA_FENCE_SCOPE_NONE << HSA_PACKET_HEADER_RELEASE_FENCE_SCOPE);
 
-static const hsa_barrier_or_packet_t kBarrierPacket = {kInvalidHeader, 0, 0, {}, 0, {}};
+static const hsa_barrier_and_packet_t kBarrierPacket = {kInvalidHeader, 0, 0, {0,0,0,0,0}, 0, {0}};
 
 
 static void intercept_callback(
@@ -2292,18 +2291,31 @@ static void intercept_callback(
     InterceptCallbackData *data_ = reinterpret_cast<InterceptCallbackData*>(data);
     hsa_agent_t agent = data_->agent;
     hsa_queue_t *queue = data_->queue;
+    hsa_queue_t *signal_queue = data_->signal_queue;
 
     if (writer == NULL) {
         fprintf(stderr, "RTG HSA Tracer: fatal, intercept callback missing writer\n");
         exit(EXIT_FAILURE);
     }
+    if (count != 1) {
+        fprintf(stderr, "RTG HSA Tracer: fatal, intercept callback packet count != 1\n");
+        exit(EXIT_FAILURE);
+    }
 
     // Traverse input packets
     for (uint64_t j = 0; j < count; ++j) {
+        //uint64_t idx = user_que_idx + j;
         const packet_t* packet = &packets_arr[j];
         bool to_submit = true;
         hsa_packet_type_t type = GetHeaderType(packet);
+        hsa_signal_t new_signal{0};
         hsa_signal_t original_signal{0};
+
+        hsa_status_t status = gs_OrigCoreApiTable.hsa_signal_create_fn(1, 0, nullptr, &new_signal);
+        if (status != HSA_STATUS_SUCCESS) {
+            fprintf(stderr, "RTG HSA Tracer: failed to allocate signal\n");
+            exit(EXIT_FAILURE);
+        }
 
         // Checking for dispatch packet type
         if (type == HSA_PACKET_TYPE_KERNEL_DISPATCH) {
@@ -2316,94 +2328,61 @@ static void intercept_callback(
             const uint64_t kernel_symbol = kernel_code->runtime_loader_kernel_symbol;
             const char* kernel_name = QueryKernelName(kernel_object, kernel_code);
 
-            // Always allocate our own signal. Keep original.
             original_signal = dispatch_packet->completion_signal;
-            hsa_signal_t new_signal;
-            status = gs_OrigCoreApiTable.hsa_signal_create_fn(1, 0, nullptr, &new_signal);
-            if (status != HSA_STATUS_SUCCESS) {
-                fprintf(stderr, "RTG HSA Tracer: failed to allocate signal\n");
-                continue;
-            }
             const_cast<hsa_kernel_dispatch_packet_t*>(dispatch_packet)->completion_signal = new_signal;
             status = gs_OrigExtApiTable.hsa_amd_signal_async_handler_fn(
                     new_signal, HSA_SIGNAL_CONDITION_LT, 1, signal_callback,
                     new SignalCallbackData(kernel_name, data_, new_signal, original_signal));
             if (status != HSA_STATUS_SUCCESS) {
                 fprintf(stderr, "RTG HSA Tracer: hsa_amd_signal_async_handler_fn failed with new signal\n");
-                continue;
+                exit(EXIT_FAILURE);
             }
         }
-        else if (type == HSA_PACKET_TYPE_BARRIER_AND) {
+        else if (type == HSA_PACKET_TYPE_BARRIER_AND || type == HSA_PACKET_TYPE_BARRIER_OR) {
             ++RTG::host_count_barriers;
             const hsa_barrier_and_packet_t* barrier_packet =
                 reinterpret_cast<const hsa_barrier_and_packet_t*>(packet);
 
-            // Always allocate our own signal. Keep original.
             original_signal = barrier_packet->completion_signal;
-            hsa_signal_t new_signal;
-            status = gs_OrigCoreApiTable.hsa_signal_create_fn(1, 0, nullptr, &new_signal);
-            if (status != HSA_STATUS_SUCCESS) {
-                fprintf(stderr, "RTG HSA Tracer: failed to allocate signal\n");
-                continue;
-            }
             const_cast<hsa_barrier_and_packet_t*>(barrier_packet)->completion_signal = new_signal;
             status = gs_OrigExtApiTable.hsa_amd_signal_async_handler_fn(
                     new_signal, HSA_SIGNAL_CONDITION_LT, 1, signal_callback,
                     new SignalCallbackData(data_, new_signal, original_signal, barrier_packet));
             if (status != HSA_STATUS_SUCCESS) {
                 fprintf(stderr, "RTG HSA Tracer: hsa_amd_signal_async_handler_fn failed with new signal\n");
-                continue;
+                exit(EXIT_FAILURE);
             }
-        }
-        // VDI uses AND packets, not OR.  so we use OR to indicate our inserted packet
-        else if (type == HSA_PACKET_TYPE_BARRIER_OR) {
-            // DO NOTHING.  This is our packet for signaling the original signal is done.
-            //fprintf(stderr, "RTG HSA Tracer: DO NOTHING\n");
-            // Submitting the original packets as if profiling was not enabled
-            writer(packet, 1);
-            continue; // skip to next packet
         }
         else {
             fprintf(stderr, "RTG HSA Tracer: unrecognized packet type %d\n", type);
+            exit(EXIT_FAILURE);
         }
 
-        // Submit a new packet just for decrementing the original signal, if any
-        // Can't just call writer(), results in seg fault, because InterceptQueue uses a for loop from previous valid index to current write index.
-        // Write directly to the next packet in our intercept queue, because the for loop in HSA processes until it hits an invalid packet.
+        // Submitting the original packets as if profiling was not enabled
+        writer(packet, 1);
+
+        // Submit a new packet just for decrementing the original signal. This is done in a separate queue. Signal packet depends on real packet.
         if (original_signal.handle) {
-            const uint32_t queueSize = queue->size;
+            const uint32_t queueSize = signal_queue->size;
             const uint32_t queueMask = queueSize - 1;
-            uint64_t index = user_que_idx + 1;
-            uint64_t write_index = gs_OrigCoreApiTable.hsa_queue_load_write_index_scacquire_fn(queue);
-            if (index >= write_index) {
-                fprintf(stderr, "RTG HSA Tracer: fatal, intercept callback without reserved write index\n");
-                exit(EXIT_FAILURE);
+            uint64_t index = gs_OrigCoreApiTable.hsa_queue_add_write_index_screlease_fn(signal_queue, 1);
+            uint64_t read = gs_OrigCoreApiTable.hsa_queue_load_read_index_relaxed_fn(signal_queue);
+            while ((index - gs_OrigCoreApiTable.hsa_queue_load_read_index_scacquire_fn(signal_queue)) >= queueMask) {
+                sched_yield();
             }
-            hsa_barrier_or_packet_t *barrier = &((hsa_barrier_or_packet_t*)(queue->base_address))[index & queueMask];
-            // make sure the next packet is invalid and not a real packet
-            uint8_t type = ((barrier->header >> HSA_PACKET_HEADER_TYPE) & ((1 << HSA_PACKET_HEADER_WIDTH_TYPE) - 1));
-            // TODO why is type 0?
-            if (type != HSA_PACKET_TYPE_INVALID && type != 0) {
-                fprintf(stderr, "RTG HSA Tracer: fatal, intercept callback next packet not invalid\n");
-                if      (type == HSA_PACKET_TYPE_KERNEL_DISPATCH) fprintf(stderr, "RTG HSA Tracer: HSA_PACKET_TYPE_KERNEL_DISPATCH\n");
-                else if (type == HSA_PACKET_TYPE_BARRIER_AND)     fprintf(stderr, "RTG HSA Tracer: HSA_PACKET_TYPE_BARRIER_AND\n");
-                else if (type == HSA_PACKET_TYPE_BARRIER_OR)      fprintf(stderr, "RTG HSA Tracer: HSA_PACKET_TYPE_BARRIER_OR\n");
-                else if (type == HSA_PACKET_TYPE_INVALID)         fprintf(stderr, "RTG HSA Tracer: HSA_PACKET_TYPE_INVALID\n");
-                else                                              fprintf(stderr, "RTG HSA Tracer: unknown packet type %u\n", type);
-                exit(EXIT_FAILURE);
-            }
+            hsa_barrier_and_packet_t *barrier = &((hsa_barrier_and_packet_t*)(signal_queue->base_address))[index & queueMask];
             *barrier = kBarrierPacket;
             barrier->completion_signal = original_signal;
+            barrier->dep_signal[0] = new_signal;
             barrier->header = kBarrierHeader;
-            //fprintf(stderr, "RTG HSA Tracer: wrote new BARRIER OR at index %lu\n", index);
+            gs_OrigCoreApiTable.hsa_signal_store_relaxed_fn(signal_queue->doorbell_signal, index);
+            //fprintf(stderr, "RTG HSA Tracer: wrote new BARRIER AND at queue %lu index %lu (prev read was %lu)\n", signal_queue->id, index, read);
         }
         else {
             fprintf(stderr, "RTG HSA Tracer: fatal, intercept callback missing original signal\n");
             exit(EXIT_FAILURE);
         }
 
-        // Submitting the original packets as if profiling was not enabled
-        writer(packet, 1);
     }
 }
 
