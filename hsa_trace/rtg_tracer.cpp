@@ -23,6 +23,7 @@
 
 #include "ctpl_stl.h"
 
+#define USE_ATOMIC 1
 #define USE_STREAM 1
 #define ENABLE_HSA_AMD_MEMORY_LOCK_TO_POOL 0
 #define ENABLE_HSA_AMD_RUNTIME_QUEUE_CREATE_REGISTER 0
@@ -57,14 +58,22 @@ ctpl::thread_pool pool(1);
 // thread pool for signal destroy
 ctpl::thread_pool signal_pool(1);
 
-std::atomic<unsigned int> host_count_dispatches{0};
-std::atomic<unsigned int> host_count_barriers{0};
-std::atomic<unsigned int> host_count_copies{0};
-std::atomic<unsigned int> host_count_signals{0};
-std::atomic<unsigned int> cb_count_dispatches{0};
-std::atomic<unsigned int> cb_count_barriers{0};
-std::atomic<unsigned int> cb_count_copies{0};
-std::atomic<unsigned int> cb_count_signals{0};
+#if USE_ATOMIC
+typedef std::atomic<unsigned int> counter_t;
+#define LOAD(a) a.load()
+#else
+typedef unsigned int counter_t;
+#define LOAD(a) a
+#endif
+
+counter_t host_count_dispatches{0};
+counter_t host_count_barriers{0};
+counter_t host_count_copies{0};
+counter_t host_count_signals{0};
+counter_t cb_count_dispatches{0};
+counter_t cb_count_barriers{0};
+counter_t cb_count_copies{0};
+counter_t cb_count_signals{0};
 
 // Output stream for all logging
 static FILE* stream;
@@ -2511,25 +2520,25 @@ extern "C" void OnUnload()
 __attribute__((destructor)) static void destroy() {
     fprintf(stderr, "RTG HSA Tracer: Destructing\n");
     if (RTG::enable_profile || RTG::enable_profile_copy) {
-        fprintf(stderr, "RTG HSA Tracer: host_count_dispatches=%u\n", RTG::host_count_dispatches.load());
-        fprintf(stderr, "RTG HSA Tracer:   cb_count_dispatches=%u\n", RTG::cb_count_dispatches.load());
-        fprintf(stderr, "RTG HSA Tracer:   host_count_barriers=%u\n", RTG::host_count_barriers.load());
-        fprintf(stderr, "RTG HSA Tracer:     cb_count_barriers=%u\n", RTG::cb_count_barriers.load());
-        fprintf(stderr, "RTG HSA Tracer:     host_count_copies=%u\n", RTG::host_count_copies.load());
-        fprintf(stderr, "RTG HSA Tracer:       cb_count_copies=%u\n", RTG::cb_count_copies.load());
-        fprintf(stderr, "RTG HSA Tracer:    host_count_signals=%u\n", RTG::host_count_signals.load());
-        fprintf(stderr, "RTG HSA Tracer:      cb_count_signals=%u\n", RTG::cb_count_signals.load());
+        fprintf(stderr, "RTG HSA Tracer: host_count_dispatches=%u\n", LOAD(RTG::host_count_dispatches));
+        fprintf(stderr, "RTG HSA Tracer:   cb_count_dispatches=%u\n", LOAD(RTG::cb_count_dispatches));
+        fprintf(stderr, "RTG HSA Tracer:   host_count_barriers=%u\n", LOAD(RTG::host_count_barriers));
+        fprintf(stderr, "RTG HSA Tracer:     cb_count_barriers=%u\n", LOAD(RTG::cb_count_barriers));
+        fprintf(stderr, "RTG HSA Tracer:     host_count_copies=%u\n", LOAD(RTG::host_count_copies));
+        fprintf(stderr, "RTG HSA Tracer:       cb_count_copies=%u\n", LOAD(RTG::cb_count_copies));
+        fprintf(stderr, "RTG HSA Tracer:    host_count_signals=%u\n", LOAD(RTG::host_count_signals));
+        fprintf(stderr, "RTG HSA Tracer:      cb_count_signals=%u\n", LOAD(RTG::cb_count_signals));
     }
     for (int i=0; i<5; ++i) {
         if (RTG::host_count_dispatches != RTG::cb_count_dispatches
                 || RTG::host_count_barriers != RTG::cb_count_barriers) {
             fprintf(stderr, "RTG HSA Tracer: not all callbacks have completed, waiting... dispatches %u vs %u barriers %u vs %u signals %u vs %u\n",
-                    RTG::host_count_dispatches.load(),
-                    RTG::cb_count_dispatches.load(),
-                    RTG::host_count_barriers.load(),
-                    RTG::cb_count_barriers.load(),
-                    RTG::host_count_signals.load(),
-                    RTG::cb_count_signals.load()
+                    LOAD(RTG::host_count_dispatches),
+                    LOAD(RTG::cb_count_dispatches),
+                    LOAD(RTG::host_count_barriers),
+                    LOAD(RTG::cb_count_barriers),
+                    LOAD(RTG::host_count_signals),
+                    LOAD(RTG::cb_count_signals)
             );
             sleep(2);
         }
