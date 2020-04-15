@@ -21,6 +21,8 @@
 #include <hsa/amd_hsa_kernel_code.h>
 #include <hsa/amd_hsa_signal.h>
 
+#include "ctpl_stl.h"
+
 #define USE_STREAM 1
 #define ENABLE_HSA_AMD_MEMORY_LOCK_TO_POOL 0
 #define ENABLE_HSA_AMD_RUNTIME_QUEUE_CREATE_REGISTER 0
@@ -50,12 +52,19 @@ bool enable_rpt = false;
 // Whether to print when a dispatch is queued.
 bool enable_dispatch_start = true;
 
-unsigned int host_count_dispatches = 0;
-unsigned int host_count_barriers = 0;
-unsigned int host_count_copies = 0;
-unsigned int cb_count_dispatches = 0;
-unsigned int cb_count_barriers = 0;
-unsigned int cb_count_copies = 0;
+// thread pool for signal waits
+ctpl::thread_pool pool(1);
+// thread pool for signal destroy
+ctpl::thread_pool signal_pool(1);
+
+std::atomic<unsigned int> host_count_dispatches{0};
+std::atomic<unsigned int> host_count_barriers{0};
+std::atomic<unsigned int> host_count_copies{0};
+std::atomic<unsigned int> host_count_signals{0};
+std::atomic<unsigned int> cb_count_dispatches{0};
+std::atomic<unsigned int> cb_count_barriers{0};
+std::atomic<unsigned int> cb_count_copies{0};
+std::atomic<unsigned int> cb_count_signals{0};
 
 // Output stream for all logging
 static FILE* stream;
@@ -591,6 +600,17 @@ struct SignalCallbackData
     int seq_num_;
 };
 
+static void SignalDestroyer(int id, hsa_signal_t ours, hsa_signal_t theirs)
+{
+    //fprintf(stderr, "RTG HSA Tracer: SignalDestroyer id=%d ours=%lu theirs=%lu\n", id, ours.handle, theirs.handle);
+    gs_OrigCoreApiTable.hsa_signal_wait_relaxed_fn(theirs, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
+    hsa_status_t status = gs_OrigCoreApiTable.hsa_signal_destroy_fn(ours);
+    ++cb_count_signals;
+    if (status != HSA_STATUS_SUCCESS) {
+        fprintf(stderr, "RTG HSA Tracer: signal destroy failed %lu\n", ours.handle);
+    }
+}
+
 static bool signal_callback(hsa_signal_value_t value, void* arg)
 {
     if (arg != nullptr) {
@@ -654,16 +674,19 @@ static bool signal_callback(hsa_signal_value_t value, void* arg)
                 }
             }
         }
-#if 0
-        // we created the signal, we must free
-        hsa_status_t status = gs_OrigCoreApiTable.hsa_signal_destroy_fn(data->signal);
-        if (status != HSA_STATUS_SUCCESS) {
-            fprintf(stderr, "RTG HSA Tracer: signal destroy failed\n");
-        }
-#endif
+        // we created the signal, we must free, but we can't until we know it is no longer needed
+        // so wait on the associated original signal
+        signal_pool.push(SignalDestroyer, data->signal, data->orig_signal);
         delete data;
     }
     return false; // do not re-use callback
+}
+
+static void SignalWaiter(int id, SignalCallbackData *data)
+{
+    //fprintf(stderr, "RTG HSA Tracer: SignalWaiter id=%d signal=%lu\n", id, signal.handle);
+    gs_OrigCoreApiTable.hsa_signal_wait_relaxed_fn(data->signal, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
+    signal_callback(0, data);
 }
 
 bool InitHsaTable(HsaApiTable* pTable)
@@ -1673,6 +1696,8 @@ hsa_status_t hsa_amd_memory_pool_free(void* ptr) {
 // Mirrors Amd Extension Apis
 hsa_status_t hsa_amd_memory_async_copy(void* dst, hsa_agent_t dst_agent, const void* src, hsa_agent_t src_agent, size_t size, uint32_t num_dep_signals, const hsa_signal_t* dep_signals, hsa_signal_t completion_signal) {
     ++RTG::host_count_copies;
+    // TODO
+#if 0
     if (enable_profile_copy) {
         if (completion_signal.handle == 0) {
             fprintf(stderr, "RTG HSA Tracer: hsa_amd_memory_async_copy no signal\n");
@@ -1685,12 +1710,13 @@ hsa_status_t hsa_amd_memory_async_copy(void* dst, hsa_agent_t dst_agent, const v
             }
             status = gs_OrigExtApiTable.hsa_amd_signal_async_handler_fn(
                     signal, HSA_SIGNAL_CONDITION_LT, 1, signal_callback,
-                    new SignalCallbackData(src_agent, signal, completion_signal, num_dep_signals, dep_signals));
+                    new SignalCallbackData(src_agent, signal, num_dep_signals, dep_signals));
             if (status != HSA_STATUS_SUCCESS) {
                 fprintf(stderr, "RTG HSA Tracer: hsa_amd_signal_async_handler_fn failed in hsa_amd_memory_async_copy\n");
             }
         }
     }
+#endif
     // print as usual
     TRACE(dst, dst_agent, src, src_agent, size, num_dep_signals, dep_signals, completion_signal);
     return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_memory_async_copy_fn(dst, dst_agent, src, src_agent, size, num_dep_signals, dep_signals, completion_signal));
@@ -1699,6 +1725,8 @@ hsa_status_t hsa_amd_memory_async_copy(void* dst, hsa_agent_t dst_agent, const v
 // Mirrors Amd Extension Apis
 hsa_status_t hsa_amd_memory_async_copy_rect(const hsa_pitched_ptr_t* dst, const hsa_dim3_t* dst_offset, const hsa_pitched_ptr_t* src, const hsa_dim3_t* src_offset, const hsa_dim3_t* range, hsa_agent_t copy_agent, hsa_amd_copy_direction_t dir, uint32_t num_dep_signals, const hsa_signal_t* dep_signals, hsa_signal_t completion_signal) {
     ++RTG::host_count_copies;
+    // TODO
+#if 0
     if (enable_profile_copy) {
         if (completion_signal.handle == 0) {
             fprintf(stderr, "RTG HSA Tracer: hsa_amd_memory_async_copy_rect no signal\n");
@@ -1711,13 +1739,14 @@ hsa_status_t hsa_amd_memory_async_copy_rect(const hsa_pitched_ptr_t* dst, const 
             }
             status = gs_OrigExtApiTable.hsa_amd_signal_async_handler_fn(
                     signal, HSA_SIGNAL_CONDITION_LT, 1, signal_callback,
-                    new SignalCallbackData(copy_agent, signal, completion_signal, num_dep_signals, dep_signals));
+                    new SignalCallbackData(copy_agent, signal, num_dep_signals, dep_signals));
             if (status != HSA_STATUS_SUCCESS) {
                 fprintf(stderr, "RTG HSA Tracer: hsa_amd_signal_async_handler_fn failed in hsa_amd_memory_async_copy_rect\n");
             }
         }
         return gs_OrigExtApiTable.hsa_amd_memory_async_copy_rect_fn(dst, dst_offset, src, src_offset, range, copy_agent, dir, num_dep_signals, dep_signals, completion_signal);
     }
+#endif
     // print as usual
     TRACE(dst, dst_offset, src, src_offset, range, copy_agent, dir, num_dep_signals, dep_signals, completion_signal);
     return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_memory_async_copy_rect_fn(dst, dst_offset, src, src_offset, range, copy_agent, dir, num_dep_signals, dep_signals, completion_signal));
@@ -2311,6 +2340,7 @@ static void intercept_callback(
         hsa_signal_t new_signal{0};
         hsa_signal_t original_signal{0};
 
+        ++host_count_signals;
         hsa_status_t status = gs_OrigCoreApiTable.hsa_signal_create_fn(1, 0, nullptr, &new_signal);
         if (status != HSA_STATUS_SUCCESS) {
             fprintf(stderr, "RTG HSA Tracer: failed to allocate signal\n");
@@ -2330,6 +2360,7 @@ static void intercept_callback(
 
             original_signal = dispatch_packet->completion_signal;
             const_cast<hsa_kernel_dispatch_packet_t*>(dispatch_packet)->completion_signal = new_signal;
+#if 0
             status = gs_OrigExtApiTable.hsa_amd_signal_async_handler_fn(
                     new_signal, HSA_SIGNAL_CONDITION_LT, 1, signal_callback,
                     new SignalCallbackData(kernel_name, data_, new_signal, original_signal));
@@ -2337,6 +2368,9 @@ static void intercept_callback(
                 fprintf(stderr, "RTG HSA Tracer: hsa_amd_signal_async_handler_fn failed with new signal\n");
                 exit(EXIT_FAILURE);
             }
+#else
+            pool.push(SignalWaiter, new SignalCallbackData(kernel_name, data_, new_signal, original_signal));
+#endif
         }
         else if (type == HSA_PACKET_TYPE_BARRIER_AND || type == HSA_PACKET_TYPE_BARRIER_OR) {
             ++RTG::host_count_barriers;
@@ -2345,6 +2379,7 @@ static void intercept_callback(
 
             original_signal = barrier_packet->completion_signal;
             const_cast<hsa_barrier_and_packet_t*>(barrier_packet)->completion_signal = new_signal;
+#if 0
             status = gs_OrigExtApiTable.hsa_amd_signal_async_handler_fn(
                     new_signal, HSA_SIGNAL_CONDITION_LT, 1, signal_callback,
                     new SignalCallbackData(data_, new_signal, original_signal, barrier_packet));
@@ -2352,6 +2387,9 @@ static void intercept_callback(
                 fprintf(stderr, "RTG HSA Tracer: hsa_amd_signal_async_handler_fn failed with new signal\n");
                 exit(EXIT_FAILURE);
             }
+#else
+            pool.push(SignalWaiter, new SignalCallbackData(data_, new_signal, original_signal, barrier_packet));
+#endif
         }
         else {
             fprintf(stderr, "RTG HSA Tracer: unrecognized packet type %d\n", type);
@@ -2473,18 +2511,26 @@ extern "C" void OnUnload()
 __attribute__((destructor)) static void destroy() {
     fprintf(stderr, "RTG HSA Tracer: Destructing\n");
     if (RTG::enable_profile || RTG::enable_profile_copy) {
-        fprintf(stderr, "RTG HSA Tracer: host_count_dispatches=%u\n", RTG::host_count_dispatches);
-        fprintf(stderr, "RTG HSA Tracer:   cb_count_dispatches=%u\n", RTG::cb_count_dispatches);
-        fprintf(stderr, "RTG HSA Tracer:   host_count_barriers=%u\n", RTG::host_count_barriers);
-        fprintf(stderr, "RTG HSA Tracer:     cb_count_barriers=%u\n", RTG::cb_count_barriers);
-        fprintf(stderr, "RTG HSA Tracer:     host_count_copies=%u\n", RTG::host_count_copies);
-        fprintf(stderr, "RTG HSA Tracer:       cb_count_copies=%u\n", RTG::cb_count_copies);
+        fprintf(stderr, "RTG HSA Tracer: host_count_dispatches=%u\n", RTG::host_count_dispatches.load());
+        fprintf(stderr, "RTG HSA Tracer:   cb_count_dispatches=%u\n", RTG::cb_count_dispatches.load());
+        fprintf(stderr, "RTG HSA Tracer:   host_count_barriers=%u\n", RTG::host_count_barriers.load());
+        fprintf(stderr, "RTG HSA Tracer:     cb_count_barriers=%u\n", RTG::cb_count_barriers.load());
+        fprintf(stderr, "RTG HSA Tracer:     host_count_copies=%u\n", RTG::host_count_copies.load());
+        fprintf(stderr, "RTG HSA Tracer:       cb_count_copies=%u\n", RTG::cb_count_copies.load());
+        fprintf(stderr, "RTG HSA Tracer:    host_count_signals=%u\n", RTG::host_count_signals.load());
+        fprintf(stderr, "RTG HSA Tracer:      cb_count_signals=%u\n", RTG::cb_count_signals.load());
     }
     for (int i=0; i<5; ++i) {
         if (RTG::host_count_dispatches != RTG::cb_count_dispatches
                 || RTG::host_count_barriers != RTG::cb_count_barriers) {
-            fprintf(stderr, "RTG HSA Tracer: not all callbacks have completed, waiting... dispatches %u vs %u barriers %u vs %u\n",
-                    RTG::host_count_dispatches, RTG::cb_count_dispatches, RTG::host_count_barriers, RTG::cb_count_barriers);
+            fprintf(stderr, "RTG HSA Tracer: not all callbacks have completed, waiting... dispatches %u vs %u barriers %u vs %u signals %u vs %u\n",
+                    RTG::host_count_dispatches.load(),
+                    RTG::cb_count_dispatches.load(),
+                    RTG::host_count_barriers.load(),
+                    RTG::cb_count_barriers.load(),
+                    RTG::host_count_signals.load(),
+                    RTG::cb_count_signals.load()
+            );
             sleep(2);
         }
     }
