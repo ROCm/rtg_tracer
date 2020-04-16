@@ -166,18 +166,18 @@ def print_help():
 rocm-timeline-generator.py
 
 arguments:
+    -f              show flow events from host to HSA queue
     -g              add gap events to output
     -h              this help message
     -k              replace HIP kernel launch function with actual kernel names
     -o filename     output JSON to given filename
     -s              HIP calls with hipStream_t args are grouped separately
-    -t timestamp    user-specificed HCC timestamp reference point
     -v              verbose console output (extra debugging)
 """)
     sys.exit(0)
 
 try:
-    opts,non_opt_args = getopt.gnu_getopt(sys.argv[1:], "fghko:t:v")
+    opts,non_opt_args = getopt.gnu_getopt(sys.argv[1:], "fghko:sv")
     output_filename = None
     show_gaps = False
     show_flow = False
