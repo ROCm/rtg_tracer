@@ -47,12 +47,24 @@ RCCL non-standard timestamps
 rocm-framework-3:24888:25056 [1] 1558545003174220 NCCL INFO AllReduce: opCount 1 sendbuff 0x7f80b54bad00 recvbuff 0x7f81cce12200 count 1001 datatype 7 op 0 root 0 comm
 0x7f80467b9770 [nranks=2] stream 0x7f804680c090
 
-VDI
+VDI (OLD)
 
 :3:rocdevice.cpp            :434 : 17353046108778: Initializing HSA stack.
 :3:hip_device_runtime.cpp   :455 : 17353103685127: [7f0eccf0a700] hipGetDeviceCount ( 0x7ffc162ea44c )
 :3:hip_device_runtime.cpp   :457 : 17353103685235: [7f0eccf0a700] hipGetDeviceCount: Returned hipSuccess
 :3:hip_stream.cpp           :121 : 17353103741889: ihipStreamCreate: 199ad4c0
+
+VDI (NEW)
+
+:3:comgrctx.cpp             :33  : 210788573126: Loading COMGR library.
+:3:hip_device_runtime.cpp   :468 : 210790172306: 38985: [7fbe92cca180] hipGetDeviceCount ( 0x7ffef19aeeac )
+:3:hip_device_runtime.cpp   :470 : 210790172512: 38985: [7fbe92cca180] hipGetDeviceCount: Returned hipSuccess
+:3:hip_device_runtime.cpp   :494 : 210790172558: 38985: [7fbe92cca180] hipSetDevice ( 0 )
+:3:hip_device_runtime.cpp   :499 : 210790172578: 38985: [7fbe92cca180] hipSetDevice: Returned hipSuccess
+:3:hip_stream.cpp           :179 : 210790172669: 38985: [7fbe92cca180] hipStreamCreateWithFlags ( 0x7ffef19aeee8, 0 )
+:3:hip_stream.cpp           :172 : 210790172694: ihipStreamCreate: 2241d40
+:3:hip_stream.cpp           :181 : 210790172709: 38985: [7fbe92cca180] hipStreamCreateWithFlags: Returned hipSuccess
+:3:hip_device_runtime.cpp   :453 : 210790172759: 38985: [7fbe92cca180] hipGetDevice ( 0x7ffef19aeec4 )
 
 """
 
@@ -84,8 +96,10 @@ RE_HSA_BARRIER_HOST = re.compile(r"<<hsa-api pid:(\d+) tid:(\d+) barrier queue:(
 RE_HSA_BARRIER      = re.compile(r"<<hsa-api pid:(\d+) tid:(\d+) barrier queue:(.*) agent:(\d+) signal:(\d+) start:(\d+) stop:(\d+) dep1:(\d+) dep2:(\d+) dep3:(\d+) dep4:(\d+) dep5:(\d+) id:(\d+) >>")
 RE_HSA_COPY         = re.compile(r"<<hsa-api pid:(\d+) tid:(\d+) copy agent:(\d+) signal:(\d+) start:(\d+) stop:(\d+) dep1:(\d+) dep2:(\d+) dep3:(\d+) dep4:(\d+) dep5:(\d+) >>")
 RE_RCCL_ALLREDUCE   = re.compile(r"(.*):(\d+):(\d+) \[(\d+)\] (\d+) NCCL INFO AllReduce: opCount (.*) sendbuff (.*) recvbuff (.*) count (\d+) datatype (\d+) op (\d+) root 0 comm (.*) \[nranks=(\d+)\] stream (.*)")
-RE_VDI_OPEN         = re.compile(r":\d+:.*:.*:(.*): \[(.*)\] (.*) \( (.*) \)")
-RE_VDI_CLOSE        = re.compile(r":\d+:.*:.*:(.*): \[(.*)\] (.*): Returned (.*)")
+#RE_VDI_OPEN         = re.compile(r":\d+:.*:.*:(.*): \[(.*)\] (.*) \( (.*) \)")
+#RE_VDI_CLOSE        = re.compile(r":\d+:.*:.*:(.*): \[(.*)\] (.*): Returned (.*)")
+RE_VDI_OPEN         = re.compile(r":\d+:.*:.*:(.*):(.*): \[(.*)\] (.*) \( (.*) \)")
+RE_VDI_CLOSE        = re.compile(r":\d+:.*:.*:(.*):(.*): \[(.*)\] (.*): Returned (.*)")
 RE_VDI_MSG          = re.compile(r":\d+:.*:.*:(.*): (.*)")
 
 count_skipped = 0
@@ -719,7 +733,7 @@ for filename in non_opt_args:
             match = RE_VDI_OPEN.search(line)
             if match:
                 count_vdi_open += 1
-                ts,tid,hipname,args = [x.strip() for x in match.groups()]
+                ts,pid,tid,hipname,args = [x.strip() for x in match.groups()]
                 if tid not in vdi_events: vdi_events[tid] = []
                 # some hip calls were missing their close lines
                 if hipname in vdi_missing_names_close: continue
@@ -730,7 +744,7 @@ for filename in non_opt_args:
             match = RE_VDI_CLOSE.search(line)
             if match:
                 count_vdi_close += 1
-                ts,tid,hipname,args = [x.strip() for x in match.groups()]
+                ts,pid,tid,hipname,args = [x.strip() for x in match.groups()]
                 if tid not in vdi_events:
                     # some hip calls were missing their open lines
                     if hipname in vdi_missing_names_open: continue
