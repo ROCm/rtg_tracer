@@ -90,7 +90,7 @@ RE_STRACE_RESUMED   = re.compile(r'(\d+)\.(\d+) <\.\.\. (\w+) resumed> .* = <?([
 RE_STRACE_COMPLETE  = re.compile(r"(\d+)\.(\d+) (.*) = (-?<?\w+>?) <(.*)>")
 RE_HSA_OPEN         = re.compile(r"<<hsa-api pid:(\d+) tid:(\d+) (.*) (\(.*\)) @(\d+)")
 RE_HSA_CLOSE        = re.compile(r"  hsa-api pid:(\d+) tid:(\d+) (.*) ret=(.*)>> \+(\d+)") # used to capture ' ns' at end, but units were wrong in HSA tracer library
-RE_HSA_DISPATCH_HOST= re.compile(r"<<hsa-api pid:(\d+) tid:(\d+) dispatch queue:(.*) agent:(\d+) signal:(\d+) name:'(.*)' tick:(\d+) id:(\d+) >>")
+RE_HSA_DISPATCH_HOST= re.compile(r"<<hsa-api pid:(\d+) tid:(\d+) dispatch queue:(.*) agent:(\d+) signal:(\d+) name:'(.*)' tick:(\d+) id:(\d+) workgroup:{(\d+),(\d+),(\d+)} grid:{(\d+),(\d+),(\d+)} >>")
 RE_HSA_DISPATCH     = re.compile(r"<<hsa-api pid:(\d+) tid:(\d+) dispatch queue:(.*) agent:(\d+) signal:(\d+) name:'(.*)' start:(\d+) stop:(\d+) id:(\d+) >>")
 RE_HSA_BARRIER_HOST = re.compile(r"<<hsa-api pid:(\d+) tid:(\d+) barrier queue:(.*) agent:(\d+) signal:(\d+) dep1:(\d+) dep2:(\d+) dep3:(\d+) dep4:(\d+) dep5:(\d+) tick:(\d+) id:(\d+) >>")
 RE_HSA_BARRIER      = re.compile(r"<<hsa-api pid:(\d+) tid:(\d+) barrier queue:(.*) agent:(\d+) signal:(\d+) start:(\d+) stop:(\d+) dep1:(\d+) dep2:(\d+) dep3:(\d+) dep4:(\d+) dep5:(\d+) id:(\d+) >>")
@@ -135,6 +135,8 @@ count_hsa_copy = 0
 count_hsa_missed = 0
 count_rccl_info_allreduce = 0
 count_rccl_missed = 0
+
+workgroups = {}
 
 hsa_pids = {}
 hsa_queues = {}
@@ -187,15 +189,17 @@ arguments:
     -o filename     output JSON to given filename
     -s              HIP calls with hipStream_t args are grouped separately
     -v              verbose console output (extra debugging)
+    -w              print workgroups sizes, sorted
 """)
     sys.exit(0)
 
 try:
-    opts,non_opt_args = getopt.gnu_getopt(sys.argv[1:], "fghko:sv")
+    opts,non_opt_args = getopt.gnu_getopt(sys.argv[1:], "fghko:svw")
     output_filename = None
     show_gaps = False
     show_flow = False
     verbose = False
+    print_workgroups = False
     for o,a in opts:
         if o == "-f":
             show_flow = True
@@ -211,6 +215,8 @@ try:
             hip_stream_output = True
         elif o == "-v":
             verbose = True
+        elif o == "-w":
+            print_workgroups = True
         else:
             assert False, "unhandled option"
 except getopt.GetoptError as err:
@@ -615,7 +621,8 @@ for filename in non_opt_args:
             match = RE_HSA_DISPATCH_HOST.search(line)
             if match:
                 count_hsa_dispatch_host += 1
-                pid,tid,queue,agent,signal,name,tick,did = match.groups()
+                pid,tid,queue,agent,signal,name,tick,did,wgx,wgy,wgz,gx,gy,gz = match.groups()
+                workgroups[(int(wgx)*int(wgy)*int(wgz),(wgx,wgy,wgz),name)] = None
                 key = (pid,agent)
                 if key not in hsa_queues:
                     hsa_queues[key] = {}
@@ -886,3 +893,7 @@ print("  complete strace lines: %d"%count_strace_complete)
 print("       duplicate gap ts: %d"%count_gap_duplicate_ts)
 print("      wrapped gap event: %d"%count_gap_wrapped)
 print("         okay gap event: %d"%count_gap_okay)
+
+if print_workgroups:
+    for size,(x,y,z),name in sorted(workgroups):
+        print(size,(x,y,z),name)

@@ -396,7 +396,7 @@ fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%ld>> +%lu us\n", pid_, tid_.c_s
 #define LOG_VOID_OUT \
 fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=void>> +%lu us\n", pid_, tid_.c_str(),  func.c_str(), ticks); fflush(stream);
 #define LOG_DISPATCH_BEGIN \
-fprintf(stream, "<<hsa-api pid:%d tid:%s dispatch queue:%lu agent:%lu signal:%lu name:'%s' tick:%lu id:%lu >>\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, name_, tick_, id_);
+fprintf(stream, "<<hsa-api pid:%d tid:%s dispatch queue:%lu agent:%lu signal:%lu name:'%s' tick:%lu id:%lu workgroup:{%d,%d,%d} grid:{%d,%d,%d} >>\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, name_, tick_, id_, packet->workgroup_size_x, packet->workgroup_size_y, packet->workgroup_size_z, packet->grid_size_x, packet->grid_size_y, packet->grid_size_z);
 #define LOG_DISPATCH \
 fprintf(stream, "<<hsa-api pid:%d tid:%s dispatch queue:%lu agent:%lu signal:%lu name:'%s' start:%lu stop:%lu id:%lu >>\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, name_, start_, stop_, id_); fflush(stream);
 #define LOG_BARRIER_BEGIN \
@@ -585,7 +585,7 @@ enum CopyDirection {
 
 struct SignalCallbackData
 {
-    SignalCallbackData(const char *name, InterceptCallbackData *data, hsa_signal_t signal, hsa_signal_t orig_signal, bool owns_orig_signal)
+    SignalCallbackData(const char *name, InterceptCallbackData *data, hsa_signal_t signal, hsa_signal_t orig_signal, bool owns_orig_signal, const hsa_kernel_dispatch_packet_t *packet)
         : name(name), data(data), queue(data->queue), agent(data->agent), signal(signal), orig_signal(orig_signal), owns_orig_signal(owns_orig_signal), bytes(0), direction(0),
             is_copy(false), is_barrier(false), dep1(0), dep2(0), dep3(0), dep4(0), dep5(0), id_(did()), seq_num_(data->seq_index++)
     {
@@ -2495,7 +2495,7 @@ static void intercept_callback(
                 }
             }
             const_cast<hsa_kernel_dispatch_packet_t*>(dispatch_packet)->completion_signal = new_signal;
-            pool.push(SignalWaiter, new SignalCallbackData(kernel_name, data_, new_signal, original_signal, owns_orig_signal));
+            pool.push(SignalWaiter, new SignalCallbackData(kernel_name, data_, new_signal, original_signal, owns_orig_signal, dispatch_packet));
         }
         else if (type == HSA_PACKET_TYPE_BARRIER_AND || type == HSA_PACKET_TYPE_BARRIER_OR) {
             ++RTG::host_count_barriers;
