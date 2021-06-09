@@ -21,6 +21,12 @@
 #include <hsa/amd_hsa_kernel_code.h>
 #include <hsa/amd_hsa_signal.h>
 
+#include <hip/hip_runtime_api.h>
+#include <hip/amd_detail/hip_runtime_prof.h>
+#include <hip/amd_detail/hip_prof_str.h>
+
+#include <roctracer/roctracer.h>
+
 #include "ctpl_stl.h"
 
 #define USE_ATOMIC 1
@@ -74,6 +80,7 @@ counter_t cb_count_dispatches{0};
 counter_t cb_count_barriers{0};
 counter_t cb_count_copies{0};
 counter_t cb_count_signals{0};
+//counter_t correlation_id{0};
 
 // Output stream for all logging
 static FILE* stream;
@@ -91,6 +98,20 @@ static struct Deleter {
     }
 } RunOnShutDown;
 #endif
+
+// Support for HIP API callbacks.
+static void* hip_activity_callback(uint32_t cid, activity_record_t* record, const void* data, void* arg);
+static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data, void* arg);
+// Need to allocate hip_api_data_t, but cannot use new operator due to incomplete default constructors.
+// The hip_api_data_t is returned from the activity callback; without it, the API callback does not fire.
+thread_local std::vector<char[sizeof(hip_api_data_t)]> hip_api_data(HIP_API_ID_NUMBER);
+// Shared cache of HIP API names. Build it during init, used by all threads without mutex.
+std::vector<std::string> hip_api_names(HIP_API_ID_NUMBER);
+// To preserve state between API start/stop calls, we need to allocate some state.
+struct hip_api_state_ {
+    uint64_t tick; \
+};
+thread_local std::vector<struct hip_api_state_> hip_api_state(HIP_API_ID_NUMBER);
 
 // Lookup which HSA functions we want to trace
 static std::unordered_map<std::string,bool> enabled_map;
@@ -405,6 +426,10 @@ fprintf(stream, "<<hsa-api pid:%d tid:%s barrier queue:%lu agent:%lu signal:%lu 
 fprintf(stream, "<<hsa-api pid:%d tid:%s barrier queue:%lu agent:%lu signal:%lu start:%lu stop:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu id:%lu >>\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, start_, stop_, data->dep1, data->dep2, data->dep3, data->dep4, data->dep5, data->id_); fflush(stream);
 #define LOG_COPY \
 fprintf(stream, "<<hsa-api pid:%d tid:%s copy agent:%lu signal:%lu start:%lu stop:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu >>\n", pid_, tid_.c_str(), agent_.handle, signal_.handle, start_, stop_, data->dep1, data->dep2, data->dep3, data->dep4, data->dep5); fflush(stream);
+#define HIP_API_START \
+fprintf(stream, "<<hip-api pid:%d tid:%s %s %s @%lu\n", pid_, tid_.c_str(), func.c_str(), args.c_str(), tick_); fflush(stream);
+#define HIP_API_STOP \
+fprintf(stream, "  hip-api pid:%d tid:%s %s ret=%d>> +%lu us\n", pid_, tid_.c_str(),  func.c_str(), localStatus, ticks); fflush(stream);
 #else
 #define TRACE_OUT \
 os << "<<hsa-api" \
@@ -2534,6 +2559,43 @@ static void intercept_callback(
     }
 }
 
+static void* hip_activity_callback(uint32_t cid, activity_record_t* record, const void* data, void* arg)
+{
+    //hip_api_data_t *ret = (hip_api_data_t*)malloc(sizeof(hip_api_data_t));
+    hip_api_data_t *ret = (hip_api_data_t*)hip_api_data[cid];
+    memset(ret, 0, sizeof(hip_api_data_t));
+    //fprintf(stderr, "HI FROM hip_activity_callback cid=%u record=%p data=%p arg=%p ret=%p\n", cid, record, data, arg, ret);
+    //auto id = ++RTG::correlation_id;
+    //ret->correlation_id = id;
+    return ret;
+}
+
+static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, void* arg)
+{
+    hip_api_data_t *data = (hip_api_data_t*)data_;
+    std::string &func = hip_api_names[cid];
+    // TODO capture args
+    //std::string args = "()";
+    std::string args;
+    int pid_ = pid();
+    std::string tid_ = tid();
+    if (data->phase == 0) {
+        // hack for now, stash tick in the correlation ID
+        uint64_t tick_ = tick();
+        data->correlation_id = tick_;
+        HIP_API_START
+    }
+    else {
+        uint64_t tick_ = data->correlation_id;
+        uint64_t ticks = tick() - tick_;                                   \
+        int localStatus = 0;
+        HIP_API_STOP
+    }
+    //fprintf(stderr, "HI FROM hip_api_callback domain=%u cid=%u data=%p arg=%p correlation_id=%lu phase=%u name=%s\n",
+    //        domain, cid, data, arg, data->correlation_id, data->phase, hip_api_names[cid].c_str());
+    return NULL;
+}
+
 } // namespace RTG
 
 extern "C" bool OnLoad(void *pTable,
@@ -2600,6 +2662,12 @@ extern "C" bool OnLoad(void *pTable,
         if (check == 'n' || check == 'N' || check == '0') {
             RTG::enable_dispatch_start = false;
         }
+    }
+
+    for (int i=0; i<HIP_API_ID_NUMBER; ++i) {
+        hipRegisterActivityCallback(i, (void*)RTG::hip_activity_callback, NULL);
+        hipRegisterApiCallback(i, (void*)RTG::hip_api_callback, NULL);
+        RTG::hip_api_names[i] = hip_api_name(i);
     }
 
     return RTG::InitHsaTable(reinterpret_cast<HsaApiTable*>(pTable));

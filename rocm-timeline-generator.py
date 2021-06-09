@@ -77,9 +77,9 @@ import subprocess
 import sys
 
 RE_HCC_TS_REF       = re.compile(r"hcc-ts-ref, prof_name gpu_host_ts, unix_ts (\d+), gpu_ts (\d+)")
-RE_HIP_TID          = re.compile(r"hip-api pid:(\d+) tid:(\d+):HIP initialized short_tid#(\d+)\s*\(maps to full_tid: 0x(\w+)\)")
-RE_HIP_OPEN         = re.compile(r"<<hip-api pid:(\d+) tid:(\d+)\.(\d+) (.*) @(\d+)")
-RE_HIP_CLOSE        = re.compile(r"hip-api pid:(\d+) tid:(\d+)\.(\d+) (.*) ret=\s?(\d+) \((\w+)\)>> \+(\d+) ns")
+#RE_HIP_TID          = re.compile(r"hip-api pid:(\d+) tid:(\d+):HIP initialized short_tid#(\d+)\s*\(maps to full_tid: 0x(\w+)\)")
+#RE_HIP_OPEN         = re.compile(r"<<hip-api pid:(\d+) tid:(\d+)\.(\d+) (.*) @(\d+)")
+#RE_HIP_CLOSE        = re.compile(r"hip-api pid:(\d+) tid:(\d+)\.(\d+) (.*) ret=\s?(\d+) \((\w+)\)>> \+(\d+) ns")
 RE_HCC_PROF_TS_OPX  = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;\s+(\d+);\s+(\d+);\s+#(\d+\.\d+\.\d+);\s+(.*)")
 RE_HCC_PROF_TS_OP   = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;\s+(\d+);\s+(\d+);\s+#(\d+\.\d+\.\d+);")
 RE_HCC_PROF_TS      = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;\s+(\d+);\s+(\d+);")
@@ -101,6 +101,10 @@ RE_RCCL_ALLREDUCE   = re.compile(r"(.*):(\d+):(\d+) \[(\d+)\] (\d+) NCCL INFO Al
 RE_VDI_OPEN         = re.compile(r":\d+:.*:.*:(.*):(.*): \[(.*)\] (.*) \( (.*) \)")
 RE_VDI_CLOSE        = re.compile(r":\d+:.*:.*:(.*):(.*): \[(.*)\] (.*): Returned (.*)")
 RE_VDI_MSG          = re.compile(r":\d+:.*:.*:(.*): (.*)")
+#TODO handle args
+#RE_HIP_RTG_OPEN     = re.compile(r"<<hip-api pid:(\d+) tid:(\d+) (.*) (\(.*\)) @(\d+)")
+RE_HIP_RTG_OPEN     = re.compile(r"<<hip-api pid:(\d+) tid:(\d+) (.*)  @(\d+)")
+RE_HIP_RTG_CLOSE    = re.compile(r"  hip-api pid:(\d+) tid:(\d+) (.*) ret=(.*)>> \+(\d+)")
 
 count_skipped = 0
 count_hip_tid = 0
@@ -349,102 +353,144 @@ for filename in non_opt_args:
         for line in input_file:
             match = None
 
-            match = RE_HIP_TID.search(line)
-            if match:
-                count_hip_tid += 1
-                pid,tid,short_tid,hex_tid = match.groups()
-                hip_pids[pid] = None
-                if short_tid in hip_events:
-                    print("Duplicate short_tid found in HIP event %s" % short_tid)
-                    sys.exit(1)
-                hip_events[(pid,tid)] = []
-                hip_multikernel[(pid,tid)] = False
-                continue
+            # DEPRECATED / OLD HIP FROM HCC DAYS ROCM <= 3.3
+            #match = RE_HIP_TID.search(line)
+            #if match:
+            #    count_hip_tid += 1
+            #    pid,tid,short_tid,hex_tid = match.groups()
+            #    hip_pids[pid] = None
+            #    if short_tid in hip_events:
+            #        print("Duplicate short_tid found in HIP event %s" % short_tid)
+            #        sys.exit(1)
+            #    hip_events[(pid,tid)] = []
+            #    hip_multikernel[(pid,tid)] = False
+            #    continue
 
-            match = RE_HIP_OPEN.search(line)
+            #match = RE_HIP_OPEN.search(line)
+            #if match:
+            #    count_hip_open += 1
+            #    pid,tid,opnum,msg,ts = match.groups()
+            #    if (pid,tid) not in hip_events:
+            #        print("HIP event open before HIP init: (%s,%s)"%(pid,tid))
+            #        sys.exit(1)
+            #    if msg.startswith('hip'):
+            #        hip_events[(pid,tid)].append((msg,ts))
+            #        if 'hipExtLaunchMultiKernelMultiDevice' in msg:
+            #            assert (pid,tid) in hip_multikernel
+            #            hip_multikernel[(pid,tid)] = True
+            #    elif 'hipLaunchKernel' in msg:
+            #        # hipLaunchKernel doesn't print a closing HIP event
+            #        count_hip_open -= 1
+            #        # we might be inside a multi-kernel launch block
+            #        if hip_multikernel[(pid,tid)]:
+            #            msg = " ".join(msg.strip().split()[3:])
+            #            msg = "spacer %s" % msg # because kern_to_json expects a bigger string to split
+            #            if replace_kernel_launch_with_name:
+            #                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
+            #                    kern_name(msg), (int(ts)/1000), int(ns)/1000, pid, tid, kern_to_json(msg,False)))
+            #            else:
+            #                out.write('{"name":"hipLaunchKernel", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
+            #                    (int(ts)/1000), int(ns)/1000, pid, tid, kern_to_json(msg)))
+            #        else:
+            #            # last item in hip event stack gets an updated msg
+            #            old_msg,old_ts = hip_events[(pid,tid)][-1]
+            #            if 'LaunchKernel' not in old_msg:
+            #                print("hipLaunchKernel didn't nest as expected into '%s'" % old_msg)
+            #                sys.exit(1)
+            #            hip_api = old_msg.split()[0]
+            #            assert hip_api.startswith('hip')
+            #            new_msg = " ".join(msg.strip().split()[3:])
+            #            hip_events[(pid,tid)][-1] = ("%s %s" % (hip_api,new_msg),old_ts)
+            #    else:
+            #        print("Unrecognized HIP event message: '%s'" % msg)
+            #        sys.exit(1)
+            #    continue
+
+            #match = RE_HIP_CLOSE.search(line)
+            #if match:
+            #    count_hip_close += 1
+            #    pid,tid,opnum,new_msg,retcode,retstr,ns = match.groups()
+            #    if (pid,tid) not in hip_events:
+            #        print("HIP event close before HIP init: (%s,%s)"%(pid,tid))
+            #        sys.exit(1)
+            #    msg,ts = hip_events[(pid,tid)].pop()
+            #    new_msg = new_msg.strip()
+            #    if not msg.startswith(new_msg):
+            #        print("event mismatch: '%s'.startswith('%s')" % (msg,new_msg))
+            #        print(opnum)
+            #        sys.exit(1)
+            #    if 'hipExtLaunchMultiKernelMultiDevice' in msg:
+            #        assert (pid,tid) in hip_multikernel
+            #        hip_multikernel[(pid,tid)] = False
+            #    # we treat hipSetDevice special, with its lone device ID argument becoming part of its name
+            #    # so that the chrome://tracing treats them as distinct boxes
+            #    if 'hipSetDevice' in msg:
+            #        new_msg = msg
+            #    if 'Kernel' in new_msg and 'hipExtLaunchMultiKernelMultiDevice' not in new_msg:
+            #        if replace_kernel_launch_with_name:
+            #            out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
+            #                kern_name(msg), (int(ts)/1000), int(ns)/1000, pid, tid, kern_to_json(msg,False)))
+            #        else:
+            #            out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
+            #                new_msg, (int(ts)/1000), int(ns)/1000, pid, tid, kern_to_json(msg)))
+            #    else:
+            #        out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
+            #            new_msg, (int(ts)/1000), int(ns)/1000, pid, tid, hip_args_to_json(msg)))
+            #    # If the stream argument is available, we create a new group based on stream ID.
+            #    # This group will contain duplicates of HIP events, but organized as streams.
+            #    if hip_stream_output and 'stream:' in msg:
+            #        pid,tid = hip_get_stream(msg)
+            #        if 'Kernel' in new_msg:
+            #            if replace_kernel_launch_with_name:
+            #                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
+            #                    kern_name(msg), (int(ts)/1000), int(ns)/1000, pid, tid, kern_to_json(msg,False)))
+            #            else:
+            #                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
+            #                    new_msg, (int(ts)/1000), int(ns)/1000, pid, tid, kern_to_json(msg)))
+            #        else:
+            #            out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
+            #                new_msg, (int(ts)/1000), int(ns)/1000, pid, tid, hip_args_to_json(msg)))
+            #    continue
+
+            #compile(r"<<hip-api pid:(\d+) tid:(\d+) (.*) (\(.*\)) @(\d+)") <---- TODO
+            #compile(r"<<hip-api pid:(\d+) tid:(\d+) (.*)  @(\d+)")
+            match = RE_HIP_RTG_OPEN.search(line)
             if match:
                 count_hip_open += 1
-                pid,tid,opnum,msg,ts = match.groups()
+                #pid,tid,func,args,ts = match.groups()
+                pid,tid,func,ts = match.groups()
                 if (pid,tid) not in hip_events:
-                    print("HIP event open before HIP init: (%s,%s)"%(pid,tid))
-                    sys.exit(1)
-                if msg.startswith('hip'):
-                    hip_events[(pid,tid)].append((msg,ts))
-                    if 'hipExtLaunchMultiKernelMultiDevice' in msg:
-                        assert (pid,tid) in hip_multikernel
-                        hip_multikernel[(pid,tid)] = True
-                elif 'hipLaunchKernel' in msg:
-                    # hipLaunchKernel doesn't print a closing HIP event
-                    count_hip_open -= 1
-                    # we might be inside a multi-kernel launch block
-                    if hip_multikernel[(pid,tid)]:
-                        msg = " ".join(msg.strip().split()[3:])
-                        msg = "spacer %s" % msg # because kern_to_json expects a bigger string to split
-                        if replace_kernel_launch_with_name:
-                            out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
-                                kern_name(msg), (int(ts)/1000), int(ns)/1000, pid, tid, kern_to_json(msg,False)))
-                        else:
-                            out.write('{"name":"hipLaunchKernel", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
-                                (int(ts)/1000), int(ns)/1000, pid, tid, kern_to_json(msg)))
-                    else:
-                        # last item in hip event stack gets an updated msg
-                        old_msg,old_ts = hip_events[(pid,tid)][-1]
-                        if 'LaunchKernel' not in old_msg:
-                            print("hipLaunchKernel didn't nest as expected into '%s'" % old_msg)
-                            sys.exit(1)
-                        hip_api = old_msg.split()[0]
-                        assert hip_api.startswith('hip')
-                        new_msg = " ".join(msg.strip().split()[3:])
-                        hip_events[(pid,tid)][-1] = ("%s %s" % (hip_api,new_msg),old_ts)
+                    hip_events[(pid,tid)] = []
+                if func.startswith('hip') or func.startswith('__'):
+                    hip_events[(pid,tid)].append((func,args,ts))
                 else:
-                    print("Unrecognized HIP event message: '%s'" % msg)
+                    print("Unrecognized HIP event message: '%s'" % func)
                     sys.exit(1)
                 continue
 
-            match = RE_HIP_CLOSE.search(line)
+            #compile(r"  hip-api pid:(\d+) tid:(\d+) (.*) ret=(.*)>> \+(\d+)")
+            match = RE_HIP_RTG_CLOSE.search(line)
             if match:
                 count_hip_close += 1
-                pid,tid,opnum,new_msg,retcode,retstr,ns = match.groups()
+                pid,tid,func,retcode,ns = match.groups()
                 if (pid,tid) not in hip_events:
                     print("HIP event close before HIP init: (%s,%s)"%(pid,tid))
                     sys.exit(1)
-                msg,ts = hip_events[(pid,tid)].pop()
-                new_msg = new_msg.strip()
-                if not msg.startswith(new_msg):
-                    print("event mismatch: '%s'.startswith('%s')" % (msg,new_msg))
-                    print(opnum)
+                func_orig,args,ts = hip_events[(pid,tid)].pop()
+                pid = -int(pid)
+                hip_pids[pid] = None
+                ts = int(ts)/1000
+                ns = int(ns)/1000
+                if not func.startswith(func_orig):
+                    print("event mismatch: '%s'.startswith('%s')" % (func,func_orig))
                     sys.exit(1)
-                if 'hipExtLaunchMultiKernelMultiDevice' in msg:
-                    assert (pid,tid) in hip_multikernel
-                    hip_multikernel[(pid,tid)] = False
-                # we treat hipSetDevice special, with its lone device ID argument becoming part of its name
-                # so that the chrome://tracing treats them as distinct boxes
-                if 'hipSetDevice' in msg:
-                    new_msg = msg
-                if 'Kernel' in new_msg and 'hipExtLaunchMultiKernelMultiDevice' not in new_msg:
-                    if replace_kernel_launch_with_name:
-                        out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
-                            kern_name(msg), (int(ts)/1000), int(ns)/1000, pid, tid, kern_to_json(msg,False)))
-                    else:
-                        out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
-                            new_msg, (int(ts)/1000), int(ns)/1000, pid, tid, kern_to_json(msg)))
+                if '\\' in args:
+                    print("HIP event with bad escape character")
+                    out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%d, "tid":%s},\n'%(
+                        func, ts, ns, pid, tid))
                 else:
-                    out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
-                        new_msg, (int(ts)/1000), int(ns)/1000, pid, tid, hip_args_to_json(msg)))
-                # If the stream argument is available, we create a new group based on stream ID.
-                # This group will contain duplicates of HIP events, but organized as streams.
-                if hip_stream_output and 'stream:' in msg:
-                    pid,tid = hip_get_stream(msg)
-                    if 'Kernel' in new_msg:
-                        if replace_kernel_launch_with_name:
-                            out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
-                                kern_name(msg), (int(ts)/1000), int(ns)/1000, pid, tid, kern_to_json(msg,False)))
-                        else:
-                            out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
-                                new_msg, (int(ts)/1000), int(ns)/1000, pid, tid, kern_to_json(msg)))
-                    else:
-                        out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
-                            new_msg, (int(ts)/1000), int(ns)/1000, pid, tid, hip_args_to_json(msg)))
+                    out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%d, "tid":%s, "args":{"params":"%s"}},\n'%(
+                        func, ts, ns, pid, tid, args))
                 continue
 
             # look for most specific HCC profile first

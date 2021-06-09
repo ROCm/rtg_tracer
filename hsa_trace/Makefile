@@ -1,8 +1,8 @@
 rtg_tracer.so: rtg_tracer.o
-	$(CXX) -o $@ $< -shared -rdynamic -std=c++11 -L/opt/rocm/lib -lhsa-runtime64 -g
+	$(CXX) -o $@ $< -shared -rdynamic -std=c++14 -L/opt/rocm/lib -lamdhip64 -lhsa-runtime64 -g
 
 rtg_tracer.o: rtg_tracer.cpp
-	$(CXX) -o $@ -c $< -I/opt/rocm/hsa/include -DAMD_INTERNAL_BUILD -std=c++11 -fPIC -g
+	$(CXX) -o $@ -c $< -I/opt/rocm/hip/include -I/opt/rocm/include -I/opt/rocm/include/roctracer -I/opt/rocm/hsa/include -D__HIP_PLATFORM_AMD__ -DAMD_INTERNAL_BUILD -std=c++14 -fPIC -g
 
 clean:
 	rm -f rtg_tracer.o rtg_tracer.so
