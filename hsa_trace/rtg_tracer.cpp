@@ -2563,7 +2563,6 @@ static void* hip_activity_callback(uint32_t cid, activity_record_t* record, cons
 {
     //hip_api_data_t *ret = (hip_api_data_t*)malloc(sizeof(hip_api_data_t));
     hip_api_data_t *ret = (hip_api_data_t*)hip_api_data[cid];
-    memset(ret, 0, sizeof(hip_api_data_t));
     //fprintf(stderr, "HI FROM hip_activity_callback cid=%u record=%p data=%p arg=%p ret=%p\n", cid, record, data, arg, ret);
     //auto id = ++RTG::correlation_id;
     //ret->correlation_id = id;
@@ -2590,6 +2589,9 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
         uint64_t ticks = tick() - tick_;                                   \
         int localStatus = 0;
         HIP_API_STOP
+        // Now that we're done with the api data, zero it for the next time.
+        // Otherwise, phase is always wrong because HIP doesn't set the phase to 0 during API start.
+        memset(data, 0, sizeof(hip_api_data_t));
     }
     //fprintf(stderr, "HI FROM hip_api_callback domain=%u cid=%u data=%p arg=%p correlation_id=%lu phase=%u name=%s\n",
     //        domain, cid, data, arg, data->correlation_id, data->phase, hip_api_names[cid].c_str());

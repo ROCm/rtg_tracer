@@ -160,6 +160,16 @@ vdi_events = {}
 vdi_missing_names_open = ["hipInit","canAccessPeer"]
 vdi_missing_names_close = ["ihipModuleLaunchKernel"]
 
+# HIP/rocclr for ease of use we want monotonically increasing pids
+hip_rocclr_pids = {}
+hip_rocclr_next_pid = 0
+def get_hiprocclr_pid(pid):
+    global hip_rocclr_pids
+    global hip_rocclr_next_pid
+    if pid not in hip_rocclr_pids:
+        hip_rocclr_pids[pid] = hip_rocclr_next_pid
+        hip_rocclr_next_pid += 1
+    return hip_rocclr_pids[pid]
 
 # HSA can nest its calls.
 hsa_events = {}
@@ -462,7 +472,8 @@ for filename in non_opt_args:
                 if (pid,tid) not in hip_events:
                     hip_events[(pid,tid)] = []
                 if func.startswith('hip') or func.startswith('__'):
-                    hip_events[(pid,tid)].append((func,args,ts))
+                    #hip_events[(pid,tid)].append((func,args,ts))
+                    hip_events[(pid,tid)].append((func,ts))
                 else:
                     print("Unrecognized HIP event message: '%s'" % func)
                     sys.exit(1)
@@ -476,21 +487,17 @@ for filename in non_opt_args:
                 if (pid,tid) not in hip_events:
                     print("HIP event close before HIP init: (%s,%s)"%(pid,tid))
                     sys.exit(1)
-                func_orig,args,ts = hip_events[(pid,tid)].pop()
-                pid = -int(pid)
+                #func_orig,args,ts = hip_events[(pid,tid)].pop()
+                func_orig,ts = hip_events[(pid,tid)].pop()
+                pid = get_hiprocclr_pid(pid)
                 hip_pids[pid] = None
                 ts = int(ts)/1000
                 ns = int(ns)/1000
                 if not func.startswith(func_orig):
                     print("event mismatch: '%s'.startswith('%s')" % (func,func_orig))
                     sys.exit(1)
-                if '\\' in args:
-                    print("HIP event with bad escape character")
-                    out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%d, "tid":%s},\n'%(
-                        func, ts, ns, pid, tid))
-                else:
-                    out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%d, "tid":%s, "args":{"params":"%s"}},\n'%(
-                        func, ts, ns, pid, tid, args))
+                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%d, "tid":%s},\n'%(
+                    func, ts, ns, pid, tid))
                 continue
 
             # look for most specific HCC profile first
