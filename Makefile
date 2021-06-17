@@ -1,7 +1,7 @@
 all:
-	$(MAKE) -C hsa_trace
+	$(MAKE) -C rtg_tracer
 
 clean:
-	$(MAKE) -C hsa_trace clean
+	$(MAKE) -C rtg_tracer clean
 
 .PHONY: all clean
