@@ -307,7 +307,7 @@ fprintf(stream, "HSA: pid:%d tid:%s copy agent:%lu signal:%lu start:%lu stop:%lu
 #define LOG_HIP \
 fprintf(stream, "HIP: pid:%d tid:%s %s ret=%d @%lu +%lu\n", pid_, tid_.c_str(), func.c_str(), localStatus, tick_, ticks); fflush(stream);
 #define LOG_HIP_ARGS \
-fprintf(stream, "HIP: pid:%d tid:%s %s %s ret=%d @%lu +%lu\n", pid_, tid_.c_str(), func.c_str(), args, localStatus, tick_, ticks); fflush(stream);
+fprintf(stream, "HIP: pid:%d tid:%s %s ret=%d @%lu +%lu\n", pid_, tid_.c_str(), args, localStatus, tick_, ticks); fflush(stream);
 
 #define TRACE(...) \
     static bool is_enabled = enabled_check(__func__); \

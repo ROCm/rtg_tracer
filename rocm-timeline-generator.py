@@ -46,8 +46,7 @@ RE_HSA_DISPATCH     = re.compile(r"HSA: pid:(\d+) tid:(\d+) dispatch queue:(.*) 
 RE_HSA_BARRIER_HOST = re.compile(r"HSA: pid:(\d+) tid:(\d+) barrier queue:(.*) agent:(\d+) signal:(\d+) dep1:(\d+) dep2:(\d+) dep3:(\d+) dep4:(\d+) dep5:(\d+) tick:(\d+) id:(\d+)")
 RE_HSA_BARRIER      = re.compile(r"HSA: pid:(\d+) tid:(\d+) barrier queue:(.*) agent:(\d+) signal:(\d+) start:(\d+) stop:(\d+) dep1:(\d+) dep2:(\d+) dep3:(\d+) dep4:(\d+) dep5:(\d+) id:(\d+)")
 RE_HSA_COPY         = re.compile(r"HSA: pid:(\d+) tid:(\d+) copy agent:(\d+) signal:(\d+) start:(\d+) stop:(\d+) dep1:(\d+) dep2:(\d+) dep3:(\d+) dep4:(\d+) dep5:(\d+)")
-#TODO handle HIP args
-RE_HIP              = re.compile(r"HIP: pid:(\d+) tid:(\d+) (.*)  ret=(.*) @(\d+) \+(\d+)")
+RE_HIP              = re.compile(r"HIP: pid:(\d+) tid:(\d+) (.*) ret=(.*) @(\d+) \+(\d+)")
 RE_HCC_PROF_TS_OPX  = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;\s+(\d+);\s+(\d+);\s+#(\d+\.\d+\.\d+);\s+(.*)")
 RE_HCC_PROF_TS_OP   = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;\s+(\d+);\s+(\d+);\s+#(\d+\.\d+\.\d+);")
 RE_HCC_PROF_TS      = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;\s+(\d+);\s+(\d+);")
@@ -80,8 +79,6 @@ count_hsa_barrier_host = 0
 count_hsa_barrier = 0
 count_hsa_copy = 0
 count_hsa_missed = 0
-count_rccl_info_allreduce = 0
-count_rccl_missed = 0
 
 workgroups = {}
 
@@ -211,22 +208,22 @@ def hip_args_to_json(full_string):
     """Parse HIP call parameters into an 'args' JSON object.
 
     Example:
-        hipMemcpyHtoDAsync (0x7fb64a635100, 0x7fbf05503500, 4004, stream:0.2)
+        (arg1=foo, arg2=bar)
 
     """
     parts = full_string.strip().split()
     counter = 0
     ret = '{'
-    for part in parts[1:]:
+    for part in parts[0:]:
         if counter > 0:
             ret += ', '
         if part[0] == '(':
             part = part[1:]
         if part[-1] in [')',',']:
             part = part[0:-1]
-        if ':' in part:
+        if '=' in part:
             try:
-                name,value = part.split(':', 1) # hipCtx_t args have an extra ':'
+                name,value = part.split('=', 1) # hipCtx_t args have an extra ':'
                 ret += '"%s":"%s"' % (name,value)
             except:
                 print("uh oh")
@@ -281,12 +278,20 @@ for filename in non_opt_args:
             if match:
                 count_hip_api += 1
                 pid,tid,func,retcode,ts,dur = match.groups()
+                args = None
+                if '(' in func:
+                    func,args = func.split('(',1)
+                    args = hip_args_to_json(args)
                 pid = get_hiprocclr_pid(pid)
                 hip_pids[pid] = None
                 ts = int(ts)/1000
                 dur = int(dur)/1000
-                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%d, "tid":%s},\n'%(
-                    func, ts, dur, pid, tid))
+                if args:
+                    out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%d, "tid":%s, "args":%s},\n'%(
+                        func, ts, dur, pid, tid, args))
+                else:
+                    out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%d, "tid":%s},\n'%(
+                        func, ts, dur, pid, tid))
                 continue
 
             if 'HIP:' in line:
