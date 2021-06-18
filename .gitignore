@@ -1,3 +1,5 @@
-get_system_ticks/get_system_ticks
-hsa_trace/rtg_tracer.o
-hsa_trace/rtg_tracer.so
+hsa_trace.txt.*
+out.json
+*.o
+*.so
+test/nccl-example

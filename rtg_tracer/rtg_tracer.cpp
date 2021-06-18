@@ -23,41 +23,30 @@
 
 #include <hip/hip_runtime_api.h>
 #include <hip/amd_detail/hip_runtime_prof.h>
+#include "missing_ostream_definitions.h"
+#define HIP_PROF_HIP_API_STRING 1 // to enable hipApiString in hip_prof_str.h
 #include <hip/amd_detail/hip_prof_str.h>
 
 #include <roctracer/roctracer.h>
 
 #include "ctpl_stl.h"
 
+// User options, set using env vars.
+#include "flags.h"
+
 #define USE_ATOMIC 1
-#define USE_STREAM 1
 #define ENABLE_HSA_AMD_MEMORY_LOCK_TO_POOL 0
 #define ENABLE_HSA_AMD_RUNTIME_QUEUE_CREATE_REGISTER 0
 
 namespace RTG {
 
-// The HSA Runtime original table
-static HsaApiTable* gs_OrigHsaTable;
-
-// The HSA Runtime's versions of HSA core API functions
-static CoreApiTable gs_OrigCoreApiTable;
-
-// The HSA Runtime's versions of HSA ext API functions
-static AmdExtTable gs_OrigExtApiTable;
+static HsaApiTable* gs_OrigHsaTable;     // The HSA Runtime's original table
+static CoreApiTable gs_OrigCoreApiTable; // The HSA Runtime's versions of HSA core API functions
+static AmdExtTable gs_OrigExtApiTable;   // The HSA Runtime's versions of HSA ext API functions
+static hsa_ven_amd_loader_1_01_pfn_t gs_OrigLoaderExtTable; // The HSA Runtime's versions of HSA loader ext API functions
 
 // Callback for queue intercept.
 static void intercept_callback(const void* in_packets, uint64_t count, uint64_t user_que_idx, void* data, hsa_amd_queue_intercept_packet_writer writer);
-
-// The HSA Runtime's versions of HSA loader ext API functions
-static hsa_ven_amd_loader_1_01_pfn_t gs_OrigLoaderExtTable;
-
-// Whether to enable queue profile tracing.
-bool enable_profile = true;
-bool enable_profile_copy = false;
-bool enable_rpt = false;
-
-// Whether to print when a dispatch is queued.
-bool enable_dispatch_start = true;
 
 // thread pool for signal waits
 ctpl::thread_pool pool(1);
@@ -80,24 +69,9 @@ counter_t cb_count_dispatches{0};
 counter_t cb_count_barriers{0};
 counter_t cb_count_copies{0};
 counter_t cb_count_signals{0};
-//counter_t correlation_id{0};
 
 // Output stream for all logging
 static FILE* stream;
-static std::ostringstream os;
-#if USE_STREAM
-#else
-// If we are buffering the writes to an ostringstream,
-// this library might not terminate cleanly via OnUnload.
-// Protect against that case here via static module object.
-static bool output_has_been_written = false;
-static struct Deleter {
-    ~Deleter() {
-        fprintf(RTG::stream, "%s", RTG::os.str().c_str());
-        RTG::output_has_been_written = true;
-    }
-} RunOnShutDown;
-#endif
 
 // Support for HIP API callbacks.
 static void* hip_activity_callback(uint32_t cid, activity_record_t* record, const void* data, void* arg);
@@ -118,7 +92,7 @@ static std::unordered_map<std::string,bool> enabled_map;
 
 static void InitCoreApiTable(CoreApiTable* table);
 static void InitAmdExtTable(AmdExtTable* table);
-static void InitEnabledTable(std::string what_to_trace);
+static void InitEnabledTable(std::string what_to_trace, std::string what_not_to_trace);
 static void InitEnabledTableCore(bool value);
 static void InitEnabledTableExtApi(bool value);
 static inline bool enabled_check(std::string func);
@@ -159,7 +133,7 @@ static void get_agent_queue_indexes(hsa_agent_t agent, hsa_queue_t *queue, int &
     std::lock_guard<mutex_t> lck(agent_mutex_);
 
     if (agent.handle == 0) {
-        fprintf(stderr, "RTG HSA Tracer: null agent handle\n");
+        fprintf(stderr, "RTG Tracer: null agent handle\n");
     }
 
     // create agent info if missing
@@ -181,7 +155,7 @@ static hsa_queue_t* get_agent_signal_queue(hsa_agent_t agent)
     std::lock_guard<mutex_t> lck(agent_mutex_);
 
     if (agent.handle == 0) {
-        fprintf(stderr, "RTG HSA Tracer: null agent handle\n");
+        fprintf(stderr, "RTG Tracer: null agent handle\n");
     }
 
     // create agent info if missing
@@ -199,7 +173,7 @@ static hsa_queue_t* get_agent_signal_queue(hsa_agent_t agent)
         if (status != HSA_STATUS_SUCCESS) {
             const char *msg;
             hsa_status_string(status, &msg);
-            fprintf(stderr, "RTG HSA Tracer: could not create agent signal queue: %s\n", msg);
+            fprintf(stderr, "RTG Tracer: could not create agent signal queue: %s\n", msg);
             exit(EXIT_FAILURE);
         }
         // make sure profiling is enabled for the newly created queue
@@ -207,7 +181,7 @@ static hsa_queue_t* get_agent_signal_queue(hsa_agent_t agent)
         if (status != HSA_STATUS_SUCCESS) {
             const char *msg;
             hsa_status_string(status, &msg);
-            fprintf(stderr, "RTG HSA Tracer: could not create agent signal queue with profile: %s\n", msg);
+            fprintf(stderr, "RTG Tracer: could not create agent signal queue with profile: %s\n", msg);
             exit(EXIT_FAILURE);
         }
     }
@@ -230,102 +204,8 @@ struct InterceptCallbackData
     std::atomic<int> seq_index;
 };
 
-// Helper functions to convert function arguments into strings.
-// Handles POD data types as well as enumerations.
-// The implementation uses C++11 variadic templates and template specialization.
-
-// This is the default which works for most types:
-template <typename T>
-inline std::string ToString(T v) {
-    std::ostringstream ss;
-    ss << v;
-    return ss.str();
-};
-
-template <>
-inline std::string ToString(hsa_agent_t agent) {
-    return "agent_" + ToString(agent.handle);
-}
-
-template <>
-inline std::string ToString(hsa_cache_t cache) {
-    return "cache_" + ToString(cache.handle);
-}
-
-template <>
-inline std::string ToString(hsa_cache_info_t attribute) {
-    return "_omitted_";
-}
-
-template <>
-inline std::string ToString(hsa_region_t region) {
-    return "region_" + ToString(region.handle);
-}
-
-template <>
-inline std::string ToString(hsa_signal_t signal) {
-    return "signal_" + ToString(signal.handle);
-}
-
-template <>
-inline std::string ToString(hsa_signal_group_t group) {
-    return "signal_group_" + ToString(group.handle);
-}
-
-template <>
-inline std::string ToString(hsa_wavefront_t wavefront) {
-    return "wavefront_" + ToString(wavefront.handle);
-}
-
-template <>
-inline std::string ToString(hsa_isa_t isa) {
-    return "isa_" + ToString(isa.handle);
-}
-
-template <>
-inline std::string ToString(hsa_callback_data_t data) {
-    return "callback_data_" + ToString(data.handle);
-}
-
-template <>
-inline std::string ToString(hsa_code_object_t obj) {
-    return "code_object_" + ToString(obj.handle);
-}
-
-template <>
-inline std::string ToString(hsa_code_symbol_t symbol) {
-    return "code_symbol_" + ToString(symbol.handle);
-}
-
-template <>
-inline std::string ToString(hsa_code_object_reader_t reader) {
-    return "code_object_reader_" + ToString(reader.handle);
-}
-
-template <>
-inline std::string ToString(hsa_executable_t executable) {
-    return "executable_" + ToString(executable.handle);
-}
-
-template <>
-inline std::string ToString(hsa_executable_symbol_t symbol) {
-    return "executable_symbol_" + ToString(symbol.handle);
-}
-
-template <>
-inline std::string ToString(hsa_amd_memory_pool_t pool) {
-    return "amd_memory_pool_" + ToString(pool.handle);
-}
-
-// Catch empty arguments case
-inline std::string ToString() { return (""); }
-
-// C++11 variadic template - peels off first argument, converts to string, and calls itself again to
-// peel the next arg. Strings are automatically separated by comma+space.
-template <typename T, typename... Args>
-inline std::string ToString(T first, Args... args) {
-    return ToString(first) + ", " + ToString(args...);
-}
+// These declarations were getting quite lengthy; moved to separate file to aid readability.
+#include "ToStringDefinitions.h"
 
 static inline int pid() {
     return getpid();
@@ -386,14 +266,13 @@ static inline unsigned long did() {
 #define DISABLE_LOGGING 0
 #if DISABLE_LOGGING
 
-#define TRACE_OUT
 #define LOG_STATUS_OUT
 #define LOG_UINT64_OUT
 #define LOG_SIGNAL_OUT
 #define LOG_VOID_OUT
-#define LOG_DISPATCH_BEGIN
+#define LOG_DISPATCH_HOST
 #define LOG_DISPATCH
-#define LOG_BARRIER_BEGIN
+#define LOG_BARRIER_HOST
 #define LOG_BARRIER
 #define LOG_COPY
 #define TRACE(...)
@@ -405,102 +284,30 @@ static inline unsigned long did() {
 
 #else // DISABLE_LOGGING
 
-#if USE_STREAM
-#define TRACE_OUT \
-fprintf(stream, "<<hsa-api pid:%d tid:%s %s %s @%lu\n", pid_, tid_.c_str(), func.c_str(), args.c_str(), tick_); fflush(stream);
 #define LOG_STATUS_OUT \
-fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%d>> +%lu us\n", pid_, tid_.c_str(),  func.c_str(), localStatus, ticks); fflush(stream);
+fprintf(stream, "HSA: pid:%d tid:%s %s %s ret=%d @%lu +%lu\n", pid_, tid_.c_str(), func.c_str(), args.c_str(), localStatus, tick_, ticks); fflush(stream);
 #define LOG_UINT64_OUT \
-fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%lu>> +%lu us\n", pid_, tid_.c_str(),  func.c_str(), localStatus, ticks); fflush(stream);
+fprintf(stream, "HSA: pid:%d tid:%s %s %s ret=%lu @%lu +%lu\n", pid_, tid_.c_str(), func.c_str(), args.c_str(), localStatus, tick_, ticks); fflush(stream);
 #define LOG_SIGNAL_OUT \
-fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=%ld>> +%lu us\n", pid_, tid_.c_str(),  func.c_str(), localStatus, ticks); fflush(stream);
+fprintf(stream, "HSA: pid:%d tid:%s %s %s ret=%ld @%lu +%lu\n", pid_, tid_.c_str(), func.c_str(), args.c_str(), localStatus, tick_, ticks); fflush(stream);
 #define LOG_VOID_OUT \
-fprintf(stream, "  hsa-api pid:%d tid:%s %s ret=void>> +%lu us\n", pid_, tid_.c_str(),  func.c_str(), ticks); fflush(stream);
-#define LOG_DISPATCH_BEGIN \
-fprintf(stream, "<<hsa-api pid:%d tid:%s dispatch queue:%lu agent:%lu signal:%lu name:'%s' tick:%lu id:%lu workgroup:{%d,%d,%d} grid:{%d,%d,%d} >>\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, name_, tick_, id_, packet->workgroup_size_x, packet->workgroup_size_y, packet->workgroup_size_z, packet->grid_size_x, packet->grid_size_y, packet->grid_size_z);
+fprintf(stream, "HSA: pid:%d tid:%s %s %s ret=void @%lu +%lu\n", pid_, tid_.c_str(), func.c_str(), args.c_str(), tick_, ticks); fflush(stream);
+#define LOG_DISPATCH_HOST \
+fprintf(stream, "HSA: pid:%d tid:%s dispatch queue:%lu agent:%lu signal:%lu name:'%s' tick:%lu id:%lu workgroup:{%d,%d,%d} grid:{%d,%d,%d}\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, name_, tick_, id_, packet->workgroup_size_x, packet->workgroup_size_y, packet->workgroup_size_z, packet->grid_size_x, packet->grid_size_y, packet->grid_size_z);
 #define LOG_DISPATCH \
-fprintf(stream, "<<hsa-api pid:%d tid:%s dispatch queue:%lu agent:%lu signal:%lu name:'%s' start:%lu stop:%lu id:%lu >>\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, name_, start_, stop_, id_); fflush(stream);
-#define LOG_BARRIER_BEGIN \
-fprintf(stream, "<<hsa-api pid:%d tid:%s barrier queue:%lu agent:%lu signal:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu tick:%lu id:%lu >>\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, dep1, dep2, dep3, dep4, dep5, tick_, id_); fflush(stream);
+fprintf(stream, "HSA: pid:%d tid:%s dispatch queue:%lu agent:%lu signal:%lu name:'%s' start:%lu stop:%lu id:%lu\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, name_, start_, stop_, id_); fflush(stream);
+#define LOG_BARRIER_HOST \
+fprintf(stream, "HSA: pid:%d tid:%s barrier queue:%lu agent:%lu signal:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu tick:%lu id:%lu\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, dep1, dep2, dep3, dep4, dep5, tick_, id_); fflush(stream);
 #define LOG_BARRIER \
-fprintf(stream, "<<hsa-api pid:%d tid:%s barrier queue:%lu agent:%lu signal:%lu start:%lu stop:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu id:%lu >>\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, start_, stop_, data->dep1, data->dep2, data->dep3, data->dep4, data->dep5, data->id_); fflush(stream);
+fprintf(stream, "HSA: pid:%d tid:%s barrier queue:%lu agent:%lu signal:%lu start:%lu stop:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu id:%lu\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, start_, stop_, data->dep1, data->dep2, data->dep3, data->dep4, data->dep5, data->id_); fflush(stream);
 #define LOG_COPY \
-fprintf(stream, "<<hsa-api pid:%d tid:%s copy agent:%lu signal:%lu start:%lu stop:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu >>\n", pid_, tid_.c_str(), agent_.handle, signal_.handle, start_, stop_, data->dep1, data->dep2, data->dep3, data->dep4, data->dep5); fflush(stream);
-#define HIP_API_START \
-fprintf(stream, "<<hip-api pid:%d tid:%s %s %s @%lu\n", pid_, tid_.c_str(), func.c_str(), args.c_str(), tick_); fflush(stream);
-#define HIP_API_STOP \
-fprintf(stream, "  hip-api pid:%d tid:%s %s ret=%d>> +%lu us\n", pid_, tid_.c_str(),  func.c_str(), localStatus, ticks); fflush(stream);
-#else
-#define TRACE_OUT \
-os << "<<hsa-api" \
-    << " pid:" << pid_ \
-    << " tid:" << tid_ \
-    << " " << func \
-    << " " << args \
-    << " @" << tick_ \
-    << std::endl;
-#define LOG_STATUS_OUT \
-os << "  hsa-api" \
-    << " pid:" << pid_ \
-    << " tid:" << tid_ \
-    << " " << func \
-    << " ret=" << localStatus \
-    << ">> +" << ticks << " us" \
-    << std::endl;
-#define LOG_UINT64_OUT LOG_STATUS_OUT
-#define LOG_SIGNAL_OUT LOG_STATUS_OUT
-#define LOG_VOID_OUT \
-os << "  hsa-api" \
-    << " pid:" << pid_ \
-    << " tid:" << tid_ \
-    << " " << func \
-    << " ret=void" \
-    << ">> +" << ticks << " us" \
-    << std::endl;
-#define LOG_DISPATCH \
-os << "  <<hsa-api" \
-    << " pid:" << pid_ \
-    << " tid:" << tid_ \
-    << " dispatch" \
-    << " queue:'" << queue_->id << "'"\
-    << " agent:'" << agent_.handle << "'"\
-    << " signal:'" << signal_.handle << "'"\
-    << " name:'" << name_ << "'"\
-    << " start:" << start_ \
-    << " stop:" << stop_ \
-    << " >>" << std::endl;
-#define LOG_BARRIER \
-os << "  <<hsa-api" \
-    << " pid:" << pid_ \
-    << " tid:" << tid_ \
-    << " barrier" \
-    << " queue:'" << queue_->id << "'"\
-    << " agent:'" << agent_.handle << "'"\
-    << " signal:'" << signal_.handle << "'"\
-    << " start:" << start_ \
-    << " stop:" << stop_ \
-    << " dep1:" << data->dep1 \
-    << " dep2:" << data->dep2 \
-    << " dep3:" << data->dep3 \
-    << " dep4:" << data->dep4 \
-    << " dep5:" << data->dep5 \
-    << " >>" << std::endl;
-#define LOG_COPY \
-os << "  <<hsa-api" \
-    << " pid:" << pid_ \
-    << " tid:" << tid_ \
-    << " copy" \
-    << " agent:'" << agent_.handle << "'"\
-    << " signal:'" << signal_.handle << "'"\
-    << " start:" << start_ \
-    << " stop:" << stop_ \
-    << " dep1:" << data->dep1 \
-    << " dep2:" << data->dep2 \
-    << " dep3:" << data->dep3 \
-    << " dep4:" << data->dep4 \
-    << " dep5:" << data->dep5 \
-    << " >>" << std::endl;
-#endif
+fprintf(stream, "HSA: pid:%d tid:%s copy agent:%lu signal:%lu start:%lu stop:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu\n", pid_, tid_.c_str(), agent_.handle, signal_.handle, start_, stop_, data->dep1, data->dep2, data->dep3, data->dep4, data->dep5); fflush(stream);
+//#define HIP_API_START \
+//fprintf(stream, "HIP: pid:%d tid:%s %s %s @%lu\n", pid_, tid_.c_str(), func.c_str(), args.c_str(), tick_); fflush(stream);
+#define LOG_HIP \
+fprintf(stream, "HIP: pid:%d tid:%s %s ret=%d @%lu +%lu\n", pid_, tid_.c_str(), func.c_str(), localStatus, tick_, ticks); fflush(stream);
+#define LOG_HIP_ARGS \
+fprintf(stream, "HIP: pid:%d tid:%s %s %s ret=%d @%lu +%lu\n", pid_, tid_.c_str(), func.c_str(), args, localStatus, tick_, ticks); fflush(stream);
 
 #define TRACE(...) \
     static bool is_enabled = enabled_check(__func__); \
@@ -515,7 +322,6 @@ os << "  <<hsa-api" \
         pid_ = pid(); \
         tid_ = tid(); \
         tick_ = tick(); \
-        TRACE_OUT \
     }
 
 #define LOG_STATUS(status)                                                               \
@@ -597,7 +403,7 @@ static uint64_t submit_to_signal_queue(hsa_queue_t *signal_queue, hsa_signal_t n
 	barrier->dep_signal[0] = new_signal;
 	barrier->header = kBarrierHeader;
 	gs_OrigCoreApiTable.hsa_signal_store_relaxed_fn(signal_queue->doorbell_signal, index);
-	//fprintf(stderr, "RTG HSA Tracer: wrote new BARRIER AND at queue %lu index %lu (prev read was %lu)\n", signal_queue->id, index, read);
+	//fprintf(stderr, "RTG Tracer: wrote new BARRIER AND at queue %lu index %lu (prev read was %lu)\n", signal_queue->id, index, read);
     return index;
 }
 
@@ -614,7 +420,7 @@ struct SignalCallbackData
         : name(name), data(data), queue(data->queue), agent(data->agent), signal(signal), orig_signal(orig_signal), owns_orig_signal(owns_orig_signal), bytes(0), direction(0),
             is_copy(false), is_barrier(false), dep1(0), dep2(0), dep3(0), dep4(0), dep5(0), id_(did()), seq_num_(data->seq_index++)
     {
-        if (RTG::enable_dispatch_start) {
+        if (RTG_HSA_HOST_DISPATCH) {
             long unsigned tick_ = tick();
             int pid_ = pid();
             std::string tid_ = tid();
@@ -622,7 +428,7 @@ struct SignalCallbackData
             hsa_agent_t agent_ = agent;
             hsa_queue_t* queue_ = queue;
             hsa_signal_t signal_ = signal;
-            LOG_DISPATCH_BEGIN
+            LOG_DISPATCH_HOST
         }
     }
 
@@ -651,7 +457,7 @@ struct SignalCallbackData
             id_(did()),
             seq_num_(data->seq_index++)
     {
-        if (RTG::enable_dispatch_start) {
+        if (RTG_HSA_HOST_DISPATCH) {
             long unsigned tick_ = tick();
             int pid_ = pid();
             std::string tid_ = tid();
@@ -659,7 +465,7 @@ struct SignalCallbackData
             hsa_agent_t agent_ = agent;
             hsa_queue_t* queue_ = queue;
             hsa_signal_t signal_ = signal;
-            LOG_BARRIER_BEGIN
+            LOG_BARRIER_HOST
         }
     }
 
@@ -672,7 +478,7 @@ struct SignalCallbackData
             if (status != HSA_STATUS_SUCCESS) {
                 const char *msg;
                 gs_OrigCoreApiTable.hsa_status_string_fn(status, &msg);
-                fprintf(stderr, "RTG HSA Tracer: signal callback copy time failed: %s\n", msg);
+                fprintf(stderr, "RTG Tracer: signal callback copy time failed: %s\n", msg);
                 return false;
             }
             start = copy_time.start;
@@ -685,7 +491,7 @@ struct SignalCallbackData
             if (status != HSA_STATUS_SUCCESS) {
                 const char *msg;
                 gs_OrigCoreApiTable.hsa_status_string_fn(status, &msg);
-                fprintf(stderr, "RTG HSA Tracer: signal callback dispatch time failed: %s\n", msg);
+                fprintf(stderr, "RTG Tracer: signal callback dispatch time failed: %s\n", msg);
                 return false;
             }
             start = dispatch_time.start;
@@ -718,17 +524,17 @@ struct SignalCallbackData
 
 static void SignalDestroyer(int id, hsa_signal_t ours, hsa_signal_t theirs, bool owns_orig_signal)
 {
-    //fprintf(stderr, "RTG HSA Tracer: SignalDestroyer id=%d ours=%lu theirs=%lu\n", id, ours.handle, theirs.handle);
+    //fprintf(stderr, "RTG Tracer: SignalDestroyer id=%d ours=%lu theirs=%lu\n", id, ours.handle, theirs.handle);
     gs_OrigCoreApiTable.hsa_signal_wait_relaxed_fn(theirs, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
     hsa_status_t status = gs_OrigCoreApiTable.hsa_signal_destroy_fn(ours);
     ++cb_count_signals;
     if (status != HSA_STATUS_SUCCESS) {
-        fprintf(stderr, "RTG HSA Tracer: signal destroy failed %lu\n", ours.handle);
+        fprintf(stderr, "RTG Tracer: signal destroy failed %lu\n", ours.handle);
     }
     if (owns_orig_signal) {
         status = gs_OrigCoreApiTable.hsa_signal_destroy_fn(theirs);
         if (status != HSA_STATUS_SUCCESS) {
-            fprintf(stderr, "RTG HSA Tracer: signal destroy failed %lu\n", theirs.handle);
+            fprintf(stderr, "RTG Tracer: signal destroy failed %lu\n", theirs.handle);
         }
     }
 }
@@ -766,7 +572,7 @@ static bool signal_callback(hsa_signal_value_t value, void* arg)
             hsa_agent_t agent_ = data->agent;
             hsa_queue_t* queue_ = data->queue;
             hsa_signal_t signal_ = data->signal;
-            if (enable_rpt) {
+            if (HCC_PROFILE) {
                 const char *type_;
                 const char *tag_;
                 const char *msg_;
@@ -830,7 +636,7 @@ static bool signal_callback(hsa_signal_value_t value, void* arg)
 
 static void SignalWaiter(int id, SignalCallbackData *data)
 {
-    //fprintf(stderr, "RTG HSA Tracer: SignalWaiter id=%d signal=%lu\n", id, signal.handle);
+    //fprintf(stderr, "RTG Tracer: SignalWaiter id=%d signal=%lu\n", id, signal.handle);
     gs_OrigCoreApiTable.hsa_signal_wait_relaxed_fn(data->signal, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
     signal_callback(0, data);
 }
@@ -838,7 +644,7 @@ static void SignalWaiter(int id, SignalCallbackData *data)
 bool InitHsaTable(HsaApiTable* pTable)
 {
     if (pTable == nullptr) {
-        fprintf(stderr, "RTG HSA Tracer: HSA Runtime provided a nullptr API Table");
+        fprintf(stderr, "RTG Tracer: HSA Runtime provided a nullptr API Table");
         return false;
     }
 
@@ -862,17 +668,17 @@ bool InitHsaTable(HsaApiTable* pTable)
             &gs_OrigLoaderExtTable);
 
     if (status != HSA_STATUS_SUCCESS) {
-        fprintf(stderr, "RTG HSA Tracer: Cannot get loader extension function table");
+        fprintf(stderr, "RTG Tracer: Cannot get loader extension function table");
         return false;
     }
 
     InitCoreApiTable(pTable->core_);
     InitAmdExtTable(pTable->amd_ext_);
 
-    if (enable_profile_copy) {
+    if (RTG_PROFILE_COPY) {
         status = hsa_amd_profiling_async_copy_enable(true);
         if (status != HSA_STATUS_SUCCESS) {
-            fprintf(stderr, "RTG HSA Tracer: hsa_amd_profiling_async_copy_enable failed\n");
+            fprintf(stderr, "RTG Tracer: hsa_amd_profiling_async_copy_enable failed\n");
             return false;
         }
     }
@@ -969,7 +775,7 @@ hsa_status_t hsa_agent_major_extension_supported(uint16_t extension, hsa_agent_t
 }
 
 hsa_status_t hsa_queue_create(hsa_agent_t agent, uint32_t size, hsa_queue_type32_t type, void (*callback)(hsa_status_t status, hsa_queue_t* source, void* data), void* data, uint32_t private_segment_size, uint32_t group_segment_size, hsa_queue_t** queue) {
-    if (enable_profile) {
+    if (RTG_PROFILE) {
         hsa_status_t status;
         hsa_queue_t *signal_queue;
         // create a regular queue; this is for our fake signaling queue
@@ -1503,7 +1309,7 @@ hsa_status_t hsa_executable_load_agent_code_object(hsa_executable_t executable, 
 
 hsa_status_t hsa_executable_freeze(hsa_executable_t executable, const char *options) {
     TRACE(executable, options);
-    if (enable_profile) {
+    if (RTG_PROFILE) {
         return LOG_STATUS(hsa_executable_freeze_interceptor(executable, options));
     }
     else {
@@ -1842,9 +1648,9 @@ hsa_status_t hsa_amd_memory_pool_free(void* ptr) {
 // Mirrors Amd Extension Apis
 hsa_status_t hsa_amd_memory_async_copy(void* dst, hsa_agent_t dst_agent, const void* src, hsa_agent_t src_agent, size_t size, uint32_t num_dep_signals, const hsa_signal_t* dep_signals, hsa_signal_t completion_signal) {
     ++RTG::host_count_copies;
-    if (enable_profile_copy) {
+    if (RTG_PROFILE_COPY) {
         if (completion_signal.handle == 0) {
-            fprintf(stderr, "RTG HSA Tracer: hsa_amd_memory_async_copy no signal\n");
+            fprintf(stderr, "RTG Tracer: hsa_amd_memory_async_copy no signal\n");
         }
         else {
             hsa_agent_t agent_to_use;
@@ -1852,7 +1658,7 @@ hsa_status_t hsa_amd_memory_async_copy(void* dst, hsa_agent_t dst_agent, const v
             auto src_type = agent_type(src_agent);
             auto dst_type = agent_type(dst_agent);
             if (src_type == HSA_DEVICE_TYPE_CPU && dst_type == HSA_DEVICE_TYPE_CPU) {
-                fprintf(stderr, "RTG HSA Tracer: hsa_amd_memory_async_copy used with two cpu agents\n");
+                fprintf(stderr, "RTG Tracer: hsa_amd_memory_async_copy used with two cpu agents\n");
                 exit(EXIT_FAILURE);
             }
             else if (src_type == HSA_DEVICE_TYPE_CPU && dst_type != HSA_DEVICE_TYPE_CPU) {
@@ -1871,7 +1677,7 @@ hsa_status_t hsa_amd_memory_async_copy(void* dst, hsa_agent_t dst_agent, const v
             hsa_signal_t new_signal;
             hsa_status_t status = gs_OrigCoreApiTable.hsa_signal_create_fn(1, 0, nullptr, &new_signal);
             if (status != HSA_STATUS_SUCCESS) {
-                fprintf(stderr, "RTG HSA Tracer: hsa_signal_create_fn failed in hsa_amd_memory_async_copy\n");
+                fprintf(stderr, "RTG Tracer: hsa_signal_create_fn failed in hsa_amd_memory_async_copy\n");
                 exit(EXIT_FAILURE);
             }
             hsa_queue_t *queue = get_agent_signal_queue(agent_to_use);
@@ -1889,9 +1695,9 @@ hsa_status_t hsa_amd_memory_async_copy(void* dst, hsa_agent_t dst_agent, const v
 // Mirrors Amd Extension Apis
 hsa_status_t hsa_amd_memory_async_copy_rect(const hsa_pitched_ptr_t* dst, const hsa_dim3_t* dst_offset, const hsa_pitched_ptr_t* src, const hsa_dim3_t* src_offset, const hsa_dim3_t* range, hsa_agent_t copy_agent, hsa_amd_copy_direction_t dir, uint32_t num_dep_signals, const hsa_signal_t* dep_signals, hsa_signal_t completion_signal) {
     ++RTG::host_count_copies;
-    if (enable_profile_copy) {
+    if (RTG_PROFILE_COPY) {
         if (completion_signal.handle == 0) {
-            fprintf(stderr, "RTG HSA Tracer: hsa_amd_memory_async_copy_rect no signal\n");
+            fprintf(stderr, "RTG Tracer: hsa_amd_memory_async_copy_rect no signal\n");
         }
         else {
             if (agent_type(copy_agent) != HSA_DEVICE_TYPE_CPU) {
@@ -1899,7 +1705,7 @@ hsa_status_t hsa_amd_memory_async_copy_rect(const hsa_pitched_ptr_t* dst, const 
                 hsa_signal_t new_signal;
                 hsa_status_t status = gs_OrigCoreApiTable.hsa_signal_create_fn(1, 0, nullptr, &new_signal);
                 if (status != HSA_STATUS_SUCCESS) {
-                    fprintf(stderr, "RTG HSA Tracer: hsa_amd_signal_create_fn failed in hsa_amd_memory_async_copy_rect\n");
+                    fprintf(stderr, "RTG Tracer: hsa_amd_signal_create_fn failed in hsa_amd_memory_async_copy_rect\n");
                     exit(EXIT_FAILURE);
                 }
                 hsa_queue_t *queue = get_agent_signal_queue(copy_agent);
@@ -2115,7 +1921,7 @@ static std::vector<std::string> split(const std::string& s, char delimiter)
    return tokens;
 }
 
-static void InitEnabledTable(std::string what_to_trace) {
+static void InitEnabledTable(std::string what_to_trace, std::string what_not_to_trace) {
     // init all keys to false initially
     InitEnabledTableCore(false);
     InitEnabledTableExtApi(false);
@@ -2140,6 +1946,14 @@ static void InitEnabledTable(std::string what_to_trace) {
                 if (kv.first.find(s) != std::string::npos) {
                     kv.second = true;
                 }
+            }
+        }
+    }
+    tokens = split(what_not_to_trace, ',');
+    for (auto s : tokens) {
+        for (auto &&kv : enabled_map) {
+            if (kv.first.find(s) != std::string::npos) {
+                kv.second = false;
             }
         }
     }
@@ -2436,7 +2250,7 @@ static inline const char* GetKernelNameRef(uint64_t addr) {
     std::lock_guard<mutex_t> lck(kernel_name_mutex_);
     const auto it = symbols_map_->find(addr);
     if (it == symbols_map_->end()) {
-        fprintf(stderr, "RTG HSA Tracer: kernel addr (0x%lx) is not found\n", addr);
+        fprintf(stderr, "RTG Tracer: kernel addr (0x%lx) is not found\n", addr);
         abort();
     }
     return it->second;
@@ -2452,7 +2266,7 @@ static const char* cpp_demangle(const char* symname) {
 
 static const char* QueryKernelName(uint64_t kernel_object, const amd_kernel_code_t* kernel_code) {
     const char* kernel_symname = GetKernelNameRef(kernel_object);
-    if (RTG::enable_rpt) {
+    if (HCC_PROFILE) {
         return kernel_symname;
     }
     else {
@@ -2474,11 +2288,11 @@ static void intercept_callback(
     hsa_queue_t *signal_queue = data_->signal_queue;
 
     if (writer == NULL) {
-        fprintf(stderr, "RTG HSA Tracer: fatal, intercept callback missing writer\n");
+        fprintf(stderr, "RTG Tracer: fatal, intercept callback missing writer\n");
         exit(EXIT_FAILURE);
     }
     if (count != 1) {
-        fprintf(stderr, "RTG HSA Tracer: fatal, intercept callback packet count != 1\n");
+        fprintf(stderr, "RTG Tracer: fatal, intercept callback packet count != 1\n");
         exit(EXIT_FAILURE);
     }
 
@@ -2495,7 +2309,7 @@ static void intercept_callback(
         ++host_count_signals;
         hsa_status_t status = gs_OrigCoreApiTable.hsa_signal_create_fn(1, 0, nullptr, &new_signal);
         if (status != HSA_STATUS_SUCCESS) {
-            fprintf(stderr, "RTG HSA Tracer: failed to allocate signal\n");
+            fprintf(stderr, "RTG Tracer: failed to allocate signal\n");
             exit(EXIT_FAILURE);
         }
 
@@ -2515,7 +2329,7 @@ static void intercept_callback(
                 owns_orig_signal = true;
                 status = gs_OrigCoreApiTable.hsa_signal_create_fn(1, 0, nullptr, &original_signal);
                 if (status != HSA_STATUS_SUCCESS) {
-                    fprintf(stderr, "RTG HSA Tracer: failed to allocate signal\n");
+                    fprintf(stderr, "RTG Tracer: failed to allocate signal\n");
                     exit(EXIT_FAILURE);
                 }
             }
@@ -2532,7 +2346,7 @@ static void intercept_callback(
                 owns_orig_signal = true;
                 status = gs_OrigCoreApiTable.hsa_signal_create_fn(1, 0, nullptr, &original_signal);
                 if (status != HSA_STATUS_SUCCESS) {
-                    fprintf(stderr, "RTG HSA Tracer: failed to allocate signal\n");
+                    fprintf(stderr, "RTG Tracer: failed to allocate signal\n");
                     exit(EXIT_FAILURE);
                 }
             }
@@ -2540,7 +2354,7 @@ static void intercept_callback(
             pool.push(SignalWaiter, new SignalCallbackData(data_, new_signal, original_signal, owns_orig_signal, barrier_packet));
         }
         else {
-            fprintf(stderr, "RTG HSA Tracer: unrecognized packet type %d\n", type);
+            fprintf(stderr, "RTG Tracer: unrecognized packet type %d\n", type);
             exit(EXIT_FAILURE);
         }
 
@@ -2552,7 +2366,7 @@ static void intercept_callback(
             submit_to_signal_queue(signal_queue, new_signal, original_signal);
         }
         else {
-            fprintf(stderr, "RTG HSA Tracer: fatal, intercept callback missing original signal\n");
+            fprintf(stderr, "RTG Tracer: fatal, intercept callback missing original signal\n");
             exit(EXIT_FAILURE);
         }
 
@@ -2561,34 +2375,30 @@ static void intercept_callback(
 
 static void* hip_activity_callback(uint32_t cid, activity_record_t* record, const void* data, void* arg)
 {
-    //hip_api_data_t *ret = (hip_api_data_t*)malloc(sizeof(hip_api_data_t));
-    hip_api_data_t *ret = (hip_api_data_t*)hip_api_data[cid];
-    //fprintf(stderr, "HI FROM hip_activity_callback cid=%u record=%p data=%p arg=%p ret=%p\n", cid, record, data, arg, ret);
-    //auto id = ++RTG::correlation_id;
-    //ret->correlation_id = id;
-    return ret;
+    return (hip_api_data_t*)hip_api_data[cid];
 }
 
 static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, void* arg)
 {
     hip_api_data_t *data = (hip_api_data_t*)data_;
-    std::string &func = hip_api_names[cid];
-    // TODO capture args
-    //std::string args = "()";
-    std::string args;
-    int pid_ = pid();
-    std::string tid_ = tid();
     if (data->phase == 0) {
         // hack for now, stash tick in the correlation ID
-        uint64_t tick_ = tick();
-        data->correlation_id = tick_;
-        HIP_API_START
+        data->correlation_id = tick();
     }
     else {
+        std::string &func = hip_api_names[cid];
+        int pid_ = pid();
+        std::string tid_ = tid();
+        const char* args = hipApiString((hip_api_id_t)cid, data);
         uint64_t tick_ = data->correlation_id;
         uint64_t ticks = tick() - tick_;                                   \
         int localStatus = 0;
-        HIP_API_STOP
+        if (RTG_HIP_API_ARGS) {
+            LOG_HIP_ARGS
+        }
+        else {
+            LOG_HIP
+        }
         // Now that we're done with the api data, zero it for the next time.
         // Otherwise, phase is always wrong because HIP doesn't set the phase to 0 during API start.
         memset(data, 0, sizeof(hip_api_data_t));
@@ -2604,72 +2414,49 @@ extern "C" bool OnLoad(void *pTable,
         uint64_t runtimeVersion, uint64_t failedToolCount,
         const char *const *pFailedToolNames)
 {
-    std::string outname("hsa_trace.txt");
-    const char *outname_env = nullptr;
-    fprintf(stderr, "RTG HSA Tracer: Loading\n");
-    if ((outname_env = getenv("RTG_HSA_TRACER_FILENAME")) != nullptr) {
-        outname = outname_env;
-    }
+    fprintf(stderr, "RTG Tracer: Loading\n");
+
+    Flag::init_all();
+
+    std::string outname = RTG_FILENAME;
     // PID is needed to avoid clashses in multi-process use cases
     outname += ".";
     outname += RTG::pidstr();
-    fprintf(stderr, "RTG_HSA_TRACER_FILENAME=%s\n", outname.c_str());
+    fprintf(stderr, "RTG Tracer: Filename %s\n", outname.c_str());
     RTG::stream = fopen(outname.c_str(), "w");
 
-    if (getenv("RTG_HSA_TRACER_RPT") || getenv("HCC_PROFILE")) {
-        fprintf(stderr, "RTG HSA Tracer: HCC_PROFILE=2 mode\n");
-        RTG::InitEnabledTable("none");
-        RTG::enable_profile = true;
-        RTG::enable_rpt = true;
-        RTG::enable_dispatch_start = false;
-
-        const char *profile_copy = nullptr;
-        if ((profile_copy = getenv("RTG_HSA_TRACER_PROFILE_COPY")) == nullptr) {
-            profile_copy = "no";
-        }
-        fprintf(stderr, "RTG_HSA_TRACER_PROFILE_COPY=%s\n", profile_copy);
-        RTG::enable_profile_copy = !(std::string(profile_copy) == "no");
+    if (HCC_PROFILE) {
+        fprintf(stderr, "RTG Tracer: HCC_PROFILE=2 mode\n");
     }
     else {
-        const char *what_to_trace = nullptr;
-        if ((what_to_trace = getenv("RTG_HSA_TRACER_FILTER")) == nullptr) {
-            what_to_trace = "core";
-        }
-        fprintf(stderr, "RTG_HSA_TRACER_FILTER=%s\n", what_to_trace);
-        RTG::InitEnabledTable(what_to_trace);
+        RTG::InitEnabledTable(RTG_HSA_API_FILTER, RTG_HSA_API_FILTER_OUT);
 
-        const char *profile = nullptr;
-        if ((profile = getenv("RTG_HSA_TRACER_PROFILE")) == nullptr) {
-            profile = "yes";
+        std::vector<std::string> tokens_keep = RTG::split(RTG_HIP_API_FILTER, ',');
+        std::vector<std::string> tokens_prune = RTG::split(RTG_HIP_API_FILTER_OUT, ',');
+        for (int i=0; i<HIP_API_ID_NUMBER; ++i) {
+            bool keep = false;
+            std::string name = hip_api_name(i);
+            RTG::hip_api_names[i] = name;
+            for (auto tok : tokens_keep) {
+                if (tok == "all" || name.find(tok) != std::string::npos) {
+                    keep = true;
+                    break;
+                }
+            }
+            for (auto tok : tokens_prune) {
+                if (name.find(tok) != std::string::npos) {
+                    keep = false;
+                    break;
+                }
+            }
+            if (keep) {
+                hipRegisterActivityCallback(i, (void*)RTG::hip_activity_callback, NULL);
+                hipRegisterApiCallback(i, (void*)RTG::hip_api_callback, NULL);
+            }
+            if (RTG_VERBOSE) {
+                fprintf(stderr, "RTG Tracer: HIP API %s %s\n", keep ? "keep" : "skip", name.c_str());
+            }
         }
-        fprintf(stderr, "RTG_HSA_TRACER_PROFILE=%s\n", profile);
-        RTG::enable_profile = (std::string(profile) == "yes");
-
-        const char *profile_copy = nullptr;
-        if ((profile_copy = getenv("RTG_HSA_TRACER_PROFILE_COPY")) == nullptr) {
-            profile_copy = "no";
-        }
-        fprintf(stderr, "RTG_HSA_TRACER_PROFILE_COPY=%s\n", profile_copy);
-        RTG::enable_profile_copy = !(std::string(profile_copy) == "no");
-
-        const char *dispatch_start = nullptr;
-        if ((dispatch_start = getenv("RTG_HSA_TRACER_DISPATCH_START")) == nullptr) {
-            dispatch_start = "yes";
-        }
-        else if (strlen(dispatch_start) < 1) {
-            dispatch_start = "yes";
-        }
-        fprintf(stderr, "RTG_HSA_TRACER_DISPATCH_START=%s\n", dispatch_start);
-        char check = *dispatch_start;
-        if (check == 'n' || check == 'N' || check == '0') {
-            RTG::enable_dispatch_start = false;
-        }
-    }
-
-    for (int i=0; i<HIP_API_ID_NUMBER; ++i) {
-        hipRegisterActivityCallback(i, (void*)RTG::hip_activity_callback, NULL);
-        hipRegisterApiCallback(i, (void*)RTG::hip_api_callback, NULL);
-        RTG::hip_api_names[i] = hip_api_name(i);
     }
 
     return RTG::InitHsaTable(reinterpret_cast<HsaApiTable*>(pTable));
@@ -2677,33 +2464,27 @@ extern "C" bool OnLoad(void *pTable,
 
 extern "C" void OnUnload()
 {
-    fprintf(stderr, "RTG HSA Tracer: Unloading\n");
+    fprintf(stderr, "RTG Tracer: Unloading\n");
     RTG::RestoreHsaTable(RTG::gs_OrigHsaTable);
-#if USE_STREAM
-#else
-    if (!RTG::output_has_been_written) {
-        fprintf(RTG::stream, "%s", RTG::os.str().c_str());
-    }
-#endif
     fclose(RTG::stream);
 }
 
 __attribute__((destructor)) static void destroy() {
-    fprintf(stderr, "RTG HSA Tracer: Destructing\n");
-    if (RTG::enable_profile || RTG::enable_profile_copy) {
-        fprintf(stderr, "RTG HSA Tracer: host_count_dispatches=%u\n", LOAD(RTG::host_count_dispatches));
-        fprintf(stderr, "RTG HSA Tracer:   cb_count_dispatches=%u\n", LOAD(RTG::cb_count_dispatches));
-        fprintf(stderr, "RTG HSA Tracer:   host_count_barriers=%u\n", LOAD(RTG::host_count_barriers));
-        fprintf(stderr, "RTG HSA Tracer:     cb_count_barriers=%u\n", LOAD(RTG::cb_count_barriers));
-        fprintf(stderr, "RTG HSA Tracer:     host_count_copies=%u\n", LOAD(RTG::host_count_copies));
-        fprintf(stderr, "RTG HSA Tracer:       cb_count_copies=%u\n", LOAD(RTG::cb_count_copies));
-        fprintf(stderr, "RTG HSA Tracer:    host_count_signals=%u\n", LOAD(RTG::host_count_signals));
-        fprintf(stderr, "RTG HSA Tracer:      cb_count_signals=%u\n", LOAD(RTG::cb_count_signals));
+    fprintf(stderr, "RTG Tracer: Destructing\n");
+    if (RTG_PROFILE || RTG_PROFILE_COPY) {
+        fprintf(stderr, "RTG Tracer: host_count_dispatches=%u\n", LOAD(RTG::host_count_dispatches));
+        fprintf(stderr, "RTG Tracer:   cb_count_dispatches=%u\n", LOAD(RTG::cb_count_dispatches));
+        fprintf(stderr, "RTG Tracer:   host_count_barriers=%u\n", LOAD(RTG::host_count_barriers));
+        fprintf(stderr, "RTG Tracer:     cb_count_barriers=%u\n", LOAD(RTG::cb_count_barriers));
+        fprintf(stderr, "RTG Tracer:     host_count_copies=%u\n", LOAD(RTG::host_count_copies));
+        fprintf(stderr, "RTG Tracer:       cb_count_copies=%u\n", LOAD(RTG::cb_count_copies));
+        fprintf(stderr, "RTG Tracer:    host_count_signals=%u\n", LOAD(RTG::host_count_signals));
+        fprintf(stderr, "RTG Tracer:      cb_count_signals=%u\n", LOAD(RTG::cb_count_signals));
     }
     for (int i=0; i<5; ++i) {
         if (RTG::host_count_dispatches != RTG::cb_count_dispatches
                 || RTG::host_count_barriers != RTG::cb_count_barriers) {
-            fprintf(stderr, "RTG HSA Tracer: not all callbacks have completed, waiting... dispatches %u vs %u barriers %u vs %u signals %u vs %u\n",
+            fprintf(stderr, "RTG Tracer: not all callbacks have completed, waiting... dispatches %u vs %u barriers %u vs %u signals %u vs %u\n",
                     LOAD(RTG::host_count_dispatches),
                     LOAD(RTG::cb_count_dispatches),
                     LOAD(RTG::host_count_barriers),
