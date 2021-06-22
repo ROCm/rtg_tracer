@@ -65,7 +65,6 @@ count_hcc_prof_ts = 0
 count_hcc_prof_op = 0
 count_hcc_prof = 0
 count_hcc_prof_missed = 0
-hip_pids = {}
 count_gap_duplicate_ts = 0
 count_gap_wrapped = 0
 count_gap_okay = 0
@@ -79,50 +78,22 @@ count_hsa_barrier_host = 0
 count_hsa_barrier = 0
 count_hsa_copy = 0
 count_hsa_missed = 0
+all_pids = {}
 
 workgroups = {}
 
-hsa_pids = {}
-hsa_queues = {}
+# do we replace hipModuleLaunchKernel et al with the actual kernel names
+replace_kernel_launch_with_name = False
 
-# HIP can nest its calls, so the opnum is not reliable (bug in HIP trace).
-# Also, hipLaunchKernel is printed without a closing HIP print.
-# The hipLaunchKernel message should amend the preceeding kernel launch info.
-hip_events = {}
-
-# HIP's hipExtLaunchMultiKernelMultiDevice will nest many calls to hipLaunchKernel
-hip_multikernel = {}
-
-# HIP/rocclr for ease of use we want monotonically increasing pids
-hip_rocclr_pids = {}
-hip_rocclr_next_pid = 0
-def get_hiprocclr_pid(pid):
-    global hip_rocclr_pids
-    global hip_rocclr_next_pid
-    if pid not in hip_rocclr_pids:
-        hip_rocclr_pids[pid] = hip_rocclr_next_pid
-        hip_rocclr_next_pid += 1
-    return hip_rocclr_pids[pid]
-
-# HSA can nest its calls.
-hsa_events = {}
-
+# HCC_PROFILE=2 stuff
 # The set of GPUs is maintained for pretty-printing metadata in the chrome://tracing output.
 devices = {}
-
 # Per device HCC timestamps, for gap analysis
 gaps = {}
 gap_names = {}
 
 # strace/ltrace need to track unfinished calls by name
 strace_unfinished = {}
-
-# do we replace hipModuleLaunchKernel et al with the actual kernel names
-replace_kernel_launch_with_name = False
-
-# organizing HIP calls into stream groups needs a pid to name mapping
-hip_stream_output = False
-hip_stream_pids = {}
 
 def print_help():
     print("""
@@ -134,14 +105,15 @@ arguments:
     -h              this help message
     -k              replace HIP kernel launch function with actual kernel names
     -o filename     output JSON to given filename
-    -s              HIP calls with hipStream_t args are grouped separately
+    -p              group by process ID
     -v              verbose console output (extra debugging)
     -w              print workgroups sizes, sorted
 """)
     sys.exit(0)
 
 try:
-    opts,non_opt_args = getopt.gnu_getopt(sys.argv[1:], "fghko:svw")
+    opts,non_opt_args = getopt.gnu_getopt(sys.argv[1:], "fghko:pvw")
+    group_by_process = False
     output_filename = None
     show_gaps = False
     show_flow = False
@@ -158,8 +130,8 @@ try:
             replace_kernel_launch_with_name = True
         elif o == "-o":
             output_filename = a
-        elif o == "-s":
-            hip_stream_output = True
+        elif o == "-p":
+            group_by_process = True
         elif o == "-v":
             verbose = True
         elif o == "-w":
@@ -169,6 +141,88 @@ try:
 except getopt.GetoptError as err:
     print(err)
     sys.exit(2)
+
+name_map = {}
+
+agent_to_index = {}
+agent_counter = 0
+def get_gpu_pid_tid(pid, queue, agent):
+    global agent_to_index
+    global agent_counter
+    key = (pid,agent)
+    if key not in agent_to_index:
+        agent_to_index[key] = agent_counter
+        agent_counter += 1
+    agent_index = agent_to_index[key]
+    tid = agent_index * 1000 + int(queue) + 1
+    if group_by_process:
+        label = "GPU %s.%s" % (agent_index,queue)
+        name_map[(pid,tid)] = label
+        return (int(pid),tid)
+    else:
+        label = "%s.%s" % (agent_index,queue)
+        name_map[(0,tid)] = label
+        return (0,tid)
+
+copy_to_index = {}
+copy_counter = 0
+def get_gpu_copy_pid_tid(pid, agent):
+    global copy_to_index
+    global copy_counter
+    key = (pid,agent)
+    if key not in copy_to_index:
+        copy_to_index[key] = copy_counter
+        copy_counter += 1
+    copy_index = copy_to_index[key]
+    tid = copy_index * 1000
+    if group_by_process:
+        label = "GPU %s.copy" % copy_index
+        name_map[(pid,tid)] = label
+        return (int(pid),tid)
+    else:
+        label = "%s.copy" % copy_index
+        name_map[(0,tid)] = label
+        return (0,tid)
+
+hsa_to_index = {}
+hsa_counter = 1
+def get_hsa_pid_tid(pid, tid):
+    global hsa_to_index
+    global hsa_counter
+    key = (pid,tid)
+    if key not in hsa_to_index:
+        hsa_to_index[key] = hsa_counter
+        hsa_counter += 1
+    hsa_index = hsa_to_index[key]
+    label = "%s.%s" % (pid,tid)
+    tid = 100000 + hsa_index
+    if group_by_process:
+        label = "HSA " + label
+        name_map[(pid,tid)] = label
+        return (int(pid),tid)
+    else:
+        name_map[(1,tid)] = label
+        return (1,tid)
+
+hip_to_index = {}
+hip_counter = 1
+def get_hip_pid_tid(pid, tid):
+    global hip_to_index
+    global hip_counter
+    key = (pid,tid)
+    if key not in hip_to_index:
+        hip_to_index[key] = hip_counter
+        hip_counter += 1
+    hip_index = hip_to_index[key]
+    label = "%s.%s" % (pid,tid)
+    tid = 10000000 + hip_index
+    if group_by_process:
+        label = "HIP " + label
+        name_map[(pid,tid)] = label
+        return (int(pid),tid)
+    else:
+        name_map[(2,tid)] = label
+        return (2,tid)
 
 if not output_filename:
     output_filename = "out.json"
@@ -184,25 +238,6 @@ out = open(output_filename, "w")
 out.write("""{
 "traceEvents": [
 """)
-
-def kern_name(full_string):
-    """Parse HIP kernel name information."""
-    return full_string.strip().split()[1][1:-1]
-
-def kern_to_json(full_string, use_kernel_name=True):
-    """Parse HIP kernel information into an 'args' JSON object."""
-    parts = full_string.strip().split()
-    name = parts[1][1:-1]
-    gridDim = parts[2].split(':')[1]
-    groupDim = parts[3].split(':')[1]
-    sharedMem = parts[4].split(':')[1]
-    stream = parts[5].split(':')[1]
-    if use_kernel_name:
-        return '{"name":"%s", "gridDim":"%s", "groupDim":"%s", "sharedMem":"%s", "stream":"%s"}'%(
-                name, gridDim, groupDim, sharedMem, stream)
-    else:
-        return '{"gridDim":"%s", "groupDim":"%s", "sharedMem":"%s", "stream":"%s"}'%(
-                gridDim, groupDim, sharedMem, stream)
 
 def hip_args_to_json(full_string):
     """Parse HIP call parameters into an 'args' JSON object.
@@ -236,27 +271,6 @@ def hip_args_to_json(full_string):
     ret += '}'
     return ret
 
-def hip_get_stream(full_string):
-    global hip_stream_pids
-    pidstr = None
-    parts = full_string.strip().split()
-    for part in parts:
-        if part[0] == '(':
-            part = part[1:]
-        if part[-1] in [')',',']:
-            part = part[0:-1]
-        if 'stream:' in part:
-            pidstr = part.split(':')[1]
-            break
-    if pidstr is None:
-        print("failed to retrieve stream ID from '%s'" % full_string)
-        sys.exit(1)
-    device,stream = pidstr.split('.')
-    fake_tid = int(stream)
-    fake_pid = -((int(device)+1)*10000)
-    hip_stream_pids[fake_pid] = device
-    return fake_pid,fake_tid
-
 def hash_pid_agent(pid, agent):
     return int(agent)/int(pid)
 
@@ -278,12 +292,12 @@ for filename in non_opt_args:
             if match:
                 count_hip_api += 1
                 pid,tid,func,retcode,ts,dur = match.groups()
+                all_pids[pid] = pid
+                pid,tid = get_hip_pid_tid(pid, tid)
                 args = None
                 if '(' in func:
                     func,args = func.split('(',1)
                     args = hip_args_to_json(args)
-                pid = get_hiprocclr_pid(pid)
-                hip_pids[pid] = None
                 ts = int(ts)/1000
                 dur = int(dur)/1000
                 if args:
@@ -302,8 +316,8 @@ for filename in non_opt_args:
             if match:
                 count_hsa_api += 1
                 pid,tid,func,args,retcode,ts,dur = match.groups()
-                pid = -int(pid)
-                hsa_pids[pid] = None
+                all_pids[pid] = pid
+                pid,tid = get_hsa_pid_tid(pid, tid)
                 ts = int(ts)/1000
                 dur = int(dur)/1000
                 if '\\' in args:
@@ -319,15 +333,9 @@ for filename in non_opt_args:
             if match:
                 count_hsa_dispatch_host += 1
                 pid,tid,queue,agent,signal,name,tick,did,wgx,wgy,wgz,gx,gy,gz = match.groups()
+                all_pids[pid] = pid
+                pid,tid = get_hsa_pid_tid(pid, tid)
                 workgroups[(int(wgx)*int(wgy)*int(wgz),(wgx,wgy,wgz),name)] = None
-                key = (pid,agent)
-                if key not in hsa_queues:
-                    hsa_queues[key] = {}
-                if queue not in hsa_queues[key]:
-                    index = len(hsa_queues[key])
-                    hsa_queues[key][queue] = index
-                tid = hsa_queues[key][queue]
-                pid = -int(pid)
                 tick = int(tick)/1000
                 out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":1, "pid":%s, "tid":%s},\n'%(
                     name, tick, pid, tid))
@@ -340,21 +348,15 @@ for filename in non_opt_args:
             if match:
                 count_hsa_dispatch += 1
                 pid,tid,queue,agent,signal,name,start,stop,did = match.groups()
-                new_pid = hash_pid_agent(pid,agent)
-                key = (pid,agent)
-                if key not in hsa_queues:
-                    hsa_queues[key] = {}
-                if queue not in hsa_queues[key]:
-                    index = len(hsa_queues[key])
-                    hsa_queues[key][queue] = index
-                tid = hsa_queues[key][queue]
+                all_pids[pid] = pid
+                pid,tid = get_gpu_pid_tid(pid, queue, agent)
                 ts = (int(start)/1000)
                 dur = (int(stop)-int(start))/1000
                 out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s},\n'%(
-                    name, ts, dur, new_pid, tid))
+                    name, ts, dur, pid, tid))
                 if show_flow:
                     out.write('{"name":"%s", "cat":"dispatch", "ph":"f", "ts":%s, "pid":%s, "tid":%s, "id":%s},\n'%(
-                        name, ts, new_pid, tid, did))
+                        name, ts, pid, tid, did))
                 continue
 
             match = RE_HSA_BARRIER_HOST.search(line)
@@ -362,14 +364,8 @@ for filename in non_opt_args:
                 count_hsa_barrier_host += 1
                 name = 'barrier'
                 pid,tid,queue,agent,signal,dep1,dep2,dep3,dep4,dep5,tick,did = match.groups()
-                key = (pid,agent)
-                if key not in hsa_queues:
-                    hsa_queues[key] = {}
-                if queue not in hsa_queues[key]:
-                    index = len(hsa_queues[key])
-                    hsa_queues[key][queue] = index
-                tid = hsa_queues[key][queue]
-                pid = -int(pid)
+                all_pids[pid] = pid
+                pid,tid = get_hsa_pid_tid(pid, tid)
                 tick = int(tick)/1000
                 out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":1, "pid":%s, "tid":%s, "args":{"dep1":"%s","dep2":"%s","dep3":"%s","dep4":"%s","dep5":"%s"}},\n'%(
                     name, tick, pid, tid, dep1, dep2, dep3, dep4, dep5))
@@ -383,21 +379,15 @@ for filename in non_opt_args:
                 count_hsa_barrier += 1
                 name = 'barrier'
                 pid,tid,queue,agent,signal,start,stop,dep1,dep2,dep3,dep4,dep5,did = match.groups()
-                new_pid = hash_pid_agent(pid,agent)
-                key = (pid,agent)
-                if key not in hsa_queues:
-                    hsa_queues[key] = {}
-                if queue not in hsa_queues[key]:
-                    index = len(hsa_queues[key])
-                    hsa_queues[key][queue] = index
-                tid = hsa_queues[key][queue]
+                all_pids[pid] = pid
+                pid,tid = get_gpu_pid_tid(pid, queue, agent)
                 ts = (int(start)/1000)
                 dur = (int(stop)-int(start))/1000
                 out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":{"dep1":"%s","dep2":"%s","dep3":"%s","dep4":"%s","dep5":"%s"}},\n'%(
-                    name, ts, dur, new_pid, tid, dep1, dep2, dep3, dep4, dep5))
+                    name, ts, dur, pid, tid, dep1, dep2, dep3, dep4, dep5))
                 if show_flow:
                     out.write('{"name":"%s", "cat":"barrier", "ph":"f", "ts":%s, "pid":%s, "tid":%s, "id":%s},\n'%(
-                        name, ts, new_pid, tid, did))
+                        name, ts, pid, tid, did))
                 continue
 
             match = RE_HSA_COPY.search(line)
@@ -405,16 +395,12 @@ for filename in non_opt_args:
                 count_hsa_copy += 1
                 name = 'copy'
                 pid,tid,agent,signal,start,stop,dep1,dep2,dep3,dep4,dep5 = match.groups()
-                new_pid = hash_pid_agent(pid,agent)
-                key = (pid,agent)
-                if key not in hsa_queues:
-                    hsa_queues[key] = {}
-                #tid = hsa_queues[key][queue]
-                tid = -1
+                all_pids[pid] = pid
+                pid,tid = get_gpu_copy_pid_tid(pid, agent)
                 ts = (int(start)/1000)
                 dur = (int(stop)-int(start))/1000
                 out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":{"dep1":"%s","dep2":"%s","dep3":"%s","dep4":"%s","dep5":"%s"}},\n'%(
-                    name, ts, dur, new_pid, tid, dep1, dep2, dep3, dep4, dep5))
+                    name, ts, dur, pid, tid, dep1, dep2, dep3, dep4, dep5))
                 continue
 
             if 'HSA:' in line:
@@ -553,25 +539,47 @@ for filename in non_opt_args:
             vprint("unparsed line: %s" % line.strip())
             count_skipped += 1
 
-if hsa_pids:
-    for pid in hsa_pids:
-        out.write('{"name":"process_name", "ph":"M", "pid":%d, "args":{"name":"HSA"}},\n'%pid)
+if not group_by_process:
+    out.write('{"name":"process_name", "ph":"M", "pid":0, "args":{"name":"GPU Activity"}},\n')
+    out.write('{"name":"process_name", "ph":"M", "pid":1, "args":{"name":"HSA API Activity"}},\n')
+    out.write('{"name":"process_name", "ph":"M", "pid":2, "args":{"name":"HIP API Activity"}},\n')
+    out.write('{"name":"process_sort_index", "ph":"M", "pid":0, "args":{"sort_index":0}},\n')
+    out.write('{"name":"process_sort_index", "ph":"M", "pid":1, "args":{"sort_index":1}},\n')
+    out.write('{"name":"process_sort_index", "ph":"M", "pid":2, "args":{"sort_index":2}},\n')
 
-if count_hsa_dispatch or count_hsa_barrier or count_hsa_copy:
-    for pid,agent in hsa_queues:
-        out.write('{"name":"process_name", "ph":"M", "pid":%s, "args":{"name":"HSA Agent for pid %s agent %s"}},\n'%(hash_pid_agent(pid,agent),pid,agent))
+if group_by_process:
+    RE_LABEL = re.compile(r"(.*) (\d+)\.(\d+)")
+else:
+    RE_LABEL = re.compile(r"(\d+)\.(\d+)")
+
+pids = {}
+for (pid,tid) in sorted(name_map):
+    label = name_map[(pid,tid)]
+    if group_by_process:
+        if pid not in pids:
+            pids[pid] = None
+            out.write('{"name":"process_name", "ph":"M", "pid":%s, "args":{"name":"Process %s"}},\n'%(pid,pid))
+        out.write('{"name":"thread_name", "ph":"M", "pid":%s, "tid":%d, "args":{"name":"%s"}},\n'%(pid,tid,label))
+    elif len(all_pids) == 1:
+        # drop the PID since it is redundant
+        match = RE_LABEL.search(label)
+        if match:
+            if group_by_process:
+                a,b,c = match.groups()
+                label = "%s %s" % (a,c)
+            else:
+                b,c = match.groups()
+                label = "%s" % c
+        out.write('{"name":"thread_name", "ph":"M", "pid":%d, "tid":%d, "args":{"name":"%s"}},\n'%(pid,tid,label))
+    else:
+        out.write('{"name":"thread_name", "ph":"M", "pid":%d, "tid":%d, "args":{"name":"%s"}},\n'%(pid,tid,label))
+
+#if count_hsa_dispatch or count_hsa_barrier or count_hsa_copy:
+#    for pid,agent in hsa_queues:
+#        out.write('{"name":"process_name", "ph":"M", "pid":%s, "args":{"name":"HSA Agent for pid %s agent %s"}},\n'%(hash_pid_agent(pid,agent),pid,agent))
 
 if count_strace_resumed + count_strace_complete > 0:
     out.write('{"name":"process_name", "ph":"M", "pid":-2000, "args":{"name":"strace/ltrace"}},\n')
-
-if hip_pids:
-    for pid in hip_pids:
-        out.write('{"name":"process_name", "ph":"M", "pid":%s, "args":{"name":"HIP"}},\n'%pid)
-
-if hip_stream_output:
-    for pid in hip_stream_pids:
-        pidstr = hip_stream_pids[pid]
-        out.write('{"name":"process_name", "ph":"M", "pid":%s, "args":{"name":"HIP Stream Device %s"}},\n'%(pid,pidstr))
 
 for fake in devices:
     dev = -(fake + 1)
