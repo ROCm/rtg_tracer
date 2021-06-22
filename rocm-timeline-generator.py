@@ -144,16 +144,27 @@ except getopt.GetoptError as err:
 
 name_map = {}
 
-agent_to_index = {}
 agent_counter = 0
+agent_to_index = {}
+agent_to_queue_map = {}
+agent_to_queue_counter = {}
 def get_gpu_pid_tid(pid, queue, agent):
-    global agent_to_index
     global agent_counter
+    global agent_to_index
+    global agent_to_queue_map
+    global agent_to_queue_counter
     key = (pid,agent)
     if key not in agent_to_index:
         agent_to_index[key] = agent_counter
+        agent_to_queue_map[key] = {}
+        agent_to_queue_counter[key] = 0
         agent_counter += 1
     agent_index = agent_to_index[key]
+    queue_map = agent_to_queue_map[key]
+    if queue not in queue_map:
+        queue_map[queue] = agent_to_queue_counter[key]
+        agent_to_queue_counter[key] += 1
+    queue = queue_map[queue]
     tid = agent_index * 1000 + int(queue) + 1
     if group_by_process:
         label = "GPU %s.%s" % (agent_index,queue)
