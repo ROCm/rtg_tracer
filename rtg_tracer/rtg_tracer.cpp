@@ -2453,7 +2453,7 @@ extern "C" bool OnLoad(void *pTable,
                 hipRegisterActivityCallback(i, (void*)RTG::hip_activity_callback, NULL);
                 hipRegisterApiCallback(i, (void*)RTG::hip_api_callback, NULL);
             }
-            if (RTG_VERBOSE) {
+            if (RTG_VERBOSE == "2") {
                 fprintf(stderr, "RTG Tracer: HIP API %s %s\n", keep ? "keep" : "skip", name.c_str());
             }
         }
