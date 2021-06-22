@@ -1682,7 +1682,7 @@ hsa_status_t hsa_amd_memory_async_copy(void* dst, hsa_agent_t dst_agent, const v
             }
             hsa_queue_t *queue = get_agent_signal_queue(agent_to_use);
             uint64_t index = submit_to_signal_queue(queue, new_signal, completion_signal);
-            pool.push(SignalWaiter, new SignalCallbackData(queue, src_agent, new_signal, completion_signal, false, num_dep_signals, dep_signals, size, direction, index));
+            pool.push(SignalWaiter, new SignalCallbackData(queue, agent_to_use, new_signal, completion_signal, false, num_dep_signals, dep_signals, size, direction, index));
             TRACE(dst, dst_agent, src, src_agent, size, num_dep_signals, dep_signals, completion_signal);
             return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_memory_async_copy_fn(dst, dst_agent, src, src_agent, size, num_dep_signals, dep_signals, new_signal));
         }
