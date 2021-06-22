@@ -559,17 +559,18 @@ for (pid,tid) in sorted(name_map):
         if pid not in pids:
             pids[pid] = None
             out.write('{"name":"process_name", "ph":"M", "pid":%s, "args":{"name":"Process %s"}},\n'%(pid,pid))
-        out.write('{"name":"thread_name", "ph":"M", "pid":%s, "tid":%d, "args":{"name":"%s"}},\n'%(pid,tid,label))
-    elif len(all_pids) == 1:
-        # drop the PID since it is redundant
-        match = RE_LABEL.search(label)
-        if match:
-            if group_by_process:
+        if len(all_pids) == 1 and 'GPU' not in label:
+            match = RE_LABEL.search(label)
+            if match:
                 a,b,c = match.groups()
                 label = "%s %s" % (a,c)
-            else:
-                b,c = match.groups()
-                label = "%s" % c
+        out.write('{"name":"thread_name", "ph":"M", "pid":%s, "tid":%d, "args":{"name":"%s"}},\n'%(pid,tid,label))
+    elif len(all_pids) == 1 and pid != 0:
+        # drop the PID since it is redundant, but don't drop GPU ordinal accidentally
+        match = RE_LABEL.search(label)
+        if match:
+            b,c = match.groups()
+            label = "%s" % c
         out.write('{"name":"thread_name", "ph":"M", "pid":%d, "tid":%d, "args":{"name":"%s"}},\n'%(pid,tid,label))
     else:
         out.write('{"name":"thread_name", "ph":"M", "pid":%d, "tid":%d, "args":{"name":"%s"}},\n'%(pid,tid,label))
