@@ -576,6 +576,7 @@ for (pid,tid) in sorted(name_map):
                 a,b,c = match.groups()
                 label = "%s %s" % (a,c)
         out.write('{"name":"thread_name", "ph":"M", "pid":%s, "tid":%d, "args":{"name":"%s"}},\n'%(pid,tid,label))
+        out.write('{"name":"thread_sort_index", "ph":"M", "pid":%s, "tid":%d, "args":{"sort_index":%d}},\n'%(pid,tid,tid))
     elif len(all_pids) == 1 and pid != 0:
         # drop the PID since it is redundant, but don't drop GPU ordinal accidentally
         match = RE_LABEL.search(label)
