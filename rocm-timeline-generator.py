@@ -250,38 +250,6 @@ out.write("""{
 "traceEvents": [
 """)
 
-def hip_args_to_json(full_string):
-    """Parse HIP call parameters into an 'args' JSON object.
-
-    Example:
-        (arg1=foo, arg2=bar)
-
-    """
-    parts = full_string.strip().split()
-    counter = 0
-    ret = '{'
-    for part in parts[0:]:
-        if counter > 0:
-            ret += ', '
-        if part[0] == '(':
-            part = part[1:]
-        if part[-1] in [')',',']:
-            part = part[0:-1]
-        if '=' in part:
-            try:
-                name,value = part.split('=', 1) # hipCtx_t args have an extra ':'
-                ret += '"%s":"%s"' % (name,value)
-            except:
-                print("uh oh")
-                print(part)
-                print(full_string)
-                raise
-        else:
-            ret += '"arg%d":"%s"' % (counter,part)
-        counter += 1
-    ret += '}'
-    return ret
-
 def hash_pid_agent(pid, agent):
     return int(agent)/int(pid)
 
@@ -312,17 +280,26 @@ for filename in non_opt_args:
                     kernname = kernname[:-1] # strip off ']'
                 if '(' in func:
                     func,args = func.split('(',1)
-                    args = hip_args_to_json(args)
+                    args = args[:-1] # strip off ')'
+                    args = args.replace('"', '') # remove any quotes, would conflict with JSON format
                 if replace_kernel_launch_with_name and kernname is not None:
                     func = kernname
                 ts = int(ts)/1000
                 dur = int(dur)/1000
                 if args:
-                    out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%d, "tid":%s, "args":%s},\n'%(
-                        func, ts, dur, pid, tid, args))
+                    if not replace_kernel_launch_with_name and kernname is not None:
+                        out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%d, "tid":%s, "args":{"name":"%s","params":"%s"}},\n'%(
+                            func, ts, dur, pid, tid, kernname, args))
+                    else:
+                        out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%d, "tid":%s, "args":{"params":"%s"}},\n'%(
+                            func, ts, dur, pid, tid, args))
                 else:
-                    out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%d, "tid":%s},\n'%(
-                        func, ts, dur, pid, tid))
+                    if not replace_kernel_launch_with_name and kernname is not None:
+                        out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%d, "tid":%s, "args":{"name":"%s"}},\n'%(
+                            func, ts, dur, pid, tid, kernname))
+                    else:
+                        out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%d, "tid":%s},\n'%(
+                            func, ts, dur, pid, tid))
                 continue
 
             if 'HIP:' in line:
