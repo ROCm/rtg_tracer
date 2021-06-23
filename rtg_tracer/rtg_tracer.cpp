@@ -306,8 +306,12 @@ fprintf(stream, "HSA: pid:%d tid:%s copy agent:%lu signal:%lu start:%lu stop:%lu
 //fprintf(stream, "HIP: pid:%d tid:%s %s %s @%lu\n", pid_, tid_.c_str(), func.c_str(), args.c_str(), tick_); fflush(stream);
 #define LOG_HIP \
 fprintf(stream, "HIP: pid:%d tid:%s %s ret=%d @%lu +%lu\n", pid_, tid_.c_str(), func.c_str(), localStatus, tick_, ticks); fflush(stream);
+#define LOG_HIP_KERNEL \
+fprintf(stream, "HIP: pid:%d tid:%s %s [%s] ret=%d @%lu +%lu\n", pid_, tid_.c_str(), func.c_str(), kernname, localStatus, tick_, ticks); fflush(stream);
 #define LOG_HIP_ARGS \
 fprintf(stream, "HIP: pid:%d tid:%s %s ret=%d @%lu +%lu\n", pid_, tid_.c_str(), args, localStatus, tick_, ticks); fflush(stream);
+#define LOG_HIP_KERNEL_ARGS \
+fprintf(stream, "HIP: pid:%d tid:%s %s [%s] ret=%d @%lu +%lu\n", pid_, tid_.c_str(), args, kernname, localStatus, tick_, ticks); fflush(stream);
 
 #define TRACE(...) \
     static bool is_enabled = enabled_check(__func__); \
@@ -2386,18 +2390,65 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
         data->correlation_id = tick();
     }
     else {
-        std::string &func = hip_api_names[cid];
+        const char *kernname = NULL;
         int pid_ = pid();
         std::string tid_ = tid();
-        const char* args = hipApiString((hip_api_id_t)cid, data);
         uint64_t tick_ = data->correlation_id;
         uint64_t ticks = tick() - tick_;                                   \
         int localStatus = 0;
+        bool is_kernel = false;
+
+        if (cid ==   HIP_API_ID_hipLaunchCooperativeKernel) {
+            auto f = data->args.hipLaunchCooperativeKernel.f;
+            auto s = data->args.hipLaunchCooperativeKernel.stream;
+            kernname = hipKernelNameRefByPtr(f, s);
+            is_kernel = true;
+        }
+        else if (cid == HIP_API_ID_hipLaunchKernel) {
+            auto f =    data->args.hipLaunchKernel.function_address;
+            auto s =    data->args.hipLaunchKernel.stream;
+            kernname = hipKernelNameRefByPtr(f, s);
+            is_kernel = true;
+        }
+        else if (cid == HIP_API_ID_hipHccModuleLaunchKernel) {
+            auto f =    data->args.hipHccModuleLaunchKernel.f;
+            kernname = hipKernelNameRef(f);
+            is_kernel = true;
+        }
+        else if (cid == HIP_API_ID_hipExtModuleLaunchKernel) {
+            auto f =    data->args.hipExtModuleLaunchKernel.f;
+            kernname = hipKernelNameRef(f);
+            is_kernel = true;
+        }
+        else if (cid == HIP_API_ID_hipModuleLaunchKernel) {
+            auto f =    data->args.hipModuleLaunchKernel.f;
+            kernname = hipKernelNameRef(f);
+            is_kernel = true;
+        }
+        else if (cid == HIP_API_ID_hipExtLaunchKernel) {
+            auto f =    data->args.hipExtLaunchKernel.function_address;
+            auto s =    data->args.hipExtLaunchKernel.stream;
+            kernname = hipKernelNameRefByPtr(f, s);
+            is_kernel = true;
+        }
+
         if (RTG_HIP_API_ARGS) {
-            LOG_HIP_ARGS
+            const char* args = hipApiString((hip_api_id_t)cid, data);
+            if (is_kernel) {
+                LOG_HIP_KERNEL_ARGS
+            }
+            else {
+                LOG_HIP_ARGS
+            }
         }
         else {
-            LOG_HIP
+            std::string &func = hip_api_names[cid];
+            if (is_kernel) {
+                LOG_HIP_KERNEL
+            }
+            else {
+                LOG_HIP
+            }
         }
         // Now that we're done with the api data, zero it for the next time.
         // Otherwise, phase is always wrong because HIP doesn't set the phase to 0 during API start.

@@ -306,9 +306,15 @@ for filename in non_opt_args:
                 all_pids[pid] = pid
                 pid,tid = get_hip_pid_tid(pid, tid)
                 args = None
+                kernname = None
+                if ' [' in func: # look for kernname
+                    func,kernname = func.split(' [',1)
+                    kernname = kernname[:-1] # strip off ']'
                 if '(' in func:
                     func,args = func.split('(',1)
                     args = hip_args_to_json(args)
+                if replace_kernel_launch_with_name and kernname is not None:
+                    func = kernname
                 ts = int(ts)/1000
                 dur = int(dur)/1000
                 if args:
