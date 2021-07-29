@@ -28,6 +28,7 @@
 #include <hip/amd_detail/hip_prof_str.h>
 
 #include <roctracer/roctracer.h>
+#include <roctracer/roctracer_roctx.h>
 
 #include "ctpl_stl.h"
 
@@ -86,6 +87,16 @@ struct hip_api_state_ {
     uint64_t tick; \
 };
 thread_local std::vector<struct hip_api_state_> hip_api_state(HIP_API_ID_NUMBER);
+
+// Support for ROCTX callbacks.
+static void* roctx_callback(uint32_t domain, uint32_t cid, const void* data, void* arg);
+typedef struct roctx_data {
+    std::string message;
+    uint64_t tick;
+    roctx_data(const char *m, uint64_t t) : message(m), tick(t) {}
+} roctx_data_t;
+thread_local std::vector<roctx_data_t> roctx_stack;
+thread_local std::unordered_map<int,roctx_data_t> roctx_range;
 
 // Lookup which HSA functions we want to trace
 static std::unordered_map<std::string,bool> enabled_map;
@@ -312,6 +323,10 @@ fprintf(stream, "HIP: pid:%d tid:%s %s [%s] ret=%d @%lu +%lu\n", pid_, tid_.c_st
 fprintf(stream, "HIP: pid:%d tid:%s %s ret=%d @%lu +%lu\n", pid_, tid_.c_str(), args, localStatus, tick_, ticks); fflush(stream);
 #define LOG_HIP_KERNEL_ARGS \
 fprintf(stream, "HIP: pid:%d tid:%s %s [%s] ret=%d @%lu +%lu\n", pid_, tid_.c_str(), args, kernname, localStatus, tick_, ticks); fflush(stream);
+#define LOG_ROCTX \
+fprintf(stream, "RTX: pid:%d tid:%s %s @%lu +%lu\n", pid_, tid_.c_str(), msg.c_str(), tick_, ticks); fflush(stream);
+#define LOG_ROCTX_MARK \
+fprintf(stream, "RTX: pid:%d tid:%s %s @%lu\n", pid_, tid_.c_str(), msg.c_str(), tick_); fflush(stream);
 
 #define TRACE(...) \
     static bool is_enabled = enabled_check(__func__); \
@@ -2454,8 +2469,50 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
         // Otherwise, phase is always wrong because HIP doesn't set the phase to 0 during API start.
         memset(data, 0, sizeof(hip_api_data_t));
     }
-    //fprintf(stderr, "HI FROM hip_api_callback domain=%u cid=%u data=%p arg=%p correlation_id=%lu phase=%u name=%s\n",
-    //        domain, cid, data, arg, data->correlation_id, data->phase, hip_api_names[cid].c_str());
+
+    return NULL;
+}
+
+static void* roctx_callback(uint32_t domain, uint32_t cid, const void* data_, void* arg)
+{
+    uint64_t new_tick = tick();
+    roctx_api_data_t *data = (roctx_api_data_t*)data_;
+
+    if (cid == ROCTX_API_ID_roctxMarkA) {
+        int pid_ = pid();
+        std::string tid_ = tid();
+        std::string msg = data->args.message;
+        uint64_t &tick_ = new_tick;
+        LOG_ROCTX_MARK
+    }
+    else if (cid == ROCTX_API_ID_roctxRangePushA) {
+        roctx_stack.emplace_back(data->args.message, new_tick);
+    }
+    else if (cid == ROCTX_API_ID_roctxRangePop) {
+        int pid_ = pid();
+        std::string tid_ = tid();
+        std::string msg = roctx_stack.back().message;
+        uint64_t tick_ = roctx_stack.back().tick;
+        uint64_t ticks = new_tick - tick_;
+        LOG_ROCTX
+    }
+    else if (cid == ROCTX_API_ID_roctxRangeStartA) {
+        roctx_range.emplace(data->args.id, roctx_data_t{data->args.message,new_tick});
+    }
+    else if (cid == ROCTX_API_ID_roctxRangeStop) {
+        auto item = roctx_range.find(data->args.id);
+        if (item == roctx_range.end()) {
+            fprintf(stderr, "RTG Tracer: invalid roctx range: %lu\n", data->args.id);
+            exit(EXIT_FAILURE);
+        }
+        int pid_ = pid();
+        std::string tid_ = tid();
+        std::string msg = item->second.message;
+        uint64_t tick_ = item->second.tick;
+        uint64_t ticks = new_tick - tick_;
+        LOG_ROCTX
+    }
+
     return NULL;
 }
 
@@ -2482,6 +2539,7 @@ extern "C" bool OnLoad(void *pTable,
     else {
         RTG::InitEnabledTable(RTG_HSA_API_FILTER, RTG_HSA_API_FILTER_OUT);
 
+        // Register HIP APIs
         std::vector<std::string> tokens_keep = RTG::split(RTG_HIP_API_FILTER, ',');
         std::vector<std::string> tokens_prune = RTG::split(RTG_HIP_API_FILTER_OUT, ',');
         for (int i=0; i<HIP_API_ID_NUMBER; ++i) {
@@ -2507,6 +2565,11 @@ extern "C" bool OnLoad(void *pTable,
             if (RTG_VERBOSE == "2") {
                 fprintf(stderr, "RTG Tracer: HIP API %s %s\n", keep ? "keep" : "skip", name.c_str());
             }
+        }
+
+        // Register ROCTX
+        for (int i=0; i<ROCTX_API_ID_NUMBER; ++i) {
+            RegisterApiCallback(i, (void*)RTG::roctx_callback, NULL);
         }
     }
 
