@@ -310,9 +310,9 @@ fprintf(stream, "HSA: pid:%d tid:%s %s %s ret=%ld @%lu +%lu\n", pid_, tid_.c_str
 #define LOG_VOID_OUT \
 fprintf(stream, "HSA: pid:%d tid:%s %s %s ret=void @%lu +%lu\n", pid_, tid_.c_str(), func.c_str(), args.c_str(), tick_, ticks); fflush(stream);
 #define LOG_DISPATCH_HOST \
-fprintf(stream, "HSA: pid:%d tid:%s dispatch queue:%lu agent:%lu signal:%lu name:'%s' tick:%lu id:%lu workgroup:{%d,%d,%d} grid:{%d,%d,%d}\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, name_, tick_, id_, packet->workgroup_size_x, packet->workgroup_size_y, packet->workgroup_size_z, packet->grid_size_x, packet->grid_size_y, packet->grid_size_z);
+fprintf(stream, "HSA: pid:%d tid:%s dispatch queue:%lu agent:%lu signal:%lu name:'%s' tick:%lu id:%lu workgroup:{%d,%d,%d} grid:{%d,%d,%d}\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, name_.c_str(), tick_, id_, packet->workgroup_size_x, packet->workgroup_size_y, packet->workgroup_size_z, packet->grid_size_x, packet->grid_size_y, packet->grid_size_z);
 #define LOG_DISPATCH \
-fprintf(stream, "HSA: pid:%d tid:%s dispatch queue:%lu agent:%lu signal:%lu name:'%s' start:%lu stop:%lu id:%lu\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, name_, start_, stop_, id_); fflush(stream);
+fprintf(stream, "HSA: pid:%d tid:%s dispatch queue:%lu agent:%lu signal:%lu name:'%s' start:%lu stop:%lu id:%lu\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, name_.c_str(), start_, stop_, id_); fflush(stream);
 #define LOG_BARRIER_HOST \
 fprintf(stream, "HSA: pid:%d tid:%s barrier queue:%lu agent:%lu signal:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu tick:%lu id:%lu\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, dep1, dep2, dep3, dep4, dep5, tick_, id_); fflush(stream);
 #define LOG_BARRIER \
@@ -439,7 +439,7 @@ enum CopyDirection {
 
 struct SignalCallbackData
 {
-    SignalCallbackData(const char *name, InterceptCallbackData *data, hsa_signal_t signal, hsa_signal_t orig_signal, bool owns_orig_signal, const hsa_kernel_dispatch_packet_t *packet)
+    SignalCallbackData(std::string name, InterceptCallbackData *data, hsa_signal_t signal, hsa_signal_t orig_signal, bool owns_orig_signal, const hsa_kernel_dispatch_packet_t *packet)
         : name(name), data(data), queue(data->queue), agent(data->agent), signal(signal), orig_signal(orig_signal), owns_orig_signal(owns_orig_signal), bytes(0), direction(0),
             is_copy(false), is_barrier(false), dep1(0), dep2(0), dep3(0), dep4(0), dep5(0), id_(did()), seq_num_(data->seq_index++)
     {
@@ -447,7 +447,7 @@ struct SignalCallbackData
             long unsigned tick_ = tick();
             int pid_ = pid();
             std::string tid_ = tid();
-            const char *name_ = name;
+            std::string name_ = name;
             hsa_agent_t agent_ = agent;
             hsa_queue_t* queue_ = queue;
             hsa_signal_t signal_ = signal;
@@ -456,7 +456,7 @@ struct SignalCallbackData
     }
 
     SignalCallbackData(hsa_queue_t* queue, hsa_agent_t agent, hsa_signal_t signal, hsa_signal_t orig_signal, bool owns_orig_signal, uint32_t num_dep_signals, const hsa_signal_t* dep_signals, size_t bytes, int direction, int seq)
-        : name(nullptr), queue(queue), agent(agent), signal(signal), orig_signal(orig_signal), owns_orig_signal(owns_orig_signal), bytes(bytes), direction(direction),
+        : name(), queue(queue), agent(agent), signal(signal), orig_signal(orig_signal), owns_orig_signal(owns_orig_signal), bytes(bytes), direction(direction),
             is_copy(true),
             is_barrier(false),
             dep1(num_dep_signals>0 ? dep_signals[0].handle : 0),
@@ -469,7 +469,7 @@ struct SignalCallbackData
     {}
 
     SignalCallbackData(InterceptCallbackData *data, hsa_signal_t signal, hsa_signal_t orig_signal, bool owns_orig_signal, const hsa_barrier_and_packet_t* packet)
-        : name(nullptr), data(data), queue(data->queue), agent(data->agent), signal(signal), orig_signal(orig_signal), owns_orig_signal(owns_orig_signal), bytes(0), direction(0),
+        : name(), data(data), queue(data->queue), agent(data->agent), signal(signal), orig_signal(orig_signal), owns_orig_signal(owns_orig_signal), bytes(0), direction(0),
             is_copy(false),
             is_barrier(true),
             dep1(packet->dep_signal[0].handle),
@@ -484,7 +484,7 @@ struct SignalCallbackData
             long unsigned tick_ = tick();
             int pid_ = pid();
             std::string tid_ = tid();
-            const char *name_ = "barrier";
+            std::string name_ = "barrier";
             hsa_agent_t agent_ = agent;
             hsa_queue_t* queue_ = queue;
             hsa_signal_t signal_ = signal;
@@ -523,7 +523,7 @@ struct SignalCallbackData
         return true;
     }
 
-    const char *name;
+    std::string name;
     InterceptCallbackData *data;
     hsa_queue_t* queue;
     hsa_agent_t agent;
@@ -591,13 +591,13 @@ static bool signal_callback(hsa_signal_value_t value, void* arg)
             long unsigned stop_ = data->stop;
             int pid_ = pid();
             std::string tid_ = tid();
-            const char *name_ = data->name;
+            std::string name_ = data->name;
             hsa_agent_t agent_ = data->agent;
             hsa_queue_t* queue_ = data->queue;
             hsa_signal_t signal_ = data->signal;
             if (HCC_PROFILE) {
                 const char *type_;
-                const char *tag_;
+                std::string tag_;
                 const char *msg_;
                 std::string msgstr;
                 int agent_id_ = 0;
@@ -2280,20 +2280,24 @@ static inline const char* GetKernelNameRef(uint64_t addr) {
 }
 
 // Demangle C++ symbol name
-static const char* cpp_demangle(const char* symname) {
+static char* cpp_demangle(const char* symname) {
     size_t size = 0;
     int status;
-    const char* ret = abi::__cxa_demangle(symname, NULL, &size, &status);
+    char* ret = abi::__cxa_demangle(symname, NULL, &size, &status);
     return (ret != 0) ? ret : strdup(symname);
 }
 
-static const char* QueryKernelName(uint64_t kernel_object, const amd_kernel_code_t* kernel_code) {
+static std::string QueryKernelName(uint64_t kernel_object, const amd_kernel_code_t* kernel_code) {
     const char* kernel_symname = GetKernelNameRef(kernel_object);
     if (HCC_PROFILE) {
-        return kernel_symname;
+        return std::string(kernel_symname);
     }
     else {
-        return cpp_demangle(kernel_symname);
+        // caller of cpp_demangle must free returned buffer
+        char *demangled = cpp_demangle(kernel_symname);
+        std::string ret = demangled;
+        free(demangled);
+        return ret;
     }
 }
 
@@ -2345,7 +2349,7 @@ static void intercept_callback(
             uint64_t kernel_object = dispatch_packet->kernel_object;
             const amd_kernel_code_t* kernel_code = GetKernelCode(kernel_object);
             const uint64_t kernel_symbol = kernel_code->runtime_loader_kernel_symbol;
-            const char* kernel_name = QueryKernelName(kernel_object, kernel_code);
+            std::string kernel_name = QueryKernelName(kernel_object, kernel_code);
 
             original_signal = dispatch_packet->completion_signal;
             if (!original_signal.handle) {
