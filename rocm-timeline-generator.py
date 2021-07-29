@@ -11,6 +11,13 @@ HIP sample output
 -----------------
     HIP: pid:4905 tid:140302773952640 hipFree  ret=0 @1811962118575233 +34010
 
+roctx sample output
+-----------------
+ranges
+    RTX: pid:4905 tid:140302773952640 some message ret=0 @1811962118575233 +34010
+markers
+    RTX: pid:4905 tid:140302773952640 some message ret=0 @1811962118578989
+
 strace/ltrace -tttT sample output {beta}
 ----------------------------------------
 
@@ -47,6 +54,8 @@ RE_HSA_BARRIER_HOST = re.compile(r"HSA: pid:(\d+) tid:(\d+) barrier queue:(.*) a
 RE_HSA_BARRIER      = re.compile(r"HSA: pid:(\d+) tid:(\d+) barrier queue:(.*) agent:(\d+) signal:(\d+) start:(\d+) stop:(\d+) dep1:(\d+) dep2:(\d+) dep3:(\d+) dep4:(\d+) dep5:(\d+) id:(\d+)")
 RE_HSA_COPY         = re.compile(r"HSA: pid:(\d+) tid:(\d+) copy agent:(\d+) signal:(\d+) start:(\d+) stop:(\d+) dep1:(\d+) dep2:(\d+) dep3:(\d+) dep4:(\d+) dep5:(\d+)")
 RE_HIP              = re.compile(r"HIP: pid:(\d+) tid:(\d+) (.*) ret=(.*) @(\d+) \+(\d+)")
+RE_ROCTX            = re.compile(r"RTX: pid:(\d+) tid:(\d+) (.*) @(\d+) \+(\d+)")
+RE_ROCTX_MARKER     = re.compile(r"RTX: pid:(\d+) tid:(\d+) (.*) @(\d+)")
 RE_HCC_PROF_TS_OPX  = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;\s+(\d+);\s+(\d+);\s+#(\d+\.\d+\.\d+);\s+(.*)")
 RE_HCC_PROF_TS_OP   = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;\s+(\d+);\s+(\d+);\s+#(\d+\.\d+\.\d+);")
 RE_HCC_PROF_TS      = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;\s+(\d+);\s+(\d+);")
@@ -78,6 +87,8 @@ count_hsa_barrier_host = 0
 count_hsa_barrier = 0
 count_hsa_copy = 0
 count_hsa_missed = 0
+count_roctx_api = 0
+count_roctx_missed = 0
 all_pids = {}
 
 workgroups = {}
@@ -403,6 +414,39 @@ for filename in non_opt_args:
                     print(line)
                 continue
 
+            # put roctx traces into same group as HIP APIs
+            match = RE_ROCTX.search(line)
+            if match:
+                count_roctx_api += 1
+                pid,tid,func,ts,dur = match.groups()
+                all_pids[pid] = pid
+                pid,tid = get_hip_pid_tid(pid, tid)
+                args = None
+                kernname = None
+                ts = int(ts)/1000
+                dur = int(dur)/1000
+                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%d, "tid":%s},\n'%(
+                    func, ts, dur, pid, tid))
+                continue
+
+            match = RE_ROCTX_MARKER.search(line)
+            if match:
+                count_roctx_api += 1
+                pid,tid,func,ts = match.groups()
+                all_pids[pid] = pid
+                pid,tid = get_hip_pid_tid(pid, tid)
+                args = None
+                kernname = None
+                ts = int(ts)/1000
+                dur = int(dur)/1000
+                out.write('{"name":"%s", "ph":"i", "ts":%s, "pid":%d, "tid":%s},\n'%(
+                    func, ts, pid, tid))
+                continue
+
+            if 'RTX:' in line:
+                count_roctx_missed += 1
+                continue
+
             # look for most specific HCC profile first
             match = RE_HCC_PROF_TS_OPX.search(line)
             if match:
@@ -638,6 +682,8 @@ print("         copy hsa lines: %d"%count_hsa_copy)
 print("       missed hsa lines: %d"%count_hsa_missed)
 print("          api hip lines: %d"%count_hip_api)
 print("       missed hip lines: %d"%count_hip_missed)
+print("            roctx lines: %d"%count_roctx_api)
+print("     missed roctx lines: %d"%count_roctx_missed)
 print("  prof ts opx hcc lines: %d"%count_hcc_prof_ts_opx)
 print("   prof ts op hcc lines: %d"%count_hcc_prof_ts_op)
 print("      prof ts hcc lines: %d"%count_hcc_prof_ts)
