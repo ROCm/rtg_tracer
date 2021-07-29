@@ -322,11 +322,11 @@ fprintf(stream, "HSA: pid:%d tid:%s copy agent:%lu signal:%lu start:%lu stop:%lu
 #define LOG_HIP \
 fprintf(stream, "HIP: pid:%d tid:%s %s ret=%d @%lu +%lu\n", pid_, tid_.c_str(), func.c_str(), localStatus, tick_, ticks); fflush(stream);
 #define LOG_HIP_KERNEL \
-fprintf(stream, "HIP: pid:%d tid:%s %s [%s] ret=%d @%lu +%lu\n", pid_, tid_.c_str(), func.c_str(), kernname, localStatus, tick_, ticks); fflush(stream);
+fprintf(stream, "HIP: pid:%d tid:%s %s [%s] ret=%d @%lu +%lu\n", pid_, tid_.c_str(), func.c_str(), kernname_str.c_str(), localStatus, tick_, ticks); fflush(stream);
 #define LOG_HIP_ARGS \
 fprintf(stream, "HIP: pid:%d tid:%s %s ret=%d @%lu +%lu\n", pid_, tid_.c_str(), args, localStatus, tick_, ticks); fflush(stream);
 #define LOG_HIP_KERNEL_ARGS \
-fprintf(stream, "HIP: pid:%d tid:%s %s [%s] ret=%d @%lu +%lu\n", pid_, tid_.c_str(), args, kernname, localStatus, tick_, ticks); fflush(stream);
+fprintf(stream, "HIP: pid:%d tid:%s %s [%s] ret=%d @%lu +%lu\n", pid_, tid_.c_str(), args, kernname_str.c_str(), localStatus, tick_, ticks); fflush(stream);
 #define LOG_ROCTX \
 fprintf(stream, "RTX: pid:%d tid:%s %s @%lu +%lu\n", pid_, tid_.c_str(), msg.c_str(), tick_, ticks); fflush(stream);
 #define LOG_ROCTX_MARK \
@@ -2280,11 +2280,37 @@ static inline const char* GetKernelNameRef(uint64_t addr) {
 }
 
 // Demangle C++ symbol name
-static char* cpp_demangle(const char* symname) {
-    size_t size = 0;
-    int status;
-    char* ret = abi::__cxa_demangle(symname, NULL, &size, &status);
-    return (ret != 0) ? ret : strdup(symname);
+static std::string cpp_demangle(const char* symname) {
+    std::string retval;
+
+    if (RTG_DEMANGLE) {
+        size_t size = 0;
+        int status = 0;
+        char* result = abi::__cxa_demangle(symname, NULL, &size, &status);
+        if (result) {
+            // caller of __cxa_demangle must free returned buffer
+            retval = result;
+            free(result);
+        }
+        else {
+            retval = symname;
+        }
+        // for some reason ' [clone .kd]' appears at the end of some kernels; remove it
+        std::size_t pos = retval.find(" [clone .kd]");
+        if (pos != std::string::npos) {
+            retval = retval.substr(0, pos);
+        }
+    }
+    else {
+        retval = symname;
+        // for some reason '.kd' appears at the end of some kernels; remove it
+        std::size_t pos = retval.find(".kd");
+        if (pos != std::string::npos) {
+            retval = retval.substr(0, pos);
+        }
+    }
+
+    return retval;
 }
 
 static std::string QueryKernelName(uint64_t kernel_object, const amd_kernel_code_t* kernel_code) {
@@ -2293,11 +2319,7 @@ static std::string QueryKernelName(uint64_t kernel_object, const amd_kernel_code
         return std::string(kernel_symname);
     }
     else {
-        // caller of cpp_demangle must free returned buffer
-        char *demangled = cpp_demangle(kernel_symname);
-        std::string ret = demangled;
-        free(demangled);
-        return ret;
+        return cpp_demangle(kernel_symname);
     }
 }
 
@@ -2413,6 +2435,7 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
         data->correlation_id = tick();
     }
     else {
+        std::string kernname_str;
         const char *kernname = NULL;
         int pid_ = pid();
         std::string tid_ = tid();
@@ -2453,6 +2476,11 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
             auto s =    data->args.hipExtLaunchKernel.stream;
             kernname = hipKernelNameRefByPtr(f, s);
             is_kernel = true;
+        }
+
+        if (is_kernel) {
+            // demangle kernname
+            kernname_str = cpp_demangle(kernname);
         }
 
         if (RTG_HIP_API_ARGS) {

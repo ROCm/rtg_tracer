@@ -54,6 +54,7 @@ FLAG_BOOL(RTG_PROFILE_COPY, true, "Enable profiling of device async copy operati
 FLAG_CHAR(RTG_HSA_API_FILTER, "", "Trace specific HSA calls. Special case 'all', 'core', and 'ext', otherwise simple string matching. Separate tokens with ','");
 FLAG_CHAR(RTG_HSA_API_FILTER_OUT, "", "Do not trace specific HSA calls. Simple string matching. Separate tokens with ','");
 FLAG_BOOL(RTG_HSA_HOST_DISPATCH, false, "Trace when kernel dispatch is enqueued on the host");
+FLAG_BOOL(RTG_DEMANGLE, true, "Demangle kernel names");
 
 void Flag::init_all() {
     for (auto flag : flags) {
