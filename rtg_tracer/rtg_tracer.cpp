@@ -292,6 +292,12 @@ static inline unsigned long did() {
 #define LOG_UINT64(status) ({ uint64_t localStatus = status; localStatus; })
 #define LOG_UINT32(status) ({ uint32_t localStatus = status; localStatus; })
 #define LOG_VOID(status) ({ status; })
+#define LOG_HIP
+#define LOG_HIP_KERNEL
+#define LOG_HIP_ARGS
+#define LOG_HIP_KERNEL_ARGS
+#define LOG_ROCTX
+#define LOG_ROCTX_MARK
 
 #else // DISABLE_LOGGING
 
@@ -313,8 +319,6 @@ fprintf(stream, "HSA: pid:%d tid:%s barrier queue:%lu agent:%lu signal:%lu dep1:
 fprintf(stream, "HSA: pid:%d tid:%s barrier queue:%lu agent:%lu signal:%lu start:%lu stop:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu id:%lu\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, start_, stop_, data->dep1, data->dep2, data->dep3, data->dep4, data->dep5, data->id_); fflush(stream);
 #define LOG_COPY \
 fprintf(stream, "HSA: pid:%d tid:%s copy agent:%lu signal:%lu start:%lu stop:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu\n", pid_, tid_.c_str(), agent_.handle, signal_.handle, start_, stop_, data->dep1, data->dep2, data->dep3, data->dep4, data->dep5); fflush(stream);
-//#define HIP_API_START \
-//fprintf(stream, "HIP: pid:%d tid:%s %s %s @%lu\n", pid_, tid_.c_str(), func.c_str(), args.c_str(), tick_); fflush(stream);
 #define LOG_HIP \
 fprintf(stream, "HIP: pid:%d tid:%s %s ret=%d @%lu +%lu\n", pid_, tid_.c_str(), func.c_str(), localStatus, tick_, ticks); fflush(stream);
 #define LOG_HIP_KERNEL \
