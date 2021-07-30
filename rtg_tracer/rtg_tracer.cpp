@@ -35,6 +35,8 @@
 // User options, set using env vars.
 #include "flags.h"
 
+#include "rtg_out_printf.h"
+
 #define USE_ATOMIC 1
 #define ENABLE_HSA_AMD_MEMORY_LOCK_TO_POOL 0
 #define ENABLE_HSA_AMD_RUNTIME_QUEUE_CREATE_REGISTER 0
@@ -72,7 +74,8 @@ counter_t cb_count_copies{0};
 counter_t cb_count_signals{0};
 
 // Output stream for all logging
-static FILE* stream;
+static RtgOut* out;
+static FILE *stream; // only used for HCC_PROFILE mode
 
 // Support for HIP API callbacks.
 static void* hip_activity_callback(uint32_t cid, activity_record_t* record, const void* data, void* arg);
@@ -219,7 +222,8 @@ struct InterceptCallbackData
 #include "ToStringDefinitions.h"
 
 static inline int pid() {
-    return getpid();
+    static int pid_ = getpid();
+    return pid_;
 }
 
 static inline std::string pidstr() {
@@ -301,36 +305,21 @@ static inline unsigned long did() {
 
 #else // DISABLE_LOGGING
 
-#define LOG_STATUS_OUT \
-fprintf(stream, "HSA: pid:%d tid:%s %s %s ret=%d @%lu +%lu\n", pid_, tid_.c_str(), func.c_str(), args.c_str(), localStatus, tick_, ticks); fflush(stream);
-#define LOG_UINT64_OUT \
-fprintf(stream, "HSA: pid:%d tid:%s %s %s ret=%lu @%lu +%lu\n", pid_, tid_.c_str(), func.c_str(), args.c_str(), localStatus, tick_, ticks); fflush(stream);
-#define LOG_SIGNAL_OUT \
-fprintf(stream, "HSA: pid:%d tid:%s %s %s ret=%ld @%lu +%lu\n", pid_, tid_.c_str(), func.c_str(), args.c_str(), localStatus, tick_, ticks); fflush(stream);
-#define LOG_VOID_OUT \
-fprintf(stream, "HSA: pid:%d tid:%s %s %s ret=void @%lu +%lu\n", pid_, tid_.c_str(), func.c_str(), args.c_str(), tick_, ticks); fflush(stream);
-#define LOG_DISPATCH_HOST \
-fprintf(stream, "HSA: pid:%d tid:%s dispatch queue:%lu agent:%lu signal:%lu name:'%s' tick:%lu id:%lu workgroup:{%d,%d,%d} grid:{%d,%d,%d}\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, name_.c_str(), tick_, id_, packet->workgroup_size_x, packet->workgroup_size_y, packet->workgroup_size_z, packet->grid_size_x, packet->grid_size_y, packet->grid_size_z);
-#define LOG_DISPATCH \
-fprintf(stream, "HSA: pid:%d tid:%s dispatch queue:%lu agent:%lu signal:%lu name:'%s' start:%lu stop:%lu id:%lu\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, name_.c_str(), start_, stop_, id_); fflush(stream);
-#define LOG_BARRIER_HOST \
-fprintf(stream, "HSA: pid:%d tid:%s barrier queue:%lu agent:%lu signal:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu tick:%lu id:%lu\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, dep1, dep2, dep3, dep4, dep5, tick_, id_); fflush(stream);
-#define LOG_BARRIER \
-fprintf(stream, "HSA: pid:%d tid:%s barrier queue:%lu agent:%lu signal:%lu start:%lu stop:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu id:%lu\n", pid_, tid_.c_str(), queue_->id, agent_.handle, signal_.handle, start_, stop_, data->dep1, data->dep2, data->dep3, data->dep4, data->dep5, data->id_); fflush(stream);
-#define LOG_COPY \
-fprintf(stream, "HSA: pid:%d tid:%s copy agent:%lu signal:%lu start:%lu stop:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu\n", pid_, tid_.c_str(), agent_.handle, signal_.handle, start_, stop_, data->dep1, data->dep2, data->dep3, data->dep4, data->dep5); fflush(stream);
-#define LOG_HIP \
-fprintf(stream, "HIP: pid:%d tid:%s %s ret=%d @%lu +%lu\n", pid_, tid_.c_str(), func.c_str(), localStatus, tick_, ticks); fflush(stream);
-#define LOG_HIP_KERNEL \
-fprintf(stream, "HIP: pid:%d tid:%s %s [%s] ret=%d @%lu +%lu\n", pid_, tid_.c_str(), func.c_str(), kernname_str.c_str(), localStatus, tick_, ticks); fflush(stream);
-#define LOG_HIP_ARGS \
-fprintf(stream, "HIP: pid:%d tid:%s %s ret=%d @%lu +%lu\n", pid_, tid_.c_str(), args, localStatus, tick_, ticks); fflush(stream);
-#define LOG_HIP_KERNEL_ARGS \
-fprintf(stream, "HIP: pid:%d tid:%s %s [%s] ret=%d @%lu +%lu\n", pid_, tid_.c_str(), args, kernname_str.c_str(), localStatus, tick_, ticks); fflush(stream);
-#define LOG_ROCTX \
-fprintf(stream, "RTX: pid:%d tid:%s %s @%lu +%lu\n", pid_, tid_.c_str(), msg.c_str(), tick_, ticks); fflush(stream);
-#define LOG_ROCTX_MARK \
-fprintf(stream, "RTX: pid:%d tid:%s %s @%lu\n", pid_, tid_.c_str(), msg.c_str(), tick_); fflush(stream);
+#define LOG_STATUS_OUT    out->hsa_api                  (pid_, tid_, func, args, localStatus, tick_, ticks);
+#define LOG_UINT64_OUT    out->hsa_api                  (pid_, tid_, func, args, localStatus, tick_, ticks);
+#define LOG_SIGNAL_OUT    out->hsa_api                  (pid_, tid_, func, args, localStatus, tick_, ticks);
+#define LOG_VOID_OUT      out->hsa_api                  (pid_, tid_, func, args, tick_, ticks);
+#define LOG_DISPATCH_HOST out->hsa_host_dispatch_kernel (pid_, tid_, queue_, agent_, signal_, tick_, id_, name_, packet);
+#define LOG_BARRIER_HOST  out->hsa_host_dispatch_barrier(pid_, tid_, queue_, agent_, signal_, tick_, id_, dep, packet);
+#define LOG_DISPATCH      out->hsa_dispatch_kernel      (pid_, tid_, queue_, agent_, signal_, start_, stop_, data->id_, name_);
+#define LOG_BARRIER       out->hsa_dispatch_barrier     (pid_, tid_, queue_, agent_, signal_, start_, stop_, data->id_, data->dep);
+#define LOG_COPY          out->hsa_dispatch_copy        (pid_, tid_, agent_, signal_, start_, stop_, data->dep);
+#define LOG_HIP           out->hip_api                  (pid_, tid_, func, localStatus, tick_, ticks);
+#define LOG_HIP_KERNEL    out->hip_api_kernel           (pid_, tid_, func, kernname_str, localStatus, tick_, ticks);
+#define LOG_ROCTX         out->roctx                    (pid_, tid_, msg, tick_, ticks);
+#define LOG_ROCTX_MARK    out->roctx_mark               (pid_, tid_, msg, tick_);
+#define LOG_HIP_ARGS LOG_HIP
+#define LOG_HIP_KERNEL_ARGS LOG_HIP_KERNEL
 
 #define TRACE(...) \
     static bool is_enabled = enabled_check(__func__); \
@@ -441,7 +430,7 @@ struct SignalCallbackData
 {
     SignalCallbackData(std::string name, InterceptCallbackData *data, hsa_signal_t signal, hsa_signal_t orig_signal, bool owns_orig_signal, const hsa_kernel_dispatch_packet_t *packet)
         : name(name), data(data), queue(data->queue), agent(data->agent), signal(signal), orig_signal(orig_signal), owns_orig_signal(owns_orig_signal), bytes(0), direction(0),
-            is_copy(false), is_barrier(false), dep1(0), dep2(0), dep3(0), dep4(0), dep5(0), id_(did()), seq_num_(data->seq_index++)
+            is_copy(false), is_barrier(false), dep{0,0,0,0,0}, id_(did()), seq_num_(data->seq_index++)
     {
         if (RTG_HSA_HOST_DISPATCH) {
             long unsigned tick_ = tick();
@@ -459,11 +448,13 @@ struct SignalCallbackData
         : name(), queue(queue), agent(agent), signal(signal), orig_signal(orig_signal), owns_orig_signal(owns_orig_signal), bytes(bytes), direction(direction),
             is_copy(true),
             is_barrier(false),
-            dep1(num_dep_signals>0 ? dep_signals[0].handle : 0),
-            dep2(num_dep_signals>1 ? dep_signals[1].handle : 0),
-            dep3(num_dep_signals>2 ? dep_signals[2].handle : 0),
-            dep4(num_dep_signals>3 ? dep_signals[3].handle : 0),
-            dep5(num_dep_signals>4 ? dep_signals[4].handle : 0),
+            dep{
+                  (num_dep_signals>0 ? dep_signals[0].handle : 0),
+                  (num_dep_signals>1 ? dep_signals[1].handle : 0),
+                  (num_dep_signals>2 ? dep_signals[2].handle : 0),
+                  (num_dep_signals>3 ? dep_signals[3].handle : 0),
+                  (num_dep_signals>4 ? dep_signals[4].handle : 0)
+            },
             id_(0),
             seq_num_(seq)
     {}
@@ -472,11 +463,13 @@ struct SignalCallbackData
         : name(), data(data), queue(data->queue), agent(data->agent), signal(signal), orig_signal(orig_signal), owns_orig_signal(owns_orig_signal), bytes(0), direction(0),
             is_copy(false),
             is_barrier(true),
-            dep1(packet->dep_signal[0].handle),
-            dep2(packet->dep_signal[1].handle),
-            dep3(packet->dep_signal[2].handle),
-            dep4(packet->dep_signal[3].handle),
-            dep5(packet->dep_signal[4].handle),
+            dep{
+                  (packet->dep_signal[0].handle),
+                  (packet->dep_signal[1].handle),
+                  (packet->dep_signal[2].handle),
+                  (packet->dep_signal[3].handle),
+                  (packet->dep_signal[4].handle)
+            },
             id_(did()),
             seq_num_(data->seq_index++)
     {
@@ -534,11 +527,7 @@ struct SignalCallbackData
     int direction;
     bool is_copy;
     bool is_barrier;
-    long unsigned dep1;
-    long unsigned dep2;
-    long unsigned dep3;
-    long unsigned dep4;
-    long unsigned dep5;
+    long unsigned dep[5];
     long unsigned start;
     long unsigned stop;
     long unsigned id_;
@@ -643,7 +632,6 @@ static bool signal_callback(hsa_signal_value_t value, void* arg)
                     LOG_COPY
                 }
                 else {
-                    long unsigned id_ = data->id_;
                     ++cb_count_dispatches;
                     LOG_DISPATCH
                 }
@@ -2484,7 +2472,10 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
         }
 
         if (RTG_HIP_API_ARGS) {
+            // hipApiString returns strdup, need to free, but signature returns const
             const char* args = hipApiString((hip_api_id_t)cid, data);
+            std::string func = args;
+            free((char*)args);
             if (is_kernel) {
                 LOG_HIP_KERNEL_ARGS
             }
@@ -2567,12 +2558,15 @@ extern "C" bool OnLoad(void *pTable,
     outname += ".";
     outname += RTG::pidstr();
     fprintf(stderr, "RTG Tracer: Filename %s\n", outname.c_str());
-    RTG::stream = fopen(outname.c_str(), "w");
 
     if (HCC_PROFILE) {
         fprintf(stderr, "RTG Tracer: HCC_PROFILE=2 mode\n");
+        RTG::stream = fopen(outname.c_str(), "w");
     }
     else {
+        RTG::out = new RtgOutPrintf;
+        RTG::out->open(outname);
+
         RTG::InitEnabledTable(RTG_HSA_API_FILTER, RTG_HSA_API_FILTER_OUT);
 
         // Register HIP APIs
@@ -2616,7 +2610,12 @@ extern "C" void OnUnload()
 {
     fprintf(stderr, "RTG Tracer: Unloading\n");
     RTG::RestoreHsaTable(RTG::gs_OrigHsaTable);
-    fclose(RTG::stream);
+    if (HCC_PROFILE) {
+        fclose(RTG::stream);
+    }
+    else {
+        RTG::out->close();
+    }
 }
 
 __attribute__((destructor)) static void destroy() {
