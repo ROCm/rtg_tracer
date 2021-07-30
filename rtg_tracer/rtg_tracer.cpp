@@ -278,7 +278,7 @@ static inline unsigned long did() {
 #define LOG_RPT LOG_PROFILE(start_, stop_, type_, tag_, msg_)
     //std::cerr << sstream.str();\
 
-#define DISABLE_LOGGING 0
+#define DISABLE_LOGGING 1
 #if DISABLE_LOGGING
 
 #define LOG_STATUS_OUT
@@ -2610,12 +2610,6 @@ extern "C" void OnUnload()
 {
     fprintf(stderr, "RTG Tracer: Unloading\n");
     RTG::RestoreHsaTable(RTG::gs_OrigHsaTable);
-    if (HCC_PROFILE) {
-        fclose(RTG::stream);
-    }
-    else {
-        RTG::out->close();
-    }
 }
 
 __attribute__((destructor)) static void destroy() {
@@ -2643,5 +2637,12 @@ __attribute__((destructor)) static void destroy() {
             );
             sleep(2);
         }
+    }
+
+    if (HCC_PROFILE) {
+        fclose(RTG::stream);
+    }
+    else {
+        RTG::out->close();
     }
 }

@@ -1,10 +1,13 @@
 #pragma once
 
 #include "rtg_out.h"
+#include "ctpl_stl.h"
 
 class RtgOutPrintf : public RtgOut {
 
 public:
+
+RtgOutPrintf() : stream(NULL), pool(1) {}
 
 virtual void open(string filename);
 
@@ -30,5 +33,6 @@ virtual void close();
 private:
 
 FILE *stream;
+ctpl::thread_pool pool;
 
 };

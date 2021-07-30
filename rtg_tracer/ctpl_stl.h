@@ -62,6 +62,10 @@ namespace ctpl {
                 std::unique_lock<std::mutex> lock(this->mutex);
                 return this->q.empty();
             }
+            size_t size() {
+                std::unique_lock<std::mutex> lock(this->mutex);
+                return this->q.size();
+            }
         private:
             std::queue<T> q;
             std::mutex mutex;
@@ -117,6 +121,9 @@ namespace ctpl {
                 }
             }
         }
+
+        // get size of queue
+        size_t count() { return this->q.size(); }
 
         // empty the queue
         void clear_queue() {
