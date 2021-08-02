@@ -36,6 +36,7 @@
 #include "flags.h"
 
 #include "rtg_out_printf.h"
+#include "rtg_out_rpd.h"
 
 #define USE_ATOMIC 1
 #define ENABLE_HSA_AMD_MEMORY_LOCK_TO_POOL 0
@@ -2554,9 +2555,17 @@ extern "C" bool OnLoad(void *pTable,
     Flag::init_all();
 
     std::string outname = RTG_FILENAME;
-    // PID is needed to avoid clashses in multi-process use cases
-    outname += ".";
-    outname += RTG::pidstr();
+    if (RTG_RPD) {
+        auto pos = outname.find(".txt");
+        if (pos != std::string::npos) {
+            outname = outname.substr(0, pos) + std::string(".rpd");
+        }
+    }
+    else {
+        // PID is needed to avoid clashses in multi-process use cases
+        outname += ".";
+        outname += RTG::pidstr();
+    }
     fprintf(stderr, "RTG Tracer: Filename %s\n", outname.c_str());
 
     if (HCC_PROFILE) {
@@ -2564,7 +2573,12 @@ extern "C" bool OnLoad(void *pTable,
         RTG::stream = fopen(outname.c_str(), "w");
     }
     else {
-        RTG::out = new RtgOutPrintf;
+        if (RTG_RPD) {
+            RTG::out = new RtgOutRpd;
+        }
+        else {
+            RTG::out = new RtgOutPrintf;
+        }
         RTG::out->open(outname);
 
         RTG::InitEnabledTable(RTG_HSA_API_FILTER, RTG_HSA_API_FILTER_OUT);
