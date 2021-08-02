@@ -1,11 +1,30 @@
-rtg_tracer.so: rtg_tracer.o rtg_out_printf.o
-	$(CXX) -o $@ $^ -shared -rdynamic -std=c++14 -L/opt/rocm/lib -lamdhip64 -lhsa-runtime64 -lroctx64 -g
+HIP_PATH = /opt/rocm/hip
 
-rtg_tracer.o: rtg_tracer.cpp rtg_out_printf.h rtg_out.h flags.h ToStringDefinitions.h ctpl_stl.h flags.h missing_ostream_definitions.h
-	$(CXX) -o $@ -c $< -I/opt/rocm/hip/include -I/opt/rocm/include -I/opt/rocm/include/roctracer -I/opt/rocm/hsa/include -D__HIP_PLATFORM_AMD__ -DAMD_INTERNAL_BUILD -std=c++14 -fPIC -g -O2
+HIPCC=$(HIP_PATH)/bin/hipcc
 
-rtg_out_printf.o: rtg_out_printf.cpp rtg_out_printf.h rtg_out.h ctpl_stl.h flags.h missing_ostream_definitions.h
-	$(CXX) -o $@ -c $< -I/opt/rocm/hip/include -I/opt/rocm/include -I/opt/rocm/include/roctracer -I/opt/rocm/hsa/include -D__HIP_PLATFORM_AMD__ -DAMD_INTERNAL_BUILD -std=c++14 -fPIC -g -O2
+ROC_LIBS = -lroctx64 -lroctracer64 -lamdhip64 -lhsa-runtime64 -lsqlite3
+ROC_INCLUDE = -I/opt/rocm/include -I/opt/rocm/hip/include -I/opt/rocm/roctracer/include -I/opt/rocm/hsa/include/hsa
+
+MAIN = rtg_tracer.so
+
+SRCS =
+SRCS += rtg_tracer.cpp
+SRCS += rtg_out_printf.cpp
+SRCS += rtg_out_rpd.cpp
+SRCS += Table.cpp
+SRCS += OpTable.cpp
+SRCS += ApiTable.cpp
+SRCS += StringTable.cpp
+SRCS += MetadataTable.cpp
+SRCS += ApiIdList.cpp
+
+OBJS = $(SRCS:.cpp=.o)
+
+$(MAIN): $(OBJS)
+	$(CXX) -o $@ $(OBJS) -shared -rdynamic -std=c++14 -L/opt/rocm/lib $(ROC_LIBS) -g
+
+.cpp.o:
+	$(CXX) -o $@ -c $< $(ROC_INCLUDE) -D__HIP_PLATFORM_AMD__ -DAMD_INTERNAL_BUILD -std=c++14 -fPIC -g -O3
 
 clean:
 	rm -f *.o *.so
