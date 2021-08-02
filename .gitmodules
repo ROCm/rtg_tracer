@@ -1,0 +1,3 @@
+[submodule "rtg_tracer/rocmProfileData"]
+	path = rtg_tracer/rocmProfileData
+	url = https://github.com/ROCmSoftwarePlatform/rocmProfileData
