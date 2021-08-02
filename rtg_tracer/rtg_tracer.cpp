@@ -2610,12 +2610,6 @@ extern "C" void OnUnload()
 {
     fprintf(stderr, "RTG Tracer: Unloading\n");
     RTG::RestoreHsaTable(RTG::gs_OrigHsaTable);
-    if (HCC_PROFILE) {
-        fclose(RTG::stream);
-    }
-    else {
-        RTG::out->close();
-    }
 }
 
 __attribute__((destructor)) static void destroy() {
@@ -2643,5 +2637,12 @@ __attribute__((destructor)) static void destroy() {
             );
             sleep(2);
         }
+    }
+
+    if (HCC_PROFILE) {
+        fclose(RTG::stream);
+    }
+    else {
+        RTG::out->close();
     }
 }
