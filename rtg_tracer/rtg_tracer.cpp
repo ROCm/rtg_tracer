@@ -5,6 +5,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <set>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -35,18 +36,15 @@
 // User options, set using env vars.
 #include "flags.h"
 
+// These declarations were getting quite lengthy; moved to separate file to aid readability.
+#include "ToStringDefinitions.h"
+
 #include "rtg_out_printf.h"
 #include "rtg_out_rpd.h"
 
+#define RTG_DISABLE_LOGGING 0
 #define RTG_ENABLE_HSA_AMD_MEMORY_LOCK_TO_POOL 0
 #define RTG_ENABLE_HSA_AMD_RUNTIME_QUEUE_CREATE_REGISTER 0
-
-#define RTG_HSA_CHECK_STATUS(msg, status) do { \
-    if (status != HSA_STATUS_SUCCESS) {        \
-        fprintf(stderr, msg);                  \
-        abort();                               \
-    }                                          \
-} while (false)
 
 namespace RTG {
 
@@ -65,11 +63,17 @@ typedef std::atomic<unsigned int> counter_t;
 //typedef std::recursive_mutex mutex_t;
 typedef std::mutex mutex_t;
 typedef std::unordered_map<uint64_t, const char*> symbols_map_t;
-typedef struct roctx_data {
+
+//////////////////////////////////////////////////////////////////////////////
+// structs ///////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////
+
+struct roctx_data_t {
     std::string message;
     uint64_t tick;
-    roctx_data(const char *m, uint64_t t) : message(m), tick(t) {}
-} roctx_data_t;
+
+    roctx_data_t(const char *m, uint64_t t) : message(m), tick(t) {}
+};
 
 //////////////////////////////////////////////////////////////////////////////
 // global static variables ///////////////////////////////////////////////////
@@ -84,6 +88,10 @@ static std::unordered_map<std::string,bool> gs_hsa_enabled_map; // Lookup which 
 // Executables loading tracking, for looking up kernel names.
 static mutex_t gs_kernel_name_mutex_; // protects gs_symbols_map_
 static symbols_map_t* gs_symbols_map_; // maps HSA executable address to kernel name, protected by gs_kernel_name_mutex_
+
+static std::vector<hsa_agent_t> gs_gpu_agents; // all gpu agents, in order reported by HSA
+static std::vector<hsa_agent_t> gs_cpu_agents; // all cpu agents, in order reported by HSA
+static std::unordered_map<uint64_t, size_t> gs_gpu_agent_to_ord; // map agent handle back to device ordinal
 
 static ctpl::thread_pool gs_pool(1); // thread pool for signal waits
 static ctpl::thread_pool gs_signal_pool(1); // thread pool for signal destroy
@@ -132,6 +140,8 @@ static void InitEnabledTableExtApi(bool value);
 static const char* GetKernelNameRef(uint64_t addr);
 static hsa_status_t hsa_executable_freeze_interceptor(hsa_executable_t executable, const char *options);
 static hsa_status_t hsa_executable_symbols_cb(hsa_executable_t exec, hsa_executable_symbol_t symbol, void *data);
+// agent info
+static hsa_status_t hsa_iterate_agent_cb(hsa_agent_t agent, void* data);
 
 // NEW agent and stream tracking.
 struct Agent {
@@ -156,7 +166,7 @@ int AgentInfo::__agent{0};
 inline hsa_device_type_t agent_type(hsa_agent_t x)
 {
     hsa_device_type_t r{};
-    hsa_agent_get_info(x, HSA_AGENT_INFO_DEVICE, &r);
+    gs_OrigCoreApiTable.hsa_agent_get_info_fn(x, HSA_AGENT_INFO_DEVICE, &r);
     return r;
 }
 
@@ -236,9 +246,6 @@ struct InterceptCallbackData
     std::atomic<int> seq_index;
 };
 
-// These declarations were getting quite lengthy; moved to separate file to aid readability.
-#include "ToStringDefinitions.h"
-
 static inline int pid() {
     static int pid_ = getpid();
     return pid_;
@@ -296,8 +303,7 @@ static inline unsigned long did() {
 #define LOG_RPT LOG_PROFILE(start_, stop_, type_, tag_, msg_)
     //std::cerr << sstream.str();\
 
-#define DISABLE_LOGGING 0
-#if DISABLE_LOGGING
+#if RTG_DISABLE_LOGGING
 
 #define LOG_STATUS_OUT
 #define LOG_UINT64_OUT
@@ -321,7 +327,7 @@ static inline unsigned long did() {
 #define LOG_ROCTX
 #define LOG_ROCTX_MARK
 
-#else // DISABLE_LOGGING
+#else // RTG_DISABLE_LOGGING
 
 #define LOG_STATUS_OUT    gs_out->hsa_api                  (pid_, tid_, func, args, localStatus, tick_, ticks);
 #define LOG_UINT64_OUT    gs_out->hsa_api                  (pid_, tid_, func, args, localStatus, tick_, ticks);
@@ -403,7 +409,7 @@ static inline unsigned long did() {
         }                                                                      \
     })
 
-#endif // DISABLE_LOGGING
+#endif // RTG_DISABLE_LOGGING
 
 static const uint16_t kInvalidHeader = (HSA_PACKET_TYPE_INVALID << HSA_PACKET_HEADER_TYPE) |
     (1 << HSA_PACKET_HEADER_BARRIER) |
@@ -419,21 +425,21 @@ static const hsa_barrier_and_packet_t kBarrierPacket = {kInvalidHeader, 0, 0, {0
 
 static uint64_t submit_to_signal_queue(hsa_queue_t *signal_queue, hsa_signal_t new_signal, hsa_signal_t original_signal)
 {
-	// Submit a new packet just for decrementing the original signal. This is done in a separate queue. Signal packet depends on real packet.
-	const uint32_t queueSize = signal_queue->size;
-	const uint32_t queueMask = queueSize - 1;
-	uint64_t index = gs_OrigCoreApiTable.hsa_queue_add_write_index_screlease_fn(signal_queue, 1);
-	uint64_t read = gs_OrigCoreApiTable.hsa_queue_load_read_index_relaxed_fn(signal_queue);
-	while ((index - gs_OrigCoreApiTable.hsa_queue_load_read_index_scacquire_fn(signal_queue)) >= queueMask) {
-		sched_yield();
-	}
-	hsa_barrier_and_packet_t *barrier = &((hsa_barrier_and_packet_t*)(signal_queue->base_address))[index & queueMask];
-	*barrier = kBarrierPacket;
-	barrier->completion_signal = original_signal;
-	barrier->dep_signal[0] = new_signal;
-	barrier->header = kBarrierHeader;
-	gs_OrigCoreApiTable.hsa_signal_store_relaxed_fn(signal_queue->doorbell_signal, index);
-	//fprintf(stderr, "RTG Tracer: wrote new BARRIER AND at queue %lu index %lu (prev read was %lu)\n", signal_queue->id, index, read);
+    // Submit a new packet just for decrementing the original signal. This is done in a separate queue. Signal packet depends on real packet.
+    const uint32_t queueSize = signal_queue->size;
+    const uint32_t queueMask = queueSize - 1;
+    uint64_t index = gs_OrigCoreApiTable.hsa_queue_add_write_index_screlease_fn(signal_queue, 1);
+    uint64_t read = gs_OrigCoreApiTable.hsa_queue_load_read_index_relaxed_fn(signal_queue);
+    while ((index - gs_OrigCoreApiTable.hsa_queue_load_read_index_scacquire_fn(signal_queue)) >= queueMask) {
+        sched_yield();
+    }
+    hsa_barrier_and_packet_t *barrier = &((hsa_barrier_and_packet_t*)(signal_queue->base_address))[index & queueMask];
+    *barrier = kBarrierPacket;
+    barrier->completion_signal = original_signal;
+    barrier->dep_signal[0] = new_signal;
+    barrier->header = kBarrierHeader;
+    gs_OrigCoreApiTable.hsa_signal_store_relaxed_fn(signal_queue->doorbell_signal, index);
+    //fprintf(stderr, "RTG Tracer: wrote new BARRIER AND at queue %lu index %lu (prev read was %lu)\n", signal_queue->id, index, read);
     return index;
 }
 
@@ -2203,6 +2209,13 @@ static void InitEnabledTableExtApi(bool value) {
 #endif
 }
 
+#define RTG_HSA_CHECK_STATUS(msg, status) do { \
+    if (status != HSA_STATUS_SUCCESS) {        \
+        fprintf(stderr, "RTG Tracer: " msg);   \
+        abort();                               \
+    }                                          \
+} while (false)
+
 static hsa_status_t hsa_executable_symbols_cb(hsa_executable_t exec, hsa_executable_symbol_t symbol, void *data) {
     hsa_symbol_kind_t value = (hsa_symbol_kind_t)0;
     hsa_status_t status = gs_OrigCoreApiTable.hsa_executable_symbol_get_info_fn(symbol, HSA_EXECUTABLE_SYMBOL_INFO_TYPE, &value);
@@ -2225,6 +2238,24 @@ static hsa_status_t hsa_executable_symbols_cb(hsa_executable_t exec, hsa_executa
         }
     }
     return HSA_STATUS_SUCCESS;
+}
+
+static hsa_status_t hsa_iterate_agent_cb(hsa_agent_t agent, void* data) {
+    hsa_device_type_t dev_type = HSA_DEVICE_TYPE_CPU;
+
+    hsa_status_t stat = gs_OrigCoreApiTable.hsa_agent_get_info_fn(agent, HSA_AGENT_INFO_DEVICE, &dev_type);
+
+    if (stat != HSA_STATUS_SUCCESS) {
+        return stat;
+    }
+
+    if (dev_type == HSA_DEVICE_TYPE_CPU) {
+        gs_cpu_agents.push_back(agent);
+    } else if (dev_type == HSA_DEVICE_TYPE_GPU) {
+        gs_gpu_agents.push_back(agent);
+    }
+
+    return stat;
 }
 
 static hsa_status_t hsa_executable_freeze_interceptor(hsa_executable_t executable, const char *options) {
@@ -2613,7 +2644,62 @@ extern "C" bool OnLoad(void *pTable,
         }
     }
 
-    return RTG::InitHsaTable(reinterpret_cast<HsaApiTable*>(pTable));
+    if (!RTG::InitHsaTable(reinterpret_cast<HsaApiTable*>(pTable))) {
+        return false;
+    }
+
+    // Discover HSA agent info.
+    if (HSA_STATUS_SUCCESS != hsa_iterate_agents(RTG::hsa_iterate_agent_cb, nullptr)) {
+        fprintf(stderr, "RTG Tracer: could not iterate hsa agents\n");
+        exit(EXIT_FAILURE);
+    }
+    std::string ordinals;
+    if (HIP_VISIBLE_DEVICES) {
+        ordinals = std::string(HIP_VISIBLE_DEVICES);
+    }
+    else if (CUDA_VISIBLE_DEVICES) {
+        ordinals = std::string(CUDA_VISIBLE_DEVICES);
+    }
+    if (ordinals[0] != '\0') {
+        size_t end, pos = 0;
+        std::vector<hsa_agent_t> valid_agents;
+        std::set<size_t> valid_indexes;
+        do {
+            bool deviceIdValid = true;
+            end = ordinals.find_first_of(',', pos);
+            if (end == std::string::npos) {
+                end = ordinals.size();
+            }
+            std::string strIndex = ordinals.substr(pos, end - pos);
+            int index = atoi(strIndex.c_str());
+            if (index < 0 ||
+                    static_cast<size_t>(index) >= RTG::gs_gpu_agents.size() ||
+                    strIndex != std::to_string(index)) {
+                deviceIdValid = false;
+            }
+
+            if (!deviceIdValid) {
+                // Exit the loop as anything to the right of invalid deviceId
+                // has to be discarded
+                break;
+            } else {
+                if (valid_indexes.find(index) == valid_indexes.end()) {
+                    valid_agents.push_back(RTG::gs_gpu_agents[index]);
+                    valid_indexes.insert(index);
+                }
+            }
+            pos = end + 1;
+        } while (pos < ordinals.size());
+        RTG::gs_gpu_agents = valid_agents;
+    }
+    {
+        int index = 0;
+        for (auto agent : RTG::gs_gpu_agents) {
+            RTG::gs_gpu_agent_to_ord[agent.handle] = index++;
+        }
+    }
+
+    return true;
 }
 
 extern "C" void OnUnload()
