@@ -125,6 +125,8 @@ static counter_t gs_cb_count_barriers{0};     // counts barrier dispaches that h
 static counter_t gs_cb_count_copies{0};       // counts async copies that have completed
 static counter_t gs_cb_count_signals{0};      // counts signals we destroy
 
+static counter_t gs_did{0}; // global dispach id
+
 static RtgOut* gs_out;  // output interface
 static FILE *gs_stream; // output only used for HCC_PROFILE mode
 
@@ -257,40 +259,34 @@ static inline std::string tid() {
     return tid_os.str();
 }
 
-uint64_t tick() {
+uint64_t inline tick() {
     struct timespec tp;
     ::clock_gettime(CLOCK_MONOTONIC, &tp);
     return (uint64_t)tp.tv_sec * (1000ULL * 1000ULL * 1000ULL) + (uint64_t)tp.tv_nsec;
 }
 
-// dispatch ID
-static inline unsigned long did() {
-    static unsigned long id = 0;
-    return id++;
-}
-
 #if RTG_DISABLE_LOGGING
 
 #define LOG_HCC
-#define LOG_STATUS_OUT
-#define LOG_UINT64_OUT
-#define LOG_SIGNAL_OUT
-#define LOG_VOID_OUT
-#define LOG_DISPATCH_HOST
-#define LOG_DISPATCH
-#define LOG_BARRIER_HOST
-#define LOG_BARRIER
-#define LOG_COPY
+
+// HSA APIs
 #define TRACE(...)
 #define LOG_STATUS(status) ({ hsa_status_t localStatus = status; localStatus; })
 #define LOG_SIGNAL(status) ({ hsa_signal_value_t localStatus = status; localStatus; })
 #define LOG_UINT64(status) ({ uint64_t localStatus = status; localStatus; })
 #define LOG_UINT32(status) ({ uint32_t localStatus = status; localStatus; })
 #define LOG_VOID(status) ({ status; })
+
+// HSA async dispatches
+#define LOG_DISPATCH_HOST
+#define LOG_DISPATCH
+#define LOG_BARRIER_HOST
+#define LOG_BARRIER
+#define LOG_COPY
+
 #define LOG_HIP
 #define LOG_HIP_KERNEL
-#define LOG_HIP_ARGS
-#define LOG_HIP_KERNEL_ARGS
+
 #define LOG_ROCTX
 #define LOG_ROCTX_MARK
 
@@ -308,22 +304,6 @@ static inline unsigned long did() {
     sstream <<  msg << "\n";\
     fprintf(gs_stream, "%s", sstream.str().c_str());\
 }
-
-#define LOG_STATUS_OUT    gs_out->hsa_api                  (pid_, tid_, func, args, localStatus, tick_, ticks);
-#define LOG_UINT64_OUT    gs_out->hsa_api                  (pid_, tid_, func, args, localStatus, tick_, ticks);
-#define LOG_SIGNAL_OUT    gs_out->hsa_api                  (pid_, tid_, func, args, localStatus, tick_, ticks);
-#define LOG_VOID_OUT      gs_out->hsa_api                  (pid_, tid_, func, args, tick_, ticks);
-#define LOG_DISPATCH_HOST gs_out->hsa_host_dispatch_kernel (pid_, tid_, queue_, agent_, signal_, tick_, id_, name_, packet);
-#define LOG_BARRIER_HOST  gs_out->hsa_host_dispatch_barrier(pid_, tid_, queue_, agent_, signal_, tick_, id_, dep, packet);
-#define LOG_DISPATCH      gs_out->hsa_dispatch_kernel      (pid_, tid_, queue_, agent_, signal_, start_, stop_, data->id_, name_);
-#define LOG_BARRIER       gs_out->hsa_dispatch_barrier     (pid_, tid_, queue_, agent_, signal_, start_, stop_, data->id_, data->dep);
-#define LOG_COPY          gs_out->hsa_dispatch_copy        (pid_, tid_, agent_, signal_, start_, stop_, data->dep);
-#define LOG_HIP           gs_out->hip_api                  (pid_, tid_, func, localStatus, tick_, ticks);
-#define LOG_HIP_KERNEL    gs_out->hip_api_kernel           (pid_, tid_, func, kernname_str, localStatus, tick_, ticks);
-#define LOG_ROCTX         gs_out->roctx                    (pid_, tid_, msg, tick_, ticks);
-#define LOG_ROCTX_MARK    gs_out->roctx_mark               (pid_, tid_, msg, tick_);
-#define LOG_HIP_ARGS LOG_HIP
-#define LOG_HIP_KERNEL_ARGS LOG_HIP_KERNEL
 
 #define TRACE(...) \
     static bool is_enabled = gs_hsa_enabled_map[__func__]; \
@@ -345,7 +325,7 @@ static inline unsigned long did() {
         hsa_status_t localStatus = status; /*local copy so status only evaluated once*/  \
         if (is_enabled) {                                                                \
             uint64_t ticks = tick() - tick_;                                             \
-            LOG_STATUS_OUT                                                               \
+            gs_out->hsa_api(pid_, tid_, func, args, localStatus, tick_, ticks);          \
         }                                                                                \
         localStatus;                                                                     \
     })
@@ -355,7 +335,7 @@ static inline unsigned long did() {
         hsa_signal_value_t localStatus = status; /*local copy so status only evaluated once*/  \
         if (is_enabled) {                                                                      \
             uint64_t ticks = tick() - tick_;                                                   \
-            LOG_SIGNAL_OUT                                                                     \
+            gs_out->hsa_api(pid_, tid_, func, args, localStatus, tick_, ticks);                \
         }                                                                                      \
         localStatus;                                                                           \
     })
@@ -365,7 +345,7 @@ static inline unsigned long did() {
         uint64_t localStatus = status; /*local copy so status only evaluated once*/  \
         if (is_enabled) {                                                            \
             uint64_t ticks = tick() - tick_;                                         \
-            LOG_UINT64_OUT                                                           \
+            gs_out->hsa_api(pid_, tid_, func, args, localStatus, tick_, ticks);      \
         }                                                                            \
         localStatus;                                                                 \
     })
@@ -375,7 +355,7 @@ static inline unsigned long did() {
         uint32_t localStatus = status; /*local copy so status only evaluated once*/  \
         if (is_enabled) {                                                            \
             uint64_t ticks = tick() - tick_;                                         \
-            LOG_STATUS_OUT                                                           \
+            gs_out->hsa_api(pid_, tid_, func, args, localStatus, tick_, ticks);      \
         }                                                                            \
         localStatus;                                                                 \
     })
@@ -385,9 +365,21 @@ static inline unsigned long did() {
         status;                                                                \
         if (is_enabled) {                                                      \
             uint64_t ticks = tick() - tick_;                                   \
-            LOG_VOID_OUT                                                       \
+            gs_out->hsa_api(pid_, tid_, func, args, tick_, ticks);             \
         }                                                                      \
     })
+
+#define LOG_DISPATCH_HOST gs_out->hsa_host_dispatch_kernel
+#define LOG_BARRIER_HOST  gs_out->hsa_host_dispatch_barrier
+#define LOG_DISPATCH      gs_out->hsa_dispatch_kernel
+#define LOG_BARRIER       gs_out->hsa_dispatch_barrier
+#define LOG_COPY          gs_out->hsa_dispatch_copy
+
+#define LOG_HIP           gs_out->hip_api
+#define LOG_HIP_KERNEL    gs_out->hip_api_kernel
+
+#define LOG_ROCTX         gs_out->roctx
+#define LOG_ROCTX_MARK    gs_out->roctx_mark
 
 #endif // RTG_DISABLE_LOGGING
 
@@ -434,17 +426,10 @@ struct SignalCallbackData
 {
     SignalCallbackData(std::string name, InterceptCallbackData *data, hsa_signal_t signal, hsa_signal_t orig_signal, bool owns_orig_signal, const hsa_kernel_dispatch_packet_t *packet)
         : name(name), data(data), queue(data->queue), agent(data->agent), signal(signal), orig_signal(orig_signal), owns_orig_signal(owns_orig_signal), bytes(0), direction(0),
-            is_copy(false), is_barrier(false), dep{0,0,0,0,0}, id_(did()), seq_num_(data->seq_index++)
+            is_copy(false), is_barrier(false), dep{0,0,0,0,0}, id_(gs_did++), seq_num_(data->seq_index++)
     {
         if (RTG_HSA_HOST_DISPATCH) {
-            long unsigned tick_ = tick();
-            int pid_ = pid();
-            std::string tid_ = tid();
-            std::string name_ = name;
-            hsa_agent_t agent_ = agent;
-            hsa_queue_t* queue_ = queue;
-            hsa_signal_t signal_ = signal;
-            LOG_DISPATCH_HOST
+            LOG_DISPATCH_HOST(pid(), tid(), queue, agent, signal, tick(), id_, name, packet);
         }
     }
 
@@ -474,18 +459,11 @@ struct SignalCallbackData
                   (packet->dep_signal[3].handle),
                   (packet->dep_signal[4].handle)
             },
-            id_(did()),
+            id_(gs_did++),
             seq_num_(data->seq_index++)
     {
         if (RTG_HSA_HOST_DISPATCH) {
-            long unsigned tick_ = tick();
-            int pid_ = pid();
-            std::string tid_ = tid();
-            std::string name_ = "barrier";
-            hsa_agent_t agent_ = agent;
-            hsa_queue_t* queue_ = queue;
-            hsa_signal_t signal_ = signal;
-            LOG_BARRIER_HOST
+            LOG_BARRIER_HOST(pid(), tid(), queue, agent, signal, tick(), id_, dep, packet);
         }
     }
 
@@ -581,32 +559,19 @@ static void SignalWaiter(int id, SignalCallbackData *data)
 
     bool okay = data->compute_profile();
     if (okay) {
-        long unsigned start_ = data->start;
-        long unsigned stop_ = data->stop;
-        int pid_ = pid();
-        std::string tid_ = tid();
-        std::string name_ = data->name;
-        hsa_agent_t agent_ = data->agent;
-        hsa_queue_t* queue_ = data->queue;
-        hsa_signal_t signal_ = data->signal;
         if (HCC_PROFILE) {
-            const char *type_;
-            std::string tag_;
-            const char *msg_;
-            std::string msgstr;
-            int seq_num_ = 0;
             if (data->is_barrier) {
                 ++gs_cb_count_barriers;
                 LOG_HCC(data->start, data->stop, "barrier", "", "", data->data->agent_index, data->data->queue_index, data->seq_num_);
             }
             else if (data->is_copy) {
                 ++gs_cb_count_copies;
-                int agent_id_ = 0;
-                int queue_id_ = 0;
-                AgentInfo::get_agent_queue_indexes(agent_, queue_, agent_id_, queue_id_);
+                int agent_id = 0;
+                int queue_id = 0;
+                AgentInfo::get_agent_queue_indexes(data->agent, data->queue, agent_id, queue_id);
                 const char *tag_ = getDirectionString(data->direction);
                 std::string msgstr = getCopyString(data->bytes, data->start, data->stop);
-                LOG_HCC(data->start, data->stop, "copy", tag_, msgstr.c_str(), data->data->agent_index, data->data->queue_index, data->seq_num_);
+                LOG_HCC(data->start, data->stop, "copy", tag_, msgstr.c_str(), agent_id, queue_id, data->seq_num_);
             }
             else {
                 ++gs_cb_count_dispatches;
@@ -616,15 +581,15 @@ static void SignalWaiter(int id, SignalCallbackData *data)
         else {
             if (data->is_barrier) {
                 ++gs_cb_count_barriers;
-                LOG_BARRIER
+                LOG_BARRIER(pid(), tid(), data->queue, data->agent, data->signal, data->start, data->stop, data->id_, data->dep);
             }
             else if (data->is_copy) {
                 ++gs_cb_count_copies;
-                LOG_COPY
+                LOG_COPY(pid(), tid(), data->agent, data->signal, data->start, data->stop, data->dep);
             }
             else {
                 ++gs_cb_count_dispatches;
-                LOG_DISPATCH
+                LOG_DISPATCH(pid(), tid(), data->queue, data->agent, data->signal, data->start, data->stop, data->id_, data->name);
             }
         }
     }
@@ -2419,45 +2384,42 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
     else {
         std::string kernname_str;
         const char *kernname = NULL;
-        int pid_ = pid();
-        std::string tid_ = tid();
         uint64_t tick_ = data->correlation_id;
         uint64_t ticks = tick() - tick_;                                   \
         int localStatus = 0;
         bool is_kernel = false;
 
-        if (cid ==   HIP_API_ID_hipLaunchCooperativeKernel) {
-            auto f = data->args.hipLaunchCooperativeKernel.f;
-            auto s = data->args.hipLaunchCooperativeKernel.stream;
-            kernname = hipKernelNameRefByPtr(f, s);
-            is_kernel = true;
-        }
-        else if (cid == HIP_API_ID_hipLaunchKernel) {
-            auto f =    data->args.hipLaunchKernel.function_address;
-            auto s =    data->args.hipLaunchKernel.stream;
-            kernname = hipKernelNameRefByPtr(f, s);
-            is_kernel = true;
-        }
-        else if (cid == HIP_API_ID_hipHccModuleLaunchKernel) {
-            auto f =    data->args.hipHccModuleLaunchKernel.f;
-            kernname = hipKernelNameRef(f);
-            is_kernel = true;
-        }
-        else if (cid == HIP_API_ID_hipExtModuleLaunchKernel) {
-            auto f =    data->args.hipExtModuleLaunchKernel.f;
-            kernname = hipKernelNameRef(f);
-            is_kernel = true;
-        }
-        else if (cid == HIP_API_ID_hipModuleLaunchKernel) {
-            auto f =    data->args.hipModuleLaunchKernel.f;
-            kernname = hipKernelNameRef(f);
-            is_kernel = true;
-        }
-        else if (cid == HIP_API_ID_hipExtLaunchKernel) {
-            auto f =    data->args.hipExtLaunchKernel.function_address;
-            auto s =    data->args.hipExtLaunchKernel.stream;
-            kernname = hipKernelNameRefByPtr(f, s);
-            is_kernel = true;
+        switch (cid) {
+            case HIP_API_ID_hipLaunchCooperativeKernel:
+                kernname = hipKernelNameRefByPtr(
+                        data->args.hipLaunchCooperativeKernel.f,
+                        data->args.hipLaunchCooperativeKernel.stream);
+                is_kernel = true;
+                break;
+            case HIP_API_ID_hipLaunchKernel:
+                kernname = hipKernelNameRefByPtr(
+                        data->args.hipLaunchKernel.function_address,
+                        data->args.hipLaunchKernel.stream);
+                is_kernel = true;
+                break;
+            case HIP_API_ID_hipHccModuleLaunchKernel:
+                kernname = hipKernelNameRef(data->args.hipHccModuleLaunchKernel.f);
+                is_kernel = true;
+                break;
+            case HIP_API_ID_hipExtModuleLaunchKernel:
+                kernname = hipKernelNameRef(data->args.hipExtModuleLaunchKernel.f);
+                is_kernel = true;
+                break;
+            case HIP_API_ID_hipModuleLaunchKernel:
+                kernname = hipKernelNameRef(data->args.hipModuleLaunchKernel.f);
+                is_kernel = true;
+                break;
+            case HIP_API_ID_hipExtLaunchKernel:
+                kernname = hipKernelNameRefByPtr(
+                        data->args.hipExtLaunchKernel.function_address,
+                        data->args.hipExtLaunchKernel.stream);
+                is_kernel = true;
+                break;
         }
 
         if (is_kernel) {
@@ -2471,19 +2433,19 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
             std::string func = args;
             free((char*)args);
             if (is_kernel) {
-                LOG_HIP_KERNEL_ARGS
+                LOG_HIP_KERNEL(pid(), tid(), func, kernname_str, localStatus, tick_, ticks);
             }
             else {
-                LOG_HIP_ARGS
+                LOG_HIP(pid(), tid(), func, localStatus, tick_, ticks);
             }
         }
         else {
             std::string &func = gs_hip_api_names[cid];
             if (is_kernel) {
-                LOG_HIP_KERNEL
+                LOG_HIP_KERNEL(pid(), tid(), func, kernname_str, localStatus, tick_, ticks);
             }
             else {
-                LOG_HIP
+                LOG_HIP(pid(), tid(), func, localStatus, tick_, ticks);
             }
         }
         // Now that we're done with the api data, zero it for the next time.
@@ -2499,39 +2461,30 @@ static void* roctx_callback(uint32_t domain, uint32_t cid, const void* data_, vo
     uint64_t new_tick = tick();
     roctx_api_data_t *data = (roctx_api_data_t*)data_;
 
-    if (cid == ROCTX_API_ID_roctxMarkA) {
-        int pid_ = pid();
-        std::string tid_ = tid();
-        std::string msg = data->args.message;
-        uint64_t &tick_ = new_tick;
-        LOG_ROCTX_MARK
-    }
-    else if (cid == ROCTX_API_ID_roctxRangePushA) {
-        gstl_roctx_stack.emplace_back(data->args.message, new_tick);
-    }
-    else if (cid == ROCTX_API_ID_roctxRangePop) {
-        int pid_ = pid();
-        std::string tid_ = tid();
-        std::string msg = gstl_roctx_stack.back().message;
-        uint64_t tick_ = gstl_roctx_stack.back().tick;
-        uint64_t ticks = new_tick - tick_;
-        LOG_ROCTX
-    }
-    else if (cid == ROCTX_API_ID_roctxRangeStartA) {
-        gstl_roctx_range.emplace(data->args.id, roctx_data_t{data->args.message,new_tick});
-    }
-    else if (cid == ROCTX_API_ID_roctxRangeStop) {
-        auto item = gstl_roctx_range.find(data->args.id);
-        if (item == gstl_roctx_range.end()) {
-            fprintf(stderr, "RTG Tracer: invalid roctx range: %lu\n", data->args.id);
-            exit(EXIT_FAILURE);
-        }
-        int pid_ = pid();
-        std::string tid_ = tid();
-        std::string msg = item->second.message;
-        uint64_t tick_ = item->second.tick;
-        uint64_t ticks = new_tick - tick_;
-        LOG_ROCTX
+    switch (cid) {
+        case ROCTX_API_ID_roctxMarkA:
+            LOG_ROCTX_MARK(pid(), tid(), data->args.message, new_tick);
+            break;
+        case ROCTX_API_ID_roctxRangePushA:
+            gstl_roctx_stack.emplace_back(data->args.message, new_tick);
+            break;
+        case ROCTX_API_ID_roctxRangePop:
+            LOG_ROCTX(pid(), tid(), gstl_roctx_stack.back().message, gstl_roctx_stack.back().tick, new_tick - gstl_roctx_stack.back().tick);
+            gstl_roctx_stack.pop_back();
+            break;
+        case ROCTX_API_ID_roctxRangeStartA:
+            gstl_roctx_range.emplace(data->args.id, roctx_data_t{data->args.message,new_tick});
+            break;
+        case ROCTX_API_ID_roctxRangeStop:
+            {
+                auto item = gstl_roctx_range.find(data->args.id);
+                if (item == gstl_roctx_range.end()) {
+                    fprintf(stderr, "RTG Tracer: invalid roctx range: %lu\n", data->args.id);
+                    exit(EXIT_FAILURE);
+                }
+                LOG_ROCTX(pid(), tid(), item->second.message, item->second.tick, new_tick - item->second.tick);
+            }
+            break;
     }
 
     return NULL;
