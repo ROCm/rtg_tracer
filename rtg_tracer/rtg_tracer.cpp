@@ -269,23 +269,9 @@ static inline unsigned long did() {
     return id++;
 }
 
-// copied from hcc runtime's HCC_PROFILE=2
-#define LOG_PROFILE(start, end, type, tag, msg) \
-{\
-    std::stringstream sstream;\
-    sstream << "profile: " << std::setw(7) << type << ";\t" \
-                         << std::setw(40) << tag\
-                         << ";\t" << std::fixed << std::setw(6) << std::setprecision(1) << (end-start)/1000.0 << " us;";\
-    sstream << "\t" << start << ";\t" << end << ";";\
-    sstream << "\t" << "#" << agent_id_ << "." << queue_id_ << "." << seq_num_ << ";"; \
-    sstream <<  msg << "\n";\
-    fprintf(gs_stream, "%s", sstream.str().c_str());\
-}
-#define LOG_RPT LOG_PROFILE(start_, stop_, type_, tag_, msg_)
-    //std::cerr << sstream.str();\
-
 #if RTG_DISABLE_LOGGING
 
+#define LOG_HCC
 #define LOG_STATUS_OUT
 #define LOG_UINT64_OUT
 #define LOG_SIGNAL_OUT
@@ -309,6 +295,19 @@ static inline unsigned long did() {
 #define LOG_ROCTX_MARK
 
 #else // RTG_DISABLE_LOGGING
+
+// copied from hcc runtime's HCC_PROFILE=2
+#define LOG_HCC(start, end, type, tag, msg, agent_id_, queue_id_, seq_num_) \
+{\
+    std::stringstream sstream;\
+    sstream << "profile: " << std::setw(7) << type << ";\t" \
+                         << std::setw(40) << tag\
+                         << ";\t" << std::fixed << std::setw(6) << std::setprecision(1) << (end-start)/1000.0 << " us;";\
+    sstream << "\t" << start << ";\t" << end << ";";\
+    sstream << "\t" << "#" << agent_id_ << "." << queue_id_ << "." << seq_num_ << ";"; \
+    sstream <<  msg << "\n";\
+    fprintf(gs_stream, "%s", sstream.str().c_str());\
+}
 
 #define LOG_STATUS_OUT    gs_out->hsa_api                  (pid_, tid_, func, args, localStatus, tick_, ticks);
 #define LOG_UINT64_OUT    gs_out->hsa_api                  (pid_, tid_, func, args, localStatus, tick_, ticks);
@@ -575,86 +574,65 @@ std::string getCopyString(size_t sizeBytes, uint64_t start, uint64_t end)
     return ss.str();
 }
 
-static bool signal_callback(hsa_signal_value_t value, void* arg)
-{
-    if (arg != nullptr) {
-        SignalCallbackData* data = reinterpret_cast<SignalCallbackData*>(arg);
-        bool okay = data->compute_profile();
-        if (okay) {
-            long unsigned start_ = data->start;
-            long unsigned stop_ = data->stop;
-            int pid_ = pid();
-            std::string tid_ = tid();
-            std::string name_ = data->name;
-            hsa_agent_t agent_ = data->agent;
-            hsa_queue_t* queue_ = data->queue;
-            hsa_signal_t signal_ = data->signal;
-            if (HCC_PROFILE) {
-                const char *type_;
-                std::string tag_;
-                const char *msg_;
-                std::string msgstr;
-                int agent_id_ = 0;
-                int queue_id_ = 0;
-                int seq_num_ = 0;
-                if (data->is_barrier) {
-                    ++gs_cb_count_barriers;
-                    type_ = "barrier";
-                    tag_ = "";
-                    msg_ = "";
-                    agent_id_ = data->data->agent_index;
-                    queue_id_ = data->data->queue_index;
-                    seq_num_ = data->seq_num_;
-                }
-                else if (data->is_copy) {
-                    AgentInfo::get_agent_queue_indexes(agent_, queue_, agent_id_, queue_id_);
-                    ++gs_cb_count_copies;
-                    type_ = "copy";
-                    tag_ = getDirectionString(data->direction);
-                    msgstr = getCopyString(data->bytes, start_, stop_);
-                    msg_ = msgstr.c_str();
-                    //msg_ = "";
-                    seq_num_ = data->seq_num_;
-                }
-                else {
-                    ++gs_cb_count_dispatches;
-                    type_ = "kernel";
-                    tag_ = data->name;
-                    msg_ = "";
-                    agent_id_ = data->data->agent_index;
-                    queue_id_ = data->data->queue_index;
-                    seq_num_ = data->seq_num_;
-                }
-                LOG_RPT
-            }
-            else {
-                if (data->is_barrier) {
-                    ++gs_cb_count_barriers;
-                    LOG_BARRIER
-                }
-                else if (data->is_copy) {
-                    ++gs_cb_count_copies;
-                    LOG_COPY
-                }
-                else {
-                    ++gs_cb_count_dispatches;
-                    LOG_DISPATCH
-                }
-            }
-        }
-        // we created the signal, we must free, but we can't until we know it is no longer needed
-        // so wait on the associated original signal
-        gs_signal_pool.push(SignalDestroyer, data->signal, data->orig_signal, data->owns_orig_signal);
-        delete data;
-    }
-    return false; // do not re-use callback
-}
-
 static void SignalWaiter(int id, SignalCallbackData *data)
 {
     //fprintf(stderr, "RTG Tracer: SignalWaiter id=%d signal=%lu\n", id, signal.handle);
     gs_OrigCoreApiTable.hsa_signal_wait_relaxed_fn(data->signal, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
-    signal_callback(0, data);
+
+    bool okay = data->compute_profile();
+    if (okay) {
+        long unsigned start_ = data->start;
+        long unsigned stop_ = data->stop;
+        int pid_ = pid();
+        std::string tid_ = tid();
+        std::string name_ = data->name;
+        hsa_agent_t agent_ = data->agent;
+        hsa_queue_t* queue_ = data->queue;
+        hsa_signal_t signal_ = data->signal;
+        if (HCC_PROFILE) {
+            const char *type_;
+            std::string tag_;
+            const char *msg_;
+            std::string msgstr;
+            int seq_num_ = 0;
+            if (data->is_barrier) {
+                ++gs_cb_count_barriers;
+                LOG_HCC(data->start, data->stop, "barrier", "", "", data->data->agent_index, data->data->queue_index, data->seq_num_);
+            }
+            else if (data->is_copy) {
+                ++gs_cb_count_copies;
+                int agent_id_ = 0;
+                int queue_id_ = 0;
+                AgentInfo::get_agent_queue_indexes(agent_, queue_, agent_id_, queue_id_);
+                const char *tag_ = getDirectionString(data->direction);
+                std::string msgstr = getCopyString(data->bytes, data->start, data->stop);
+                LOG_HCC(data->start, data->stop, "copy", tag_, msgstr.c_str(), data->data->agent_index, data->data->queue_index, data->seq_num_);
+            }
+            else {
+                ++gs_cb_count_dispatches;
+                LOG_HCC(data->start, data->stop, "kernel", data->name, "", data->data->agent_index, data->data->queue_index, data->seq_num_);
+            }
+        }
+        else {
+            if (data->is_barrier) {
+                ++gs_cb_count_barriers;
+                LOG_BARRIER
+            }
+            else if (data->is_copy) {
+                ++gs_cb_count_copies;
+                LOG_COPY
+            }
+            else {
+                ++gs_cb_count_dispatches;
+                LOG_DISPATCH
+            }
+        }
+    }
+
+    // we created the signal, we must free, but we can't until we know it is no longer needed
+    // so wait on the associated original signal
+    gs_signal_pool.push(SignalDestroyer, data->signal, data->orig_signal, data->owns_orig_signal);
+    delete data;
 }
 
 bool InitHsaTable(HsaApiTable* pTable)
