@@ -65,7 +65,7 @@ typedef std::mutex mutex_t;
 typedef std::unordered_map<uint64_t, const char*> symbols_map_t;
 
 //////////////////////////////////////////////////////////////////////////////
-// structs ///////////////////////////////////////////////////////////////////
+// structs and classes ///////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////
 
 struct roctx_data_t {
@@ -73,6 +73,26 @@ struct roctx_data_t {
     uint64_t tick;
 
     roctx_data_t(const char *m, uint64_t t) : message(m), tick(t) {}
+};
+
+// for tracking agents and streams with 0-based index.
+class AgentInfo {
+public:
+    explicit AgentInfo(hsa_agent_t agent, int index);
+    int get_agent_index() { return index; }
+    int get_queue_index(hsa_queue_t *queue);
+    hsa_queue_t* get_signal_queue();
+
+    static AgentInfo* Instance(hsa_agent_t agent);
+    static void get_agent_queue_indexes(hsa_agent_t agent, hsa_queue_t *queue, int &agent_index, int &queue_index);
+
+private:
+    hsa_agent_t agent;
+    int index;
+    hsa_queue_t *signal_queue;
+    std::unordered_map<uint64_t, int> queue_index_map;
+    mutex_t mutex;
+    static std::unordered_map<uint64_t, AgentInfo*> s_agent_info_map;
 };
 
 //////////////////////////////////////////////////////////////////////////////
@@ -89,11 +109,11 @@ static std::unordered_map<std::string,bool> gs_hsa_enabled_map; // Lookup which 
 static mutex_t gs_kernel_name_mutex_; // protects gs_symbols_map_
 static symbols_map_t* gs_symbols_map_; // maps HSA executable address to kernel name, protected by gs_kernel_name_mutex_
 
-static std::vector<hsa_agent_t> gs_gpu_agents; // all gpu agents, in order reported by HSA
+static std::vector<hsa_agent_t> gs_gpu_agents; // all gpu agents, in order reported by HSA, possibly filtered by visible
 static std::vector<hsa_agent_t> gs_cpu_agents; // all cpu agents, in order reported by HSA
-static std::unordered_map<uint64_t, size_t> gs_gpu_agent_to_ord; // map agent handle back to device ordinal
+static std::vector<AgentInfo*> gs_gpu_info; // TODO
 
-static ctpl::thread_pool gs_pool(1); // thread pool for signal waits
+static ctpl::thread_pool gs_pool(1);        // thread pool for signal waits
 static ctpl::thread_pool gs_signal_pool(1); // thread pool for signal destroy
 
 static counter_t gs_host_count_dispatches{0}; // counts kernel disaptches
@@ -119,9 +139,6 @@ static thread_local std::unordered_map<int,roctx_data_t> gstl_roctx_range; // fo
 // global static function declarations ///////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////
 
-// Callback for queue intercept.
-static void intercept_callback(const void* in_packets, uint64_t count, uint64_t user_que_idx, void* data, hsa_amd_queue_intercept_packet_writer writer);
-
 // Support for HIP API callbacks.
 static void* hip_activity_callback(uint32_t cid, activity_record_t* record, const void* data, void* arg);
 static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data, void* arg);
@@ -142,76 +159,38 @@ static hsa_status_t hsa_executable_freeze_interceptor(hsa_executable_t executabl
 static hsa_status_t hsa_executable_symbols_cb(hsa_executable_t exec, hsa_executable_symbol_t symbol, void *data);
 // agent info
 static hsa_status_t hsa_iterate_agent_cb(hsa_agent_t agent, void* data);
+// Callback for queue intercept.
+static void hsa_amd_queue_intercept_callback(const void* in_packets, uint64_t count, uint64_t user_que_idx, void* data, hsa_amd_queue_intercept_packet_writer writer);
 
-// NEW agent and stream tracking.
-struct Agent {
+///
+/// class AgentInfo implementation
+///
+std::unordered_map<uint64_t, AgentInfo*> AgentInfo::s_agent_info_map;
 
-};
-std::vector<Agent*> g_agents;
-
-// For tracking agents and streams with 0-based index.
-static mutex_t agent_mutex_;
-struct AgentInfo {
-    static int __agent;
-    int agent_index;
-    int __queue;
-    hsa_queue_t *signal_queue;
-    std::unordered_map<uint64_t, int> queue_index;
-    AgentInfo() : agent_index{__agent++}, __queue{0}, signal_queue{nullptr} {}
-};
-static std::unordered_map<uint64_t, AgentInfo*> agent_info_map;
-
-int AgentInfo::__agent{0};
-
-inline hsa_device_type_t agent_type(hsa_agent_t x)
+AgentInfo::AgentInfo(hsa_agent_t agent, int index)
+    : agent(agent)
+    , index{index}
+    , signal_queue{nullptr}
+    , queue_index_map{}
+    , mutex{}
 {
-    hsa_device_type_t r{};
-    gs_OrigCoreApiTable.hsa_agent_get_info_fn(x, HSA_AGENT_INFO_DEVICE, &r);
-    return r;
+    s_agent_info_map[agent.handle] = this;
 }
 
-static void get_agent_queue_indexes(hsa_agent_t agent, hsa_queue_t *queue, int &agent_index, int &queue_index)
-{
-    std::lock_guard<mutex_t> lck(agent_mutex_);
-
-    if (agent.handle == 0) {
-        fprintf(stderr, "RTG Tracer: null agent handle\n");
+int AgentInfo::get_queue_index(hsa_queue_t *queue) {
+    std::lock_guard<mutex_t> lock(mutex);
+    if (queue_index_map.count(queue->id) == 0) {
+        queue_index_map[queue->id] = queue_index_map.size() + 1;
     }
-
-    // create agent info if missing
-    if (agent_info_map.count(agent.handle) == 0) {
-        agent_info_map[agent.handle] = new AgentInfo;
-    }
-
-    auto *info = agent_info_map[agent.handle];
-
-    if (info->queue_index.count(queue->id) == 0) {
-        info->queue_index[queue->id] = info->__queue++;
-    }
-    agent_index = info->agent_index;
-    queue_index = info->queue_index[queue->id];
+    return queue_index_map[queue->id];
 }
 
-static hsa_queue_t* get_agent_signal_queue(hsa_agent_t agent)
-{
-    std::lock_guard<mutex_t> lck(agent_mutex_);
-
-    if (agent.handle == 0) {
-        fprintf(stderr, "RTG Tracer: null agent handle\n");
-    }
-
-    // create agent info if missing
-    if (agent_info_map.count(agent.handle) == 0) {
-        agent_info_map[agent.handle] = new AgentInfo;
-    }
-
-    auto *info = agent_info_map[agent.handle];
-
-    if (info->signal_queue == nullptr) {
+hsa_queue_t* AgentInfo::get_signal_queue() {
+    if (signal_queue == nullptr) {
         hsa_status_t status;
         // create a regular queue; this is for our fake signaling queue
         status = gs_OrigCoreApiTable.hsa_queue_create_fn(agent, 2048, HSA_QUEUE_TYPE_MULTI, nullptr, nullptr,
-                std::numeric_limits<unsigned int>::max(), std::numeric_limits<unsigned int>::max(), &info->signal_queue);
+                std::numeric_limits<unsigned int>::max(), std::numeric_limits<unsigned int>::max(), &signal_queue);
         if (status != HSA_STATUS_SUCCESS) {
             const char *msg;
             hsa_status_string(status, &msg);
@@ -219,7 +198,7 @@ static hsa_queue_t* get_agent_signal_queue(hsa_agent_t agent)
             exit(EXIT_FAILURE);
         }
         // make sure profiling is enabled for the newly created queue
-        status = gs_OrigExtApiTable.hsa_amd_profiling_set_profiler_enabled_fn(info->signal_queue, true);
+        status = gs_OrigExtApiTable.hsa_amd_profiling_set_profiler_enabled_fn(signal_queue, true);
         if (status != HSA_STATUS_SUCCESS) {
             const char *msg;
             hsa_status_string(status, &msg);
@@ -228,7 +207,29 @@ static hsa_queue_t* get_agent_signal_queue(hsa_agent_t agent)
         }
     }
 
-    return info->signal_queue;
+    return signal_queue;
+}
+
+AgentInfo* AgentInfo::Instance(hsa_agent_t agent) {
+    if (s_agent_info_map.count(agent.handle) == 0) {
+        fprintf(stderr, "RTG Tracer: unknown hsa_agent_t\n");
+        exit(EXIT_FAILURE);
+    }
+    return s_agent_info_map[agent.handle];
+}
+
+void AgentInfo::get_agent_queue_indexes(hsa_agent_t agent, hsa_queue_t *queue, int &agent_index, int &queue_index)
+{
+    auto *info = AgentInfo::Instance(agent);
+    agent_index = info->get_agent_index();
+    queue_index = info->get_queue_index(queue);
+}
+
+inline hsa_device_type_t agent_type(hsa_agent_t x)
+{
+    hsa_device_type_t r{};
+    gs_OrigCoreApiTable.hsa_agent_get_info_fn(x, HSA_AGENT_INFO_DEVICE, &r);
+    return r;
 }
 
 struct InterceptCallbackData
@@ -236,7 +237,7 @@ struct InterceptCallbackData
     InterceptCallbackData(hsa_queue_t *queue, hsa_agent_t agent, hsa_queue_t *signal_queue)
         : queue(queue), agent(agent), signal_queue(signal_queue), agent_index(0), queue_index(0), seq_index(0)
     {
-        get_agent_queue_indexes(agent, queue, agent_index, queue_index);
+        AgentInfo::get_agent_queue_indexes(agent, queue, agent_index, queue_index);
     }
     hsa_queue_t *queue;
     hsa_agent_t agent;
@@ -626,7 +627,7 @@ static bool signal_callback(hsa_signal_value_t value, void* arg)
                     seq_num_ = data->seq_num_;
                 }
                 else if (data->is_copy) {
-                    get_agent_queue_indexes(agent_, queue_, agent_id_, queue_id_);
+                    AgentInfo::get_agent_queue_indexes(agent_, queue_, agent_id_, queue_id_);
                     ++gs_cb_count_copies;
                     type_ = "copy";
                     tag_ = getDirectionString(data->direction);
@@ -837,7 +838,7 @@ hsa_status_t hsa_queue_create(hsa_agent_t agent, uint32_t size, hsa_queue_type32
         // we leak the InterceptCallbackData instance
         InterceptCallbackData *data = new InterceptCallbackData(*queue, agent, signal_queue);
         status = gs_OrigExtApiTable.hsa_amd_queue_intercept_register_fn(
-                *queue, intercept_callback, data);
+                *queue, hsa_amd_queue_intercept_callback, data);
         // print as usual
         TRACE(agent, size, type, callback, data, private_segment_size, group_segment_size, queue);
         return LOG_STATUS(status);
@@ -1715,7 +1716,7 @@ hsa_status_t hsa_amd_memory_async_copy(void* dst, hsa_agent_t dst_agent, const v
                 fprintf(stderr, "RTG Tracer: hsa_signal_create_fn failed in hsa_amd_memory_async_copy\n");
                 exit(EXIT_FAILURE);
             }
-            hsa_queue_t *queue = get_agent_signal_queue(agent_to_use);
+            hsa_queue_t *queue = AgentInfo::Instance(agent_to_use)->get_signal_queue();
             uint64_t index = submit_to_signal_queue(queue, new_signal, completion_signal);
             gs_pool.push(SignalWaiter, new SignalCallbackData(queue, agent_to_use, new_signal, completion_signal, false, num_dep_signals, dep_signals, size, direction, index));
             TRACE(dst, dst_agent, src, src_agent, size, num_dep_signals, dep_signals, completion_signal);
@@ -1743,7 +1744,7 @@ hsa_status_t hsa_amd_memory_async_copy_rect(const hsa_pitched_ptr_t* dst, const 
                     fprintf(stderr, "RTG Tracer: hsa_amd_signal_create_fn failed in hsa_amd_memory_async_copy_rect\n");
                     exit(EXIT_FAILURE);
                 }
-                hsa_queue_t *queue = get_agent_signal_queue(copy_agent);
+                hsa_queue_t *queue = AgentInfo::Instance(copy_agent)->get_signal_queue();
                 uint64_t index = submit_to_signal_queue(queue, new_signal, completion_signal);
                 gs_pool.push(SignalWaiter, new SignalCallbackData(queue, copy_agent, new_signal, completion_signal, false, num_dep_signals, dep_signals, range->x*range->y, dir, index));
                 TRACE(dst, dst_offset, src, src_offset, range, copy_agent, dir, num_dep_signals, dep_signals, completion_signal);
@@ -2339,7 +2340,7 @@ static std::string QueryKernelName(uint64_t kernel_object, const amd_kernel_code
 }
 
 
-static void intercept_callback(
+static void hsa_amd_queue_intercept_callback(
         const void* in_packets, uint64_t count,
         uint64_t user_que_idx, void* data,
         hsa_amd_queue_intercept_packet_writer writer)
@@ -2695,7 +2696,7 @@ extern "C" bool OnLoad(void *pTable,
     {
         int index = 0;
         for (auto agent : RTG::gs_gpu_agents) {
-            RTG::gs_gpu_agent_to_ord[agent.handle] = index++;
+            RTG::gs_gpu_info.emplace_back(new RTG::AgentInfo{agent,index++});
         }
     }
 
