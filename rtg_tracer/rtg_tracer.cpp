@@ -81,7 +81,7 @@ public:
     explicit AgentInfo(hsa_agent_t agent, int index);
     int get_agent_index() { return index; }
     int get_queue_index(hsa_queue_t *queue);
-    hsa_queue_t* get_signal_queue();
+    hsa_queue_t* get_signal_queue(); // this is the agent's signal_queue, not one of the the per-queue signal queues
 
     static AgentInfo* Instance(hsa_agent_t agent);
     static void get_agent_queue_indexes(hsa_agent_t agent, hsa_queue_t *queue, int &agent_index, int &queue_index);
@@ -153,18 +153,18 @@ static void InitEnabledTable(std::string what_to_trace, std::string what_not_to_
 static void InitEnabledTableCore(bool value);
 static void InitEnabledTableExtApi(bool value);
 
-// Executables loading tracking, for looking up kernel names.
+// HSA executable tracking, for looking up kernel names.
 static const char* GetKernelNameRef(uint64_t addr);
 static hsa_status_t hsa_executable_freeze_interceptor(hsa_executable_t executable, const char *options);
 static hsa_status_t hsa_executable_symbols_cb(hsa_executable_t exec, hsa_executable_symbol_t symbol, void *data);
-// agent info
-static hsa_status_t hsa_iterate_agent_cb(hsa_agent_t agent, void* data);
-// Callback for queue intercept.
-static void hsa_amd_queue_intercept_callback(const void* in_packets, uint64_t count, uint64_t user_que_idx, void* data, hsa_amd_queue_intercept_packet_writer writer);
 
-///
+// HSA iterator callbcaks
+static hsa_status_t hsa_iterate_agent_cb(hsa_agent_t agent, void* data);
+static void hsa_amd_queue_intercept_cb(const void* in_packets, uint64_t count, uint64_t user_que_idx, void* data, hsa_amd_queue_intercept_packet_writer writer);
+
+///////////////////////////////////
 /// class AgentInfo implementation
-///
+///////////////////////////////////
 std::unordered_map<uint64_t, AgentInfo*> AgentInfo::s_agent_info_map;
 
 AgentInfo::AgentInfo(hsa_agent_t agent, int index)
@@ -225,13 +225,6 @@ void AgentInfo::get_agent_queue_indexes(hsa_agent_t agent, hsa_queue_t *queue, i
     queue_index = info->get_queue_index(queue);
 }
 
-inline hsa_device_type_t agent_type(hsa_agent_t x)
-{
-    hsa_device_type_t r{};
-    gs_OrigCoreApiTable.hsa_agent_get_info_fn(x, HSA_AGENT_INFO_DEVICE, &r);
-    return r;
-}
-
 struct InterceptCallbackData
 {
     InterceptCallbackData(hsa_queue_t *queue, hsa_agent_t agent, hsa_queue_t *signal_queue)
@@ -264,19 +257,6 @@ static inline std::string tid() {
     return tid_os.str();
 }
 
-#if 0
-static inline suseconds_t tick() {
-    struct timeval tv;
-    gettimeofday(&tv, nullptr);
-    return tv.tv_sec * 1e6 + tv.tv_usec;
-}
-#endif
-#if 0
-static inline uint64_t tick() {
-    using namespace std::chrono;
-    return high_resolution_clock::now().time_since_epoch() / microseconds(1);
-}
-#endif
 uint64_t tick() {
     struct timespec tp;
     ::clock_gettime(CLOCK_MONOTONIC, &tp);
@@ -838,7 +818,7 @@ hsa_status_t hsa_queue_create(hsa_agent_t agent, uint32_t size, hsa_queue_type32
         // we leak the InterceptCallbackData instance
         InterceptCallbackData *data = new InterceptCallbackData(*queue, agent, signal_queue);
         status = gs_OrigExtApiTable.hsa_amd_queue_intercept_register_fn(
-                *queue, hsa_amd_queue_intercept_callback, data);
+                *queue, hsa_amd_queue_intercept_cb, data);
         // print as usual
         TRACE(agent, size, type, callback, data, private_segment_size, group_segment_size, queue);
         return LOG_STATUS(status);
@@ -1681,6 +1661,13 @@ hsa_status_t hsa_amd_memory_pool_free(void* ptr) {
     return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_memory_pool_free_fn(ptr));
 }
 
+inline hsa_device_type_t agent_type(hsa_agent_t x)
+{
+    hsa_device_type_t r{};
+    gs_OrigCoreApiTable.hsa_agent_get_info_fn(x, HSA_AGENT_INFO_DEVICE, &r);
+    return r;
+}
+
 // Mirrors Amd Extension Apis
 hsa_status_t hsa_amd_memory_async_copy(void* dst, hsa_agent_t dst_agent, const void* src, hsa_agent_t src_agent, size_t size, uint32_t num_dep_signals, const hsa_signal_t* dep_signals, hsa_signal_t completion_signal) {
     ++RTG::gs_host_count_copies;
@@ -2340,7 +2327,7 @@ static std::string QueryKernelName(uint64_t kernel_object, const amd_kernel_code
 }
 
 
-static void hsa_amd_queue_intercept_callback(
+static void hsa_amd_queue_intercept_cb(
         const void* in_packets, uint64_t count,
         uint64_t user_que_idx, void* data,
         hsa_amd_queue_intercept_packet_writer writer)
