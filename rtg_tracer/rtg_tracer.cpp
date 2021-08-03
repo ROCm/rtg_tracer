@@ -38,89 +38,106 @@
 #include "rtg_out_printf.h"
 #include "rtg_out_rpd.h"
 
-#define USE_ATOMIC 1
-#define ENABLE_HSA_AMD_MEMORY_LOCK_TO_POOL 0
-#define ENABLE_HSA_AMD_RUNTIME_QUEUE_CREATE_REGISTER 0
+#define RTG_ENABLE_HSA_AMD_MEMORY_LOCK_TO_POOL 0
+#define RTG_ENABLE_HSA_AMD_RUNTIME_QUEUE_CREATE_REGISTER 0
+
+#define RTG_HSA_CHECK_STATUS(msg, status) do { \
+    if (status != HSA_STATUS_SUCCESS) {        \
+        fprintf(stderr, msg);                  \
+        abort();                               \
+    }                                          \
+} while (false)
 
 namespace RTG {
 
-static HsaApiTable* gs_OrigHsaTable;     // The HSA Runtime's original table
-static CoreApiTable gs_OrigCoreApiTable; // The HSA Runtime's versions of HSA core API functions
-static AmdExtTable gs_OrigExtApiTable;   // The HSA Runtime's versions of HSA ext API functions
-static hsa_ven_amd_loader_1_01_pfn_t gs_OrigLoaderExtTable; // The HSA Runtime's versions of HSA loader ext API functions
+//////////////////////////////////////////////////////////////////////////////
+// typedefs //////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////
 
-// Callback for queue intercept.
-static void intercept_callback(const void* in_packets, uint64_t count, uint64_t user_que_idx, void* data, hsa_amd_queue_intercept_packet_writer writer);
-
-// thread pool for signal waits
-ctpl::thread_pool pool(1);
-// thread pool for signal destroy
-ctpl::thread_pool signal_pool(1);
-
-#if USE_ATOMIC
+typedef hsa_ven_amd_aqlprofile_pfn_t pfn_t;
+typedef hsa_ven_amd_aqlprofile_event_t event_t;
+typedef hsa_ven_amd_aqlprofile_parameter_t parameter_t;
+typedef hsa_ven_amd_aqlprofile_profile_t profile_t;
+typedef hsa_ext_amd_aql_pm4_packet_t packet_t;
+typedef uint32_t packet_word_t;
+typedef uint64_t timestamp_t;
 typedef std::atomic<unsigned int> counter_t;
-#define LOAD(a) a.load()
-#else
-typedef unsigned int counter_t;
-#define LOAD(a) a
-#endif
-
-counter_t host_count_dispatches{0};
-counter_t host_count_barriers{0};
-counter_t host_count_copies{0};
-counter_t host_count_signals{0};
-counter_t cb_count_dispatches{0};
-counter_t cb_count_barriers{0};
-counter_t cb_count_copies{0};
-counter_t cb_count_signals{0};
-
-// Output stream for all logging
-static RtgOut* out;
-static FILE *stream; // only used for HCC_PROFILE mode
-
-// Support for HIP API callbacks.
-static void* hip_activity_callback(uint32_t cid, activity_record_t* record, const void* data, void* arg);
-static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data, void* arg);
-// Need to allocate hip_api_data_t, but cannot use new operator due to incomplete default constructors.
-// The hip_api_data_t is returned from the activity callback; without it, the API callback does not fire.
-thread_local std::vector<char[sizeof(hip_api_data_t)]> hip_api_data(HIP_API_ID_NUMBER);
-// Shared cache of HIP API names. Build it during init, used by all threads without mutex.
-std::vector<std::string> hip_api_names(HIP_API_ID_NUMBER);
-// To preserve state between API start/stop calls, we need to allocate some state.
-struct hip_api_state_ {
-    uint64_t tick; \
-};
-thread_local std::vector<struct hip_api_state_> hip_api_state(HIP_API_ID_NUMBER);
-
-// Support for ROCTX callbacks.
-static void* roctx_callback(uint32_t domain, uint32_t cid, const void* data, void* arg);
+//typedef std::recursive_mutex mutex_t;
+typedef std::mutex mutex_t;
+typedef std::unordered_map<uint64_t, const char*> symbols_map_t;
 typedef struct roctx_data {
     std::string message;
     uint64_t tick;
     roctx_data(const char *m, uint64_t t) : message(m), tick(t) {}
 } roctx_data_t;
-thread_local std::vector<roctx_data_t> roctx_stack;
-thread_local std::unordered_map<int,roctx_data_t> roctx_range;
 
-// Lookup which HSA functions we want to trace
-static std::unordered_map<std::string,bool> enabled_map;
+//////////////////////////////////////////////////////////////////////////////
+// global static variables ///////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////
 
+static HsaApiTable* gs_OrigHsaTable;     // The HSA Runtime's original table
+static CoreApiTable gs_OrigCoreApiTable; // The HSA Runtime's versions of HSA core API functions
+static AmdExtTable gs_OrigExtApiTable;   // The HSA Runtime's versions of HSA ext API functions
+static hsa_ven_amd_loader_1_01_pfn_t gs_OrigLoaderExtTable; // The HSA Runtime's versions of HSA loader ext API functions
+static std::unordered_map<std::string,bool> gs_hsa_enabled_map; // Lookup which HSA functions we want to trace
+
+// Executables loading tracking, for looking up kernel names.
+static mutex_t gs_kernel_name_mutex_; // protects gs_symbols_map_
+static symbols_map_t* gs_symbols_map_; // maps HSA executable address to kernel name, protected by gs_kernel_name_mutex_
+
+static ctpl::thread_pool gs_pool(1); // thread pool for signal waits
+static ctpl::thread_pool gs_signal_pool(1); // thread pool for signal destroy
+
+static counter_t gs_host_count_dispatches{0}; // counts kernel disaptches
+static counter_t gs_host_count_barriers{0};   // counts barrier dispaches
+static counter_t gs_host_count_copies{0};     // counts async copies
+static counter_t gs_host_count_signals{0};    // counts signals we create
+static counter_t gs_cb_count_dispatches{0};   // counts kernel disaptches that have completed
+static counter_t gs_cb_count_barriers{0};     // counts barrier dispaches that have completed
+static counter_t gs_cb_count_copies{0};       // counts async copies that have completed
+static counter_t gs_cb_count_signals{0};      // counts signals we destroy
+
+static RtgOut* gs_out;  // output interface
+static FILE *gs_stream; // output only used for HCC_PROFILE mode
+
+// Need to allocate hip_api_data_t, but cannot use new operator due to incomplete default constructors.
+static thread_local std::vector<char[sizeof(hip_api_data_t)]> gstl_hip_api_data(HIP_API_ID_NUMBER);
+static std::vector<std::string> gs_hip_api_names(HIP_API_ID_NUMBER); // shared cache of HIP API names
+
+static thread_local std::vector<roctx_data_t> gstl_roctx_stack; // for roctx range push pop
+static thread_local std::unordered_map<int,roctx_data_t> gstl_roctx_range; // for roctx range start stop
+
+//////////////////////////////////////////////////////////////////////////////
+// global static function declarations ///////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////
+
+// Callback for queue intercept.
+static void intercept_callback(const void* in_packets, uint64_t count, uint64_t user_que_idx, void* data, hsa_amd_queue_intercept_packet_writer writer);
+
+// Support for HIP API callbacks.
+static void* hip_activity_callback(uint32_t cid, activity_record_t* record, const void* data, void* arg);
+static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data, void* arg);
+
+// Support for ROCTX callbacks.
+static void* roctx_callback(uint32_t domain, uint32_t cid, const void* data, void* arg);
+
+// Support for HSA function table hooks.
 static void InitCoreApiTable(CoreApiTable* table);
 static void InitAmdExtTable(AmdExtTable* table);
 static void InitEnabledTable(std::string what_to_trace, std::string what_not_to_trace);
 static void InitEnabledTableCore(bool value);
 static void InitEnabledTableExtApi(bool value);
-static inline bool enabled_check(std::string func);
 
-// Executables loading tracking
-//typedef std::recursive_mutex mutex_t;
-typedef std::mutex mutex_t;
-static mutex_t kernel_name_mutex_;
-typedef std::unordered_map<uint64_t, const char*> symbols_map_t;
-static symbols_map_t* symbols_map_;
+// Executables loading tracking, for looking up kernel names.
 static const char* GetKernelNameRef(uint64_t addr);
 static hsa_status_t hsa_executable_freeze_interceptor(hsa_executable_t executable, const char *options);
-static hsa_status_t executable_symbols_cb(hsa_executable_t exec, hsa_executable_symbol_t symbol, void *data);
+static hsa_status_t hsa_executable_symbols_cb(hsa_executable_t exec, hsa_executable_symbol_t symbol, void *data);
+
+// NEW agent and stream tracking.
+struct Agent {
+
+};
+std::vector<Agent*> g_agents;
 
 // For tracking agents and streams with 0-based index.
 static mutex_t agent_mutex_;
@@ -274,7 +291,7 @@ static inline unsigned long did() {
     sstream << "\t" << start << ";\t" << end << ";";\
     sstream << "\t" << "#" << agent_id_ << "." << queue_id_ << "." << seq_num_ << ";"; \
     sstream <<  msg << "\n";\
-    fprintf(stream, "%s", sstream.str().c_str());\
+    fprintf(gs_stream, "%s", sstream.str().c_str());\
 }
 #define LOG_RPT LOG_PROFILE(start_, stop_, type_, tag_, msg_)
     //std::cerr << sstream.str();\
@@ -306,24 +323,24 @@ static inline unsigned long did() {
 
 #else // DISABLE_LOGGING
 
-#define LOG_STATUS_OUT    out->hsa_api                  (pid_, tid_, func, args, localStatus, tick_, ticks);
-#define LOG_UINT64_OUT    out->hsa_api                  (pid_, tid_, func, args, localStatus, tick_, ticks);
-#define LOG_SIGNAL_OUT    out->hsa_api                  (pid_, tid_, func, args, localStatus, tick_, ticks);
-#define LOG_VOID_OUT      out->hsa_api                  (pid_, tid_, func, args, tick_, ticks);
-#define LOG_DISPATCH_HOST out->hsa_host_dispatch_kernel (pid_, tid_, queue_, agent_, signal_, tick_, id_, name_, packet);
-#define LOG_BARRIER_HOST  out->hsa_host_dispatch_barrier(pid_, tid_, queue_, agent_, signal_, tick_, id_, dep, packet);
-#define LOG_DISPATCH      out->hsa_dispatch_kernel      (pid_, tid_, queue_, agent_, signal_, start_, stop_, data->id_, name_);
-#define LOG_BARRIER       out->hsa_dispatch_barrier     (pid_, tid_, queue_, agent_, signal_, start_, stop_, data->id_, data->dep);
-#define LOG_COPY          out->hsa_dispatch_copy        (pid_, tid_, agent_, signal_, start_, stop_, data->dep);
-#define LOG_HIP           out->hip_api                  (pid_, tid_, func, localStatus, tick_, ticks);
-#define LOG_HIP_KERNEL    out->hip_api_kernel           (pid_, tid_, func, kernname_str, localStatus, tick_, ticks);
-#define LOG_ROCTX         out->roctx                    (pid_, tid_, msg, tick_, ticks);
-#define LOG_ROCTX_MARK    out->roctx_mark               (pid_, tid_, msg, tick_);
+#define LOG_STATUS_OUT    gs_out->hsa_api                  (pid_, tid_, func, args, localStatus, tick_, ticks);
+#define LOG_UINT64_OUT    gs_out->hsa_api                  (pid_, tid_, func, args, localStatus, tick_, ticks);
+#define LOG_SIGNAL_OUT    gs_out->hsa_api                  (pid_, tid_, func, args, localStatus, tick_, ticks);
+#define LOG_VOID_OUT      gs_out->hsa_api                  (pid_, tid_, func, args, tick_, ticks);
+#define LOG_DISPATCH_HOST gs_out->hsa_host_dispatch_kernel (pid_, tid_, queue_, agent_, signal_, tick_, id_, name_, packet);
+#define LOG_BARRIER_HOST  gs_out->hsa_host_dispatch_barrier(pid_, tid_, queue_, agent_, signal_, tick_, id_, dep, packet);
+#define LOG_DISPATCH      gs_out->hsa_dispatch_kernel      (pid_, tid_, queue_, agent_, signal_, start_, stop_, data->id_, name_);
+#define LOG_BARRIER       gs_out->hsa_dispatch_barrier     (pid_, tid_, queue_, agent_, signal_, start_, stop_, data->id_, data->dep);
+#define LOG_COPY          gs_out->hsa_dispatch_copy        (pid_, tid_, agent_, signal_, start_, stop_, data->dep);
+#define LOG_HIP           gs_out->hip_api                  (pid_, tid_, func, localStatus, tick_, ticks);
+#define LOG_HIP_KERNEL    gs_out->hip_api_kernel           (pid_, tid_, func, kernname_str, localStatus, tick_, ticks);
+#define LOG_ROCTX         gs_out->roctx                    (pid_, tid_, msg, tick_, ticks);
+#define LOG_ROCTX_MARK    gs_out->roctx_mark               (pid_, tid_, msg, tick_);
 #define LOG_HIP_ARGS LOG_HIP
 #define LOG_HIP_KERNEL_ARGS LOG_HIP_KERNEL
 
 #define TRACE(...) \
-    static bool is_enabled = enabled_check(__func__); \
+    static bool is_enabled = gs_hsa_enabled_map[__func__]; \
     std::string func; \
     std::string args; \
     int pid_; \
@@ -540,7 +557,7 @@ static void SignalDestroyer(int id, hsa_signal_t ours, hsa_signal_t theirs, bool
     //fprintf(stderr, "RTG Tracer: SignalDestroyer id=%d ours=%lu theirs=%lu\n", id, ours.handle, theirs.handle);
     gs_OrigCoreApiTable.hsa_signal_wait_relaxed_fn(theirs, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
     hsa_status_t status = gs_OrigCoreApiTable.hsa_signal_destroy_fn(ours);
-    ++cb_count_signals;
+    ++gs_cb_count_signals;
     if (status != HSA_STATUS_SUCCESS) {
         fprintf(stderr, "RTG Tracer: signal destroy failed %lu\n", ours.handle);
     }
@@ -594,7 +611,7 @@ static bool signal_callback(hsa_signal_value_t value, void* arg)
                 int queue_id_ = 0;
                 int seq_num_ = 0;
                 if (data->is_barrier) {
-                    ++cb_count_barriers;
+                    ++gs_cb_count_barriers;
                     type_ = "barrier";
                     tag_ = "";
                     msg_ = "";
@@ -604,7 +621,7 @@ static bool signal_callback(hsa_signal_value_t value, void* arg)
                 }
                 else if (data->is_copy) {
                     get_agent_queue_indexes(agent_, queue_, agent_id_, queue_id_);
-                    ++cb_count_copies;
+                    ++gs_cb_count_copies;
                     type_ = "copy";
                     tag_ = getDirectionString(data->direction);
                     msgstr = getCopyString(data->bytes, start_, stop_);
@@ -613,7 +630,7 @@ static bool signal_callback(hsa_signal_value_t value, void* arg)
                     seq_num_ = data->seq_num_;
                 }
                 else {
-                    ++cb_count_dispatches;
+                    ++gs_cb_count_dispatches;
                     type_ = "kernel";
                     tag_ = data->name;
                     msg_ = "";
@@ -625,22 +642,22 @@ static bool signal_callback(hsa_signal_value_t value, void* arg)
             }
             else {
                 if (data->is_barrier) {
-                    ++cb_count_barriers;
+                    ++gs_cb_count_barriers;
                     LOG_BARRIER
                 }
                 else if (data->is_copy) {
-                    ++cb_count_copies;
+                    ++gs_cb_count_copies;
                     LOG_COPY
                 }
                 else {
-                    ++cb_count_dispatches;
+                    ++gs_cb_count_dispatches;
                     LOG_DISPATCH
                 }
             }
         }
         // we created the signal, we must free, but we can't until we know it is no longer needed
         // so wait on the associated original signal
-        signal_pool.push(SignalDestroyer, data->signal, data->orig_signal, data->owns_orig_signal);
+        gs_signal_pool.push(SignalDestroyer, data->signal, data->orig_signal, data->owns_orig_signal);
         delete data;
     }
     return false; // do not re-use callback
@@ -1659,7 +1676,7 @@ hsa_status_t hsa_amd_memory_pool_free(void* ptr) {
 
 // Mirrors Amd Extension Apis
 hsa_status_t hsa_amd_memory_async_copy(void* dst, hsa_agent_t dst_agent, const void* src, hsa_agent_t src_agent, size_t size, uint32_t num_dep_signals, const hsa_signal_t* dep_signals, hsa_signal_t completion_signal) {
-    ++RTG::host_count_copies;
+    ++RTG::gs_host_count_copies;
     if (RTG_PROFILE_COPY) {
         if (completion_signal.handle == 0) {
             fprintf(stderr, "RTG Tracer: hsa_amd_memory_async_copy no signal\n");
@@ -1685,7 +1702,7 @@ hsa_status_t hsa_amd_memory_async_copy(void* dst, hsa_agent_t dst_agent, const v
                 direction = D2D;
                 agent_to_use = src_agent;
             }
-            ++RTG::host_count_signals;
+            ++RTG::gs_host_count_signals;
             hsa_signal_t new_signal;
             hsa_status_t status = gs_OrigCoreApiTable.hsa_signal_create_fn(1, 0, nullptr, &new_signal);
             if (status != HSA_STATUS_SUCCESS) {
@@ -1694,7 +1711,7 @@ hsa_status_t hsa_amd_memory_async_copy(void* dst, hsa_agent_t dst_agent, const v
             }
             hsa_queue_t *queue = get_agent_signal_queue(agent_to_use);
             uint64_t index = submit_to_signal_queue(queue, new_signal, completion_signal);
-            pool.push(SignalWaiter, new SignalCallbackData(queue, agent_to_use, new_signal, completion_signal, false, num_dep_signals, dep_signals, size, direction, index));
+            gs_pool.push(SignalWaiter, new SignalCallbackData(queue, agent_to_use, new_signal, completion_signal, false, num_dep_signals, dep_signals, size, direction, index));
             TRACE(dst, dst_agent, src, src_agent, size, num_dep_signals, dep_signals, completion_signal);
             return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_memory_async_copy_fn(dst, dst_agent, src, src_agent, size, num_dep_signals, dep_signals, new_signal));
         }
@@ -1706,14 +1723,14 @@ hsa_status_t hsa_amd_memory_async_copy(void* dst, hsa_agent_t dst_agent, const v
 
 // Mirrors Amd Extension Apis
 hsa_status_t hsa_amd_memory_async_copy_rect(const hsa_pitched_ptr_t* dst, const hsa_dim3_t* dst_offset, const hsa_pitched_ptr_t* src, const hsa_dim3_t* src_offset, const hsa_dim3_t* range, hsa_agent_t copy_agent, hsa_amd_copy_direction_t dir, uint32_t num_dep_signals, const hsa_signal_t* dep_signals, hsa_signal_t completion_signal) {
-    ++RTG::host_count_copies;
+    ++RTG::gs_host_count_copies;
     if (RTG_PROFILE_COPY) {
         if (completion_signal.handle == 0) {
             fprintf(stderr, "RTG Tracer: hsa_amd_memory_async_copy_rect no signal\n");
         }
         else {
             if (agent_type(copy_agent) != HSA_DEVICE_TYPE_CPU) {
-                ++RTG::host_count_signals;
+                ++RTG::gs_host_count_signals;
                 hsa_signal_t new_signal;
                 hsa_status_t status = gs_OrigCoreApiTable.hsa_signal_create_fn(1, 0, nullptr, &new_signal);
                 if (status != HSA_STATUS_SUCCESS) {
@@ -1722,7 +1739,7 @@ hsa_status_t hsa_amd_memory_async_copy_rect(const hsa_pitched_ptr_t* dst, const 
                 }
                 hsa_queue_t *queue = get_agent_signal_queue(copy_agent);
                 uint64_t index = submit_to_signal_queue(queue, new_signal, completion_signal);
-                pool.push(SignalWaiter, new SignalCallbackData(queue, copy_agent, new_signal, completion_signal, false, num_dep_signals, dep_signals, range->x*range->y, dir, index));
+                gs_pool.push(SignalWaiter, new SignalCallbackData(queue, copy_agent, new_signal, completion_signal, false, num_dep_signals, dep_signals, range->x*range->y, dir, index));
                 TRACE(dst, dst_offset, src, src_offset, range, copy_agent, dir, num_dep_signals, dep_signals, completion_signal);
                 return gs_OrigExtApiTable.hsa_amd_memory_async_copy_rect_fn(dst, dst_offset, src, src_offset, range, copy_agent, dir, num_dep_signals, dep_signals, new_signal);
             }
@@ -1763,7 +1780,7 @@ hsa_status_t hsa_amd_memory_lock(void* host_ptr, size_t size, hsa_agent_t* agent
     return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_memory_lock_fn(host_ptr, size, agents, num_agent, agent_ptr));
 }
 
-#if ENABLE_HSA_AMD_MEMORY_LOCK_TO_POOL
+#if RTG_ENABLE_HSA_AMD_MEMORY_LOCK_TO_POOL
 // Mirrors Amd Extension Apis
 hsa_status_t hsa_amd_memory_lock_to_pool(void* host_ptr, size_t size, hsa_agent_t* agents, int num_agent, hsa_amd_memory_pool_t pool, uint32_t flags, void** agent_ptr) {
     TRACE(host_ptr, size, agent_ptr, num_agent, pool, flags, agent_ptr);
@@ -1914,10 +1931,10 @@ static void InitAmdExtTable(AmdExtTable* table) {
     table->hsa_amd_queue_intercept_register_fn = RTG::hsa_amd_queue_intercept_register;
     table->hsa_amd_queue_set_priority_fn = RTG::hsa_amd_queue_set_priority;
     table->hsa_amd_memory_async_copy_rect_fn = RTG::hsa_amd_memory_async_copy_rect;
-#if ENABLE_HSA_AMD_RUNTIME_QUEUE_CREATE_REGISTER
+#if RTG_ENABLE_HSA_AMD_RUNTIME_QUEUE_CREATE_REGISTER
     table->hsa_amd_runtime_queue_create_register_fn = RTG::hsa_amd_runtime_queue_create_register;
 #endif
-#if ENABLE_HSA_AMD_MEMORY_LOCK_TO_POOL
+#if RTG_ENABLE_HSA_AMD_MEMORY_LOCK_TO_POOL
     table->hsa_amd_memory_lock_to_pool_fn = RTG::hsa_amd_memory_lock_to_pool;
 #endif
 }
@@ -1954,7 +1971,7 @@ static void InitEnabledTable(std::string what_to_trace, std::string what_not_to_
         }
         else {
             // otherwise, go through entire map and look for matches
-            for (auto &&kv : enabled_map) {
+            for (auto &&kv : gs_hsa_enabled_map) {
                 if (kv.first.find(s) != std::string::npos) {
                     kv.second = true;
                 }
@@ -1963,7 +1980,7 @@ static void InitEnabledTable(std::string what_to_trace, std::string what_not_to_
     }
     tokens = split(what_not_to_trace, ',');
     for (auto s : tokens) {
-        for (auto &&kv : enabled_map) {
+        for (auto &&kv : gs_hsa_enabled_map) {
             if (kv.first.find(s) != std::string::npos) {
                 kv.second = false;
             }
@@ -1973,258 +1990,235 @@ static void InitEnabledTable(std::string what_to_trace, std::string what_not_to_
 
 static void InitEnabledTableCore(bool value) {
     // Initialize function pointers for Hsa Core Runtime Api's
-    enabled_map["hsa_init"] = value;
-    //enabled_map["hsa_shut_down"] = value;
-    enabled_map["hsa_system_get_info"] = value;
-    enabled_map["hsa_system_extension_supported"] = value;
-    enabled_map["hsa_system_get_extension_table"] = value;
-    enabled_map["hsa_iterate_agents"] = value;
-    enabled_map["hsa_agent_get_info"] = value;
-    enabled_map["hsa_agent_get_exception_policies"] = value;
-    enabled_map["hsa_agent_extension_supported"] = value;
-    enabled_map["hsa_queue_create"] = value;
-    enabled_map["hsa_soft_queue_create"] = value;
-    enabled_map["hsa_queue_destroy"] = value;
-    enabled_map["hsa_queue_inactivate"] = value;
-    enabled_map["hsa_queue_load_read_index_scacquire"] = value;
-    enabled_map["hsa_queue_load_read_index_relaxed"] = value;
-    enabled_map["hsa_queue_load_write_index_scacquire"] = value;
-    enabled_map["hsa_queue_load_write_index_relaxed"] = value;
-    enabled_map["hsa_queue_store_write_index_relaxed"] = value;
-    enabled_map["hsa_queue_store_write_index_screlease"] = value;
-    enabled_map["hsa_queue_cas_write_index_scacq_screl"] = value;
-    enabled_map["hsa_queue_cas_write_index_scacquire"] = value;
-    enabled_map["hsa_queue_cas_write_index_relaxed"] = value;
-    enabled_map["hsa_queue_cas_write_index_screlease"] = value;
-    enabled_map["hsa_queue_add_write_index_scacq_screl"] = value;
-    enabled_map["hsa_queue_add_write_index_scacquire"] = value;
-    enabled_map["hsa_queue_add_write_index_relaxed"] = value;
-    enabled_map["hsa_queue_add_write_index_screlease"] = value;
-    enabled_map["hsa_queue_store_read_index_relaxed"] = value;
-    enabled_map["hsa_queue_store_read_index_screlease"] = value;
-    enabled_map["hsa_agent_iterate_regions"] = value;
-    enabled_map["hsa_region_get_info"] = value;
-    enabled_map["hsa_memory_register"] = value;
-    enabled_map["hsa_memory_deregister"] = value;
-    enabled_map["hsa_memory_allocate"] = value;
-    enabled_map["hsa_memory_free"] = value;
-    enabled_map["hsa_memory_copy"] = value;
-    enabled_map["hsa_memory_assign_agent"] = value;
-    enabled_map["hsa_signal_create"] = value;
-    enabled_map["hsa_signal_destroy"] = value;
-    enabled_map["hsa_signal_load_relaxed"] = value;
-    enabled_map["hsa_signal_load_scacquire"] = value;
-    enabled_map["hsa_signal_store_relaxed"] = value;
-    enabled_map["hsa_signal_store_screlease"] = value;
-    enabled_map["hsa_signal_wait_relaxed"] = value;
-    enabled_map["hsa_signal_wait_scacquire"] = value;
-    enabled_map["hsa_signal_and_relaxed"] = value;
-    enabled_map["hsa_signal_and_scacquire"] = value;
-    enabled_map["hsa_signal_and_screlease"] = value;
-    enabled_map["hsa_signal_and_scacq_screl"] = value;
-    enabled_map["hsa_signal_or_relaxed"] = value;
-    enabled_map["hsa_signal_or_scacquire"] = value;
-    enabled_map["hsa_signal_or_screlease"] = value;
-    enabled_map["hsa_signal_or_scacq_screl"] = value;
-    enabled_map["hsa_signal_xor_relaxed"] = value;
-    enabled_map["hsa_signal_xor_scacquire"] = value;
-    enabled_map["hsa_signal_xor_screlease"] = value;
-    enabled_map["hsa_signal_xor_scacq_screl"] = value;
-    enabled_map["hsa_signal_exchange_relaxed"] = value;
-    enabled_map["hsa_signal_exchange_scacquire"] = value;
-    enabled_map["hsa_signal_exchange_screlease"] = value;
-    enabled_map["hsa_signal_exchange_scacq_screl"] = value;
-    enabled_map["hsa_signal_add_relaxed"] = value;
-    enabled_map["hsa_signal_add_scacquire"] = value;
-    enabled_map["hsa_signal_add_screlease"] = value;
-    enabled_map["hsa_signal_add_scacq_screl"] = value;
-    enabled_map["hsa_signal_subtract_relaxed"] = value;
-    enabled_map["hsa_signal_subtract_scacquire"] = value;
-    enabled_map["hsa_signal_subtract_screlease"] = value;
-    enabled_map["hsa_signal_subtract_scacq_screl"] = value;
-    enabled_map["hsa_signal_cas_relaxed"] = value;
-    enabled_map["hsa_signal_cas_scacquire"] = value;
-    enabled_map["hsa_signal_cas_screlease"] = value;
-    enabled_map["hsa_signal_cas_scacq_screl"] = value;
+    gs_hsa_enabled_map["hsa_init"] = value;
+    //gs_hsa_enabled_map["hsa_shut_down"] = value;
+    gs_hsa_enabled_map["hsa_system_get_info"] = value;
+    gs_hsa_enabled_map["hsa_system_extension_supported"] = value;
+    gs_hsa_enabled_map["hsa_system_get_extension_table"] = value;
+    gs_hsa_enabled_map["hsa_iterate_agents"] = value;
+    gs_hsa_enabled_map["hsa_agent_get_info"] = value;
+    gs_hsa_enabled_map["hsa_agent_get_exception_policies"] = value;
+    gs_hsa_enabled_map["hsa_agent_extension_supported"] = value;
+    gs_hsa_enabled_map["hsa_queue_create"] = value;
+    gs_hsa_enabled_map["hsa_soft_queue_create"] = value;
+    gs_hsa_enabled_map["hsa_queue_destroy"] = value;
+    gs_hsa_enabled_map["hsa_queue_inactivate"] = value;
+    gs_hsa_enabled_map["hsa_queue_load_read_index_scacquire"] = value;
+    gs_hsa_enabled_map["hsa_queue_load_read_index_relaxed"] = value;
+    gs_hsa_enabled_map["hsa_queue_load_write_index_scacquire"] = value;
+    gs_hsa_enabled_map["hsa_queue_load_write_index_relaxed"] = value;
+    gs_hsa_enabled_map["hsa_queue_store_write_index_relaxed"] = value;
+    gs_hsa_enabled_map["hsa_queue_store_write_index_screlease"] = value;
+    gs_hsa_enabled_map["hsa_queue_cas_write_index_scacq_screl"] = value;
+    gs_hsa_enabled_map["hsa_queue_cas_write_index_scacquire"] = value;
+    gs_hsa_enabled_map["hsa_queue_cas_write_index_relaxed"] = value;
+    gs_hsa_enabled_map["hsa_queue_cas_write_index_screlease"] = value;
+    gs_hsa_enabled_map["hsa_queue_add_write_index_scacq_screl"] = value;
+    gs_hsa_enabled_map["hsa_queue_add_write_index_scacquire"] = value;
+    gs_hsa_enabled_map["hsa_queue_add_write_index_relaxed"] = value;
+    gs_hsa_enabled_map["hsa_queue_add_write_index_screlease"] = value;
+    gs_hsa_enabled_map["hsa_queue_store_read_index_relaxed"] = value;
+    gs_hsa_enabled_map["hsa_queue_store_read_index_screlease"] = value;
+    gs_hsa_enabled_map["hsa_agent_iterate_regions"] = value;
+    gs_hsa_enabled_map["hsa_region_get_info"] = value;
+    gs_hsa_enabled_map["hsa_memory_register"] = value;
+    gs_hsa_enabled_map["hsa_memory_deregister"] = value;
+    gs_hsa_enabled_map["hsa_memory_allocate"] = value;
+    gs_hsa_enabled_map["hsa_memory_free"] = value;
+    gs_hsa_enabled_map["hsa_memory_copy"] = value;
+    gs_hsa_enabled_map["hsa_memory_assign_agent"] = value;
+    gs_hsa_enabled_map["hsa_signal_create"] = value;
+    gs_hsa_enabled_map["hsa_signal_destroy"] = value;
+    gs_hsa_enabled_map["hsa_signal_load_relaxed"] = value;
+    gs_hsa_enabled_map["hsa_signal_load_scacquire"] = value;
+    gs_hsa_enabled_map["hsa_signal_store_relaxed"] = value;
+    gs_hsa_enabled_map["hsa_signal_store_screlease"] = value;
+    gs_hsa_enabled_map["hsa_signal_wait_relaxed"] = value;
+    gs_hsa_enabled_map["hsa_signal_wait_scacquire"] = value;
+    gs_hsa_enabled_map["hsa_signal_and_relaxed"] = value;
+    gs_hsa_enabled_map["hsa_signal_and_scacquire"] = value;
+    gs_hsa_enabled_map["hsa_signal_and_screlease"] = value;
+    gs_hsa_enabled_map["hsa_signal_and_scacq_screl"] = value;
+    gs_hsa_enabled_map["hsa_signal_or_relaxed"] = value;
+    gs_hsa_enabled_map["hsa_signal_or_scacquire"] = value;
+    gs_hsa_enabled_map["hsa_signal_or_screlease"] = value;
+    gs_hsa_enabled_map["hsa_signal_or_scacq_screl"] = value;
+    gs_hsa_enabled_map["hsa_signal_xor_relaxed"] = value;
+    gs_hsa_enabled_map["hsa_signal_xor_scacquire"] = value;
+    gs_hsa_enabled_map["hsa_signal_xor_screlease"] = value;
+    gs_hsa_enabled_map["hsa_signal_xor_scacq_screl"] = value;
+    gs_hsa_enabled_map["hsa_signal_exchange_relaxed"] = value;
+    gs_hsa_enabled_map["hsa_signal_exchange_scacquire"] = value;
+    gs_hsa_enabled_map["hsa_signal_exchange_screlease"] = value;
+    gs_hsa_enabled_map["hsa_signal_exchange_scacq_screl"] = value;
+    gs_hsa_enabled_map["hsa_signal_add_relaxed"] = value;
+    gs_hsa_enabled_map["hsa_signal_add_scacquire"] = value;
+    gs_hsa_enabled_map["hsa_signal_add_screlease"] = value;
+    gs_hsa_enabled_map["hsa_signal_add_scacq_screl"] = value;
+    gs_hsa_enabled_map["hsa_signal_subtract_relaxed"] = value;
+    gs_hsa_enabled_map["hsa_signal_subtract_scacquire"] = value;
+    gs_hsa_enabled_map["hsa_signal_subtract_screlease"] = value;
+    gs_hsa_enabled_map["hsa_signal_subtract_scacq_screl"] = value;
+    gs_hsa_enabled_map["hsa_signal_cas_relaxed"] = value;
+    gs_hsa_enabled_map["hsa_signal_cas_scacquire"] = value;
+    gs_hsa_enabled_map["hsa_signal_cas_screlease"] = value;
+    gs_hsa_enabled_map["hsa_signal_cas_scacq_screl"] = value;
 
     //===--- Instruction Set Architecture -----------------------------------===//
 
-    enabled_map["hsa_isa_from_name"] = value;
+    gs_hsa_enabled_map["hsa_isa_from_name"] = value;
     // Deprecated since v1.1.
-    enabled_map["hsa_isa_get_info"] = value;
+    gs_hsa_enabled_map["hsa_isa_get_info"] = value;
     // Deprecated since v1.1.
-    enabled_map["hsa_isa_compatible"] = value;
+    gs_hsa_enabled_map["hsa_isa_compatible"] = value;
 
     //===--- Code Objects (deprecated) --------------------------------------===//
 
     // Deprecated since v1.1.
-    enabled_map["hsa_code_object_serialize"] = value;
+    gs_hsa_enabled_map["hsa_code_object_serialize"] = value;
     // Deprecated since v1.1.
-    enabled_map["hsa_code_object_deserialize"] = value;
+    gs_hsa_enabled_map["hsa_code_object_deserialize"] = value;
     // Deprecated since v1.1.
-    enabled_map["hsa_code_object_destroy"] = value;
+    gs_hsa_enabled_map["hsa_code_object_destroy"] = value;
     // Deprecated since v1.1.
-    enabled_map["hsa_code_object_get_info"] = value;
+    gs_hsa_enabled_map["hsa_code_object_get_info"] = value;
     // Deprecated since v1.1.
-    enabled_map["hsa_code_object_get_symbol"] = value;
+    gs_hsa_enabled_map["hsa_code_object_get_symbol"] = value;
     // Deprecated since v1.1.
-    enabled_map["hsa_code_symbol_get_info"] = value;
+    gs_hsa_enabled_map["hsa_code_symbol_get_info"] = value;
     // Deprecated since v1.1.
-    enabled_map["hsa_code_object_iterate_symbols"] = value;
+    gs_hsa_enabled_map["hsa_code_object_iterate_symbols"] = value;
 
     //===--- Executable -----------------------------------------------------===//
 
     // Deprecated since v1.1.
-    enabled_map["hsa_executable_create"] = value;
-    enabled_map["hsa_executable_destroy"] = value;
+    gs_hsa_enabled_map["hsa_executable_create"] = value;
+    gs_hsa_enabled_map["hsa_executable_destroy"] = value;
     // Deprecated since v1.1.
-    enabled_map["hsa_executable_load_code_object"] = value;
-    enabled_map["hsa_executable_freeze"] = value;
-    enabled_map["hsa_executable_get_info"] = value;
-    enabled_map["hsa_executable_global_variable_define"] = value;
-    enabled_map["hsa_executable_agent_global_variable_define"] = value;
-    enabled_map["hsa_executable_readonly_variable_define"] = value;
-    enabled_map["hsa_executable_validate"] = value;
+    gs_hsa_enabled_map["hsa_executable_load_code_object"] = value;
+    gs_hsa_enabled_map["hsa_executable_freeze"] = value;
+    gs_hsa_enabled_map["hsa_executable_get_info"] = value;
+    gs_hsa_enabled_map["hsa_executable_global_variable_define"] = value;
+    gs_hsa_enabled_map["hsa_executable_agent_global_variable_define"] = value;
+    gs_hsa_enabled_map["hsa_executable_readonly_variable_define"] = value;
+    gs_hsa_enabled_map["hsa_executable_validate"] = value;
     // Deprecated since v1.1.
-    enabled_map["hsa_executable_get_symbol"] = value;
-    enabled_map["hsa_executable_symbol_get_info"] = value;
+    gs_hsa_enabled_map["hsa_executable_get_symbol"] = value;
+    gs_hsa_enabled_map["hsa_executable_symbol_get_info"] = value;
     // Deprecated since v1.1.
-    enabled_map["hsa_executable_iterate_symbols"] = value;
+    gs_hsa_enabled_map["hsa_executable_iterate_symbols"] = value;
 
     //===--- Runtime Notifications ------------------------------------------===//
 
-    enabled_map["hsa_status_string"] = value;
+    gs_hsa_enabled_map["hsa_status_string"] = value;
 
     // Start HSA v1.1 additions
-    enabled_map["hsa_extension_get_name"] = value;
-    enabled_map["hsa_system_major_extension_supported"] = value;
-    enabled_map["hsa_system_get_major_extension_table"] = value;
-    enabled_map["hsa_agent_major_extension_supported"] = value;
-    enabled_map["hsa_cache_get_info"] = value;
-    enabled_map["hsa_agent_iterate_caches"] = value;
+    gs_hsa_enabled_map["hsa_extension_get_name"] = value;
+    gs_hsa_enabled_map["hsa_system_major_extension_supported"] = value;
+    gs_hsa_enabled_map["hsa_system_get_major_extension_table"] = value;
+    gs_hsa_enabled_map["hsa_agent_major_extension_supported"] = value;
+    gs_hsa_enabled_map["hsa_cache_get_info"] = value;
+    gs_hsa_enabled_map["hsa_agent_iterate_caches"] = value;
     // Silent store optimization is present in all signal ops when no agents are sleeping.
-    enabled_map["hsa_signal_store_relaxed"] = value;
-    enabled_map["hsa_signal_store_screlease"] = value;
-    enabled_map["hsa_signal_group_create"] = value;
-    enabled_map["hsa_signal_group_destroy"] = value;
-    enabled_map["hsa_signal_group_wait_any_scacquire"] = value;
-    enabled_map["hsa_signal_group_wait_any_relaxed"] = value;
+    gs_hsa_enabled_map["hsa_signal_store_relaxed"] = value;
+    gs_hsa_enabled_map["hsa_signal_store_screlease"] = value;
+    gs_hsa_enabled_map["hsa_signal_group_create"] = value;
+    gs_hsa_enabled_map["hsa_signal_group_destroy"] = value;
+    gs_hsa_enabled_map["hsa_signal_group_wait_any_scacquire"] = value;
+    gs_hsa_enabled_map["hsa_signal_group_wait_any_relaxed"] = value;
 
     //===--- Instruction Set Architecture - HSA v1.1 additions --------------===//
 
-    enabled_map["hsa_agent_iterate_isas"] = value;
-    enabled_map["hsa_isa_get_info_alt"] = value;
-    enabled_map["hsa_isa_get_exception_policies"] = value;
-    enabled_map["hsa_isa_get_round_method"] = value;
-    enabled_map["hsa_wavefront_get_info"] = value;
-    enabled_map["hsa_isa_iterate_wavefronts"] = value;
+    gs_hsa_enabled_map["hsa_agent_iterate_isas"] = value;
+    gs_hsa_enabled_map["hsa_isa_get_info_alt"] = value;
+    gs_hsa_enabled_map["hsa_isa_get_exception_policies"] = value;
+    gs_hsa_enabled_map["hsa_isa_get_round_method"] = value;
+    gs_hsa_enabled_map["hsa_wavefront_get_info"] = value;
+    gs_hsa_enabled_map["hsa_isa_iterate_wavefronts"] = value;
 
     //===--- Code Objects (deprecated) - HSA v1.1 additions -----------------===//
 
     // Deprecated since v1.1.
-    enabled_map["hsa_code_object_get_symbol_from_name"] = value;
+    gs_hsa_enabled_map["hsa_code_object_get_symbol_from_name"] = value;
 
     //===--- Executable - HSA v1.1 additions --------------------------------===//
 
-    enabled_map["hsa_code_object_reader_create_from_file"] = value;
-    enabled_map["hsa_code_object_reader_create_from_memory"] = value;
-    enabled_map["hsa_code_object_reader_destroy"] = value;
-    enabled_map["hsa_executable_create_alt"] = value;
-    enabled_map["hsa_executable_load_program_code_object"] = value;
-    enabled_map["hsa_executable_load_agent_code_object"] = value;
-    enabled_map["hsa_executable_validate_alt"] = value;
-    enabled_map["hsa_executable_get_symbol_by_name"] = value;
-    enabled_map["hsa_executable_iterate_agent_symbols"] = value;
-    enabled_map["hsa_executable_iterate_program_symbols"] = value;
+    gs_hsa_enabled_map["hsa_code_object_reader_create_from_file"] = value;
+    gs_hsa_enabled_map["hsa_code_object_reader_create_from_memory"] = value;
+    gs_hsa_enabled_map["hsa_code_object_reader_destroy"] = value;
+    gs_hsa_enabled_map["hsa_executable_create_alt"] = value;
+    gs_hsa_enabled_map["hsa_executable_load_program_code_object"] = value;
+    gs_hsa_enabled_map["hsa_executable_load_agent_code_object"] = value;
+    gs_hsa_enabled_map["hsa_executable_validate_alt"] = value;
+    gs_hsa_enabled_map["hsa_executable_get_symbol_by_name"] = value;
+    gs_hsa_enabled_map["hsa_executable_iterate_agent_symbols"] = value;
+    gs_hsa_enabled_map["hsa_executable_iterate_program_symbols"] = value;
 }
 
 static void InitEnabledTableExtApi(bool value) {
     // Initialize function pointers for Amd Extension Api's
-    enabled_map["hsa_amd_coherency_get_type"] = value;
-    enabled_map["hsa_amd_coherency_set_type"] = value;
-    enabled_map["hsa_amd_profiling_set_profiler_enabled"] = value;
-    enabled_map["hsa_amd_profiling_async_copy_enable"] = value;
-    enabled_map["hsa_amd_profiling_get_dispatch_time"] = value;
-    enabled_map["hsa_amd_profiling_get_async_copy_time"] = value;
-    enabled_map["hsa_amd_profiling_convert_tick_to_system_domain"] = value;
-    enabled_map["hsa_amd_signal_async_handler"] = value;
-    enabled_map["hsa_amd_async_function"] = value;
-    enabled_map["hsa_amd_signal_wait_any"] = value;
-    enabled_map["hsa_amd_queue_cu_set_mask"] = value;
-    enabled_map["hsa_amd_memory_pool_get_info"] = value;
-    enabled_map["hsa_amd_agent_iterate_memory_pools"] = value;
-    enabled_map["hsa_amd_memory_pool_allocate"] = value;
-    enabled_map["hsa_amd_memory_pool_free"] = value;
-    enabled_map["hsa_amd_memory_async_copy"] = value;
-    enabled_map["hsa_amd_agent_memory_pool_get_info"] = value;
-    enabled_map["hsa_amd_agents_allow_access"] = value;
-    enabled_map["hsa_amd_memory_pool_can_migrate"] = value;
-    enabled_map["hsa_amd_memory_migrate"] = value;
-    enabled_map["hsa_amd_memory_lock"] = value;
-    enabled_map["hsa_amd_memory_unlock"] = value;
-    enabled_map["hsa_amd_memory_fill"] = value;
-    enabled_map["hsa_amd_interop_map_buffer"] = value;
-    enabled_map["hsa_amd_interop_unmap_buffer"] = value;
-    enabled_map["hsa_amd_pointer_info"] = value;
-    enabled_map["hsa_amd_pointer_info_set_userdata"] = value;
-    enabled_map["hsa_amd_ipc_memory_create"] = value;
-    enabled_map["hsa_amd_ipc_memory_attach"] = value;
-    enabled_map["hsa_amd_ipc_memory_detach"] = value;
-    enabled_map["hsa_amd_signal_create"] = value;
-    enabled_map["hsa_amd_ipc_signal_create"] = value;
-    enabled_map["hsa_amd_ipc_signal_attach"] = value;
-    enabled_map["hsa_amd_register_system_event_handler"] = value;
-    enabled_map["hsa_amd_queue_intercept_create"] = value;
-    enabled_map["hsa_amd_queue_intercept_register"] = value;
-    enabled_map["hsa_amd_queue_set_priority"] = value;
-    enabled_map["hsa_amd_memory_async_copy_rect"] = value;
-#if ENABLE_HSA_AMD_RUNTIME_QUEUE_CREATE_REGISTER
-    enabled_map["hsa_amd_runtime_queue_create_register"] = value;
+    gs_hsa_enabled_map["hsa_amd_coherency_get_type"] = value;
+    gs_hsa_enabled_map["hsa_amd_coherency_set_type"] = value;
+    gs_hsa_enabled_map["hsa_amd_profiling_set_profiler_enabled"] = value;
+    gs_hsa_enabled_map["hsa_amd_profiling_async_copy_enable"] = value;
+    gs_hsa_enabled_map["hsa_amd_profiling_get_dispatch_time"] = value;
+    gs_hsa_enabled_map["hsa_amd_profiling_get_async_copy_time"] = value;
+    gs_hsa_enabled_map["hsa_amd_profiling_convert_tick_to_system_domain"] = value;
+    gs_hsa_enabled_map["hsa_amd_signal_async_handler"] = value;
+    gs_hsa_enabled_map["hsa_amd_async_function"] = value;
+    gs_hsa_enabled_map["hsa_amd_signal_wait_any"] = value;
+    gs_hsa_enabled_map["hsa_amd_queue_cu_set_mask"] = value;
+    gs_hsa_enabled_map["hsa_amd_memory_pool_get_info"] = value;
+    gs_hsa_enabled_map["hsa_amd_agent_iterate_memory_pools"] = value;
+    gs_hsa_enabled_map["hsa_amd_memory_pool_allocate"] = value;
+    gs_hsa_enabled_map["hsa_amd_memory_pool_free"] = value;
+    gs_hsa_enabled_map["hsa_amd_memory_async_copy"] = value;
+    gs_hsa_enabled_map["hsa_amd_agent_memory_pool_get_info"] = value;
+    gs_hsa_enabled_map["hsa_amd_agents_allow_access"] = value;
+    gs_hsa_enabled_map["hsa_amd_memory_pool_can_migrate"] = value;
+    gs_hsa_enabled_map["hsa_amd_memory_migrate"] = value;
+    gs_hsa_enabled_map["hsa_amd_memory_lock"] = value;
+    gs_hsa_enabled_map["hsa_amd_memory_unlock"] = value;
+    gs_hsa_enabled_map["hsa_amd_memory_fill"] = value;
+    gs_hsa_enabled_map["hsa_amd_interop_map_buffer"] = value;
+    gs_hsa_enabled_map["hsa_amd_interop_unmap_buffer"] = value;
+    gs_hsa_enabled_map["hsa_amd_pointer_info"] = value;
+    gs_hsa_enabled_map["hsa_amd_pointer_info_set_userdata"] = value;
+    gs_hsa_enabled_map["hsa_amd_ipc_memory_create"] = value;
+    gs_hsa_enabled_map["hsa_amd_ipc_memory_attach"] = value;
+    gs_hsa_enabled_map["hsa_amd_ipc_memory_detach"] = value;
+    gs_hsa_enabled_map["hsa_amd_signal_create"] = value;
+    gs_hsa_enabled_map["hsa_amd_ipc_signal_create"] = value;
+    gs_hsa_enabled_map["hsa_amd_ipc_signal_attach"] = value;
+    gs_hsa_enabled_map["hsa_amd_register_system_event_handler"] = value;
+    gs_hsa_enabled_map["hsa_amd_queue_intercept_create"] = value;
+    gs_hsa_enabled_map["hsa_amd_queue_intercept_register"] = value;
+    gs_hsa_enabled_map["hsa_amd_queue_set_priority"] = value;
+    gs_hsa_enabled_map["hsa_amd_memory_async_copy_rect"] = value;
+#if RTG_ENABLE_HSA_AMD_RUNTIME_QUEUE_CREATE_REGISTER
+    gs_hsa_enabled_map["hsa_amd_runtime_queue_create_register"] = value;
 #endif
-#if ENABLE_HSA_AMD_MEMORY_LOCK_TO_POOL
-    enabled_map["hsa_amd_memory_lock_to_pool"] = value;
+#if RTG_ENABLE_HSA_AMD_MEMORY_LOCK_TO_POOL
+    gs_hsa_enabled_map["hsa_amd_memory_lock_to_pool"] = value;
 #endif
 }
 
-static inline bool enabled_check(std::string func)
-{
-    return enabled_map[func];
-}
-
-// shorthands
-typedef hsa_ven_amd_aqlprofile_pfn_t pfn_t;
-typedef hsa_ven_amd_aqlprofile_event_t event_t;
-typedef hsa_ven_amd_aqlprofile_parameter_t parameter_t;
-typedef hsa_ven_amd_aqlprofile_profile_t profile_t;
-typedef hsa_ext_amd_aql_pm4_packet_t packet_t;
-typedef uint32_t packet_word_t;
-typedef uint64_t timestamp_t;
-static const packet_word_t header_type_mask = (1ul << HSA_PACKET_HEADER_WIDTH_TYPE) - 1;
-static const char* kernel_none_;
-
-#define CHECK_STATUS(msg, status) do {  \
-    if (status != HSA_STATUS_SUCCESS) { \
-        fprintf(stderr, msg);           \
-        abort();                        \
-    }                                   \
-} while (false)
-
-static hsa_status_t executable_symbols_cb(hsa_executable_t exec, hsa_executable_symbol_t symbol, void *data) {
+static hsa_status_t hsa_executable_symbols_cb(hsa_executable_t exec, hsa_executable_symbol_t symbol, void *data) {
     hsa_symbol_kind_t value = (hsa_symbol_kind_t)0;
     hsa_status_t status = gs_OrigCoreApiTable.hsa_executable_symbol_get_info_fn(symbol, HSA_EXECUTABLE_SYMBOL_INFO_TYPE, &value);
-    CHECK_STATUS("Error in getting symbol info", status);
+    RTG_HSA_CHECK_STATUS("Error in getting symbol info", status);
     if (value == HSA_SYMBOL_KIND_KERNEL) {
         uint64_t addr = 0;
         uint32_t len = 0;
         status = gs_OrigCoreApiTable.hsa_executable_symbol_get_info_fn(symbol, HSA_EXECUTABLE_SYMBOL_INFO_KERNEL_OBJECT, &addr);
-        CHECK_STATUS("Error in getting kernel object", status);
+        RTG_HSA_CHECK_STATUS("Error in getting kernel object", status);
         status = gs_OrigCoreApiTable.hsa_executable_symbol_get_info_fn(symbol, HSA_EXECUTABLE_SYMBOL_INFO_NAME_LENGTH, &len);
-        CHECK_STATUS("Error in getting name len", status);
+        RTG_HSA_CHECK_STATUS("Error in getting name len", status);
         char *name = new char[len + 1];
         status = gs_OrigCoreApiTable.hsa_executable_symbol_get_info_fn(symbol, HSA_EXECUTABLE_SYMBOL_INFO_NAME, name);
-        CHECK_STATUS("Error in getting kernel name", status);
+        RTG_HSA_CHECK_STATUS("Error in getting kernel name", status);
         name[len] = 0;
-        auto ret = symbols_map_->insert({addr, name});
+        auto ret = gs_symbols_map_->insert({addr, name});
         if (ret.second == false) {
             delete[] ret.first->second;
             ret.first->second = name;
@@ -2234,16 +2228,17 @@ static hsa_status_t executable_symbols_cb(hsa_executable_t exec, hsa_executable_
 }
 
 static hsa_status_t hsa_executable_freeze_interceptor(hsa_executable_t executable, const char *options) {
-    std::lock_guard<mutex_t> lck(kernel_name_mutex_);
-    if (symbols_map_ == NULL) symbols_map_ = new symbols_map_t;
-    hsa_status_t status = gs_OrigCoreApiTable.hsa_executable_iterate_symbols_fn(executable, executable_symbols_cb, NULL);
-    CHECK_STATUS("Error in iterating executable symbols", status);
+    std::lock_guard<mutex_t> lck(gs_kernel_name_mutex_);
+    if (gs_symbols_map_ == NULL) gs_symbols_map_ = new symbols_map_t;
+    hsa_status_t status = gs_OrigCoreApiTable.hsa_executable_iterate_symbols_fn(executable, hsa_executable_symbols_cb, NULL);
+    RTG_HSA_CHECK_STATUS("Error in iterating executable symbols", status);
     return gs_OrigCoreApiTable.hsa_executable_freeze_fn(executable, options);
 }
 
 static inline hsa_packet_type_t GetHeaderType(const packet_t* packet) {
+    static const packet_word_t cs_header_type_mask = (1ul << HSA_PACKET_HEADER_WIDTH_TYPE) - 1;
     const packet_word_t* header = reinterpret_cast<const packet_word_t*>(packet);
-    return static_cast<hsa_packet_type_t>((*header >> HSA_PACKET_HEADER_TYPE) & header_type_mask);
+    return static_cast<hsa_packet_type_t>((*header >> HSA_PACKET_HEADER_TYPE) & cs_header_type_mask);
 }
 
 static inline const amd_kernel_code_t* GetKernelCode(uint64_t kernel_object) {
@@ -2259,9 +2254,9 @@ static inline const amd_kernel_code_t* GetKernelCode(uint64_t kernel_object) {
 }
 
 static inline const char* GetKernelNameRef(uint64_t addr) {
-    std::lock_guard<mutex_t> lck(kernel_name_mutex_);
-    const auto it = symbols_map_->find(addr);
-    if (it == symbols_map_->end()) {
+    std::lock_guard<mutex_t> lck(gs_kernel_name_mutex_);
+    const auto it = gs_symbols_map_->find(addr);
+    if (it == gs_symbols_map_->end()) {
         fprintf(stderr, "RTG Tracer: kernel addr (0x%lx) is not found\n", addr);
         abort();
     }
@@ -2344,7 +2339,7 @@ static void intercept_callback(
         hsa_signal_t original_signal{0};
         bool owns_orig_signal = false;
 
-        ++host_count_signals;
+        ++gs_host_count_signals;
         hsa_status_t status = gs_OrigCoreApiTable.hsa_signal_create_fn(1, 0, nullptr, &new_signal);
         if (status != HSA_STATUS_SUCCESS) {
             fprintf(stderr, "RTG Tracer: failed to allocate signal\n");
@@ -2353,7 +2348,7 @@ static void intercept_callback(
 
         // Checking for dispatch packet type
         if (type == HSA_PACKET_TYPE_KERNEL_DISPATCH) {
-            ++RTG::host_count_dispatches;
+            ++RTG::gs_host_count_dispatches;
             const hsa_kernel_dispatch_packet_t* dispatch_packet =
                 reinterpret_cast<const hsa_kernel_dispatch_packet_t*>(packet);
 
@@ -2372,10 +2367,10 @@ static void intercept_callback(
                 }
             }
             const_cast<hsa_kernel_dispatch_packet_t*>(dispatch_packet)->completion_signal = new_signal;
-            pool.push(SignalWaiter, new SignalCallbackData(kernel_name, data_, new_signal, original_signal, owns_orig_signal, dispatch_packet));
+            gs_pool.push(SignalWaiter, new SignalCallbackData(kernel_name, data_, new_signal, original_signal, owns_orig_signal, dispatch_packet));
         }
         else if (type == HSA_PACKET_TYPE_BARRIER_AND || type == HSA_PACKET_TYPE_BARRIER_OR) {
-            ++RTG::host_count_barriers;
+            ++RTG::gs_host_count_barriers;
             const hsa_barrier_and_packet_t* barrier_packet =
                 reinterpret_cast<const hsa_barrier_and_packet_t*>(packet);
 
@@ -2389,7 +2384,7 @@ static void intercept_callback(
                 }
             }
             const_cast<hsa_barrier_and_packet_t*>(barrier_packet)->completion_signal = new_signal;
-            pool.push(SignalWaiter, new SignalCallbackData(data_, new_signal, original_signal, owns_orig_signal, barrier_packet));
+            gs_pool.push(SignalWaiter, new SignalCallbackData(data_, new_signal, original_signal, owns_orig_signal, barrier_packet));
         }
         else {
             fprintf(stderr, "RTG Tracer: unrecognized packet type %d\n", type);
@@ -2413,7 +2408,8 @@ static void intercept_callback(
 
 static void* hip_activity_callback(uint32_t cid, activity_record_t* record, const void* data, void* arg)
 {
-    return (hip_api_data_t*)hip_api_data[cid];
+    // The hip_api_data_t is returned from this activity callback; without it, the hip_api_callback does not fire.
+    return (hip_api_data_t*)gstl_hip_api_data[cid];
 }
 
 static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, void* arg)
@@ -2485,7 +2481,7 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
             }
         }
         else {
-            std::string &func = hip_api_names[cid];
+            std::string &func = gs_hip_api_names[cid];
             if (is_kernel) {
                 LOG_HIP_KERNEL
             }
@@ -2514,22 +2510,22 @@ static void* roctx_callback(uint32_t domain, uint32_t cid, const void* data_, vo
         LOG_ROCTX_MARK
     }
     else if (cid == ROCTX_API_ID_roctxRangePushA) {
-        roctx_stack.emplace_back(data->args.message, new_tick);
+        gstl_roctx_stack.emplace_back(data->args.message, new_tick);
     }
     else if (cid == ROCTX_API_ID_roctxRangePop) {
         int pid_ = pid();
         std::string tid_ = tid();
-        std::string msg = roctx_stack.back().message;
-        uint64_t tick_ = roctx_stack.back().tick;
+        std::string msg = gstl_roctx_stack.back().message;
+        uint64_t tick_ = gstl_roctx_stack.back().tick;
         uint64_t ticks = new_tick - tick_;
         LOG_ROCTX
     }
     else if (cid == ROCTX_API_ID_roctxRangeStartA) {
-        roctx_range.emplace(data->args.id, roctx_data_t{data->args.message,new_tick});
+        gstl_roctx_range.emplace(data->args.id, roctx_data_t{data->args.message,new_tick});
     }
     else if (cid == ROCTX_API_ID_roctxRangeStop) {
-        auto item = roctx_range.find(data->args.id);
-        if (item == roctx_range.end()) {
+        auto item = gstl_roctx_range.find(data->args.id);
+        if (item == gstl_roctx_range.end()) {
             fprintf(stderr, "RTG Tracer: invalid roctx range: %lu\n", data->args.id);
             exit(EXIT_FAILURE);
         }
@@ -2570,16 +2566,16 @@ extern "C" bool OnLoad(void *pTable,
 
     if (HCC_PROFILE) {
         fprintf(stderr, "RTG Tracer: HCC_PROFILE=2 mode\n");
-        RTG::stream = fopen(outname.c_str(), "w");
+        RTG::gs_stream = fopen(outname.c_str(), "w");
     }
     else {
         if (RTG_RPD) {
-            RTG::out = new RtgOutRpd;
+            RTG::gs_out = new RtgOutRpd;
         }
         else {
-            RTG::out = new RtgOutPrintf;
+            RTG::gs_out = new RtgOutPrintf;
         }
-        RTG::out->open(outname);
+        RTG::gs_out->open(outname);
 
         RTG::InitEnabledTable(RTG_HSA_API_FILTER, RTG_HSA_API_FILTER_OUT);
 
@@ -2589,7 +2585,7 @@ extern "C" bool OnLoad(void *pTable,
         for (int i=0; i<HIP_API_ID_NUMBER; ++i) {
             bool keep = false;
             std::string name = hip_api_name(i);
-            RTG::hip_api_names[i] = name;
+            RTG::gs_hip_api_names[i] = name;
             for (auto tok : tokens_keep) {
                 if (tok == "all" || name.find(tok) != std::string::npos) {
                     keep = true;
@@ -2629,34 +2625,34 @@ extern "C" void OnUnload()
 __attribute__((destructor)) static void destroy() {
     fprintf(stderr, "RTG Tracer: Destructing\n");
     if (RTG_PROFILE || RTG_PROFILE_COPY) {
-        fprintf(stderr, "RTG Tracer: host_count_dispatches=%u\n", LOAD(RTG::host_count_dispatches));
-        fprintf(stderr, "RTG Tracer:   cb_count_dispatches=%u\n", LOAD(RTG::cb_count_dispatches));
-        fprintf(stderr, "RTG Tracer:   host_count_barriers=%u\n", LOAD(RTG::host_count_barriers));
-        fprintf(stderr, "RTG Tracer:     cb_count_barriers=%u\n", LOAD(RTG::cb_count_barriers));
-        fprintf(stderr, "RTG Tracer:     host_count_copies=%u\n", LOAD(RTG::host_count_copies));
-        fprintf(stderr, "RTG Tracer:       cb_count_copies=%u\n", LOAD(RTG::cb_count_copies));
-        fprintf(stderr, "RTG Tracer:    host_count_signals=%u\n", LOAD(RTG::host_count_signals));
-        fprintf(stderr, "RTG Tracer:      cb_count_signals=%u\n", LOAD(RTG::cb_count_signals));
+        fprintf(stderr, "RTG Tracer: host_count_dispatches=%u\n", RTG::gs_host_count_dispatches.load());
+        fprintf(stderr, "RTG Tracer:   cb_count_dispatches=%u\n", RTG::gs_cb_count_dispatches.load());
+        fprintf(stderr, "RTG Tracer:   host_count_barriers=%u\n", RTG::gs_host_count_barriers.load());
+        fprintf(stderr, "RTG Tracer:     cb_count_barriers=%u\n", RTG::gs_cb_count_barriers.load());
+        fprintf(stderr, "RTG Tracer:     host_count_copies=%u\n", RTG::gs_host_count_copies.load());
+        fprintf(stderr, "RTG Tracer:       cb_count_copies=%u\n", RTG::gs_cb_count_copies.load());
+        fprintf(stderr, "RTG Tracer:    host_count_signals=%u\n", RTG::gs_host_count_signals.load());
+        fprintf(stderr, "RTG Tracer:      cb_count_signals=%u\n", RTG::gs_cb_count_signals.load());
     }
     for (int i=0; i<5; ++i) {
-        if (RTG::host_count_dispatches != RTG::cb_count_dispatches
-                || RTG::host_count_barriers != RTG::cb_count_barriers) {
+        if (RTG::gs_host_count_dispatches != RTG::gs_cb_count_dispatches
+                || RTG::gs_host_count_barriers != RTG::gs_cb_count_barriers) {
             fprintf(stderr, "RTG Tracer: not all callbacks have completed, waiting... dispatches %u vs %u barriers %u vs %u signals %u vs %u\n",
-                    LOAD(RTG::host_count_dispatches),
-                    LOAD(RTG::cb_count_dispatches),
-                    LOAD(RTG::host_count_barriers),
-                    LOAD(RTG::cb_count_barriers),
-                    LOAD(RTG::host_count_signals),
-                    LOAD(RTG::cb_count_signals)
+                    RTG::gs_host_count_dispatches.load(),
+                    RTG::gs_cb_count_dispatches.load(),
+                    RTG::gs_host_count_barriers.load(),
+                    RTG::gs_cb_count_barriers.load(),
+                    RTG::gs_host_count_signals.load(),
+                    RTG::gs_cb_count_signals.load()
             );
             sleep(2);
         }
     }
 
     if (HCC_PROFILE) {
-        fclose(RTG::stream);
+        fclose(RTG::gs_stream);
     }
     else {
-        RTG::out->close();
+        RTG::gs_out->close();
     }
 }
