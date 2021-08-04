@@ -24,10 +24,8 @@ struct TlsData {
 
     TlsData(FILE *stream) : stream(stream) {
         out.reserve(OUT_SIZE);
-        {
-            std::lock_guard<std::mutex> lock(the_mutex);
-            the_map[std::this_thread::get_id()] = this;
-        }
+        std::lock_guard<std::mutex> lock(the_mutex);
+        the_map[std::this_thread::get_id()] = this;
     }
 
     ~TlsData() {
@@ -37,33 +35,26 @@ struct TlsData {
     void push(const char *line) {
         out.push_back(line);
         if (out.size() >= OUT_SIZE) {
-            {
-                std::lock_guard<std::mutex> lock(the_mutex);
-                for (auto& the_line : out) {
-                    fprintf(stream, "%s", the_line);
-                }
-            }
-            out.clear();
-            out.reserve(OUT_SIZE);
+            flush();
         }
     }
 
     void flush() {
         std::lock_guard<std::mutex> lock(the_mutex);
-        for (auto& the_line : out) {
-            fprintf(stream, "%s", the_line);
+        for (size_t i=0; i<out.size(); ++i) {
+            fprintf(stream, "%s", out[i]);
+            delete [] out[i];
         }
-        fflush(stream);
+        out.clear();
+        out.reserve(OUT_SIZE);
     }
 
     static void flush_all(FILE *stream) {
-        std::lock_guard<std::mutex> lock(the_mutex);
+        // not precisely thread-safe, but I don't want to use a recursive mutex here
+        // another thread could be manipulating the_map, but probably not
         for (auto& keyval : the_map) {
-            for (auto& the_line : keyval.second->out) {
-                fprintf(stream, "%s", the_line);
-            }
+            keyval.second->flush();
         }
-        fflush(stream);
     }
 };
 
@@ -122,7 +113,7 @@ void RtgOutPrintf::hsa_host_dispatch_barrier(int pid, string tid, hsa_queue_t *q
     TlsData::Get(stream)->push(buf);
 }
 
-void RtgOutPrintf::hsa_dispatch_kernel(int pid, string tid, hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, string name)
+void RtgOutPrintf::hsa_dispatch_kernel(int pid, string tid, hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, string name, uint64_t correlation_id)
 {
     char *buf = new char[BUF_SIZE];
     check(snprintf(buf, BUF_SIZE, "HSA: pid:%d tid:%s dispatch queue:%lu agent:%lu signal:%lu name:'%s' start:%lu stop:%lu id:%lu\n",

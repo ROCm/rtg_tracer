@@ -95,12 +95,14 @@ void RtgOutRpd::hsa_host_dispatch_barrier(int pid, string tid, hsa_queue_t *queu
     exit(EXIT_FAILURE);
 }
 
-void RtgOutRpd::hsa_dispatch_kernel(int pid, string tid, hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, string name)
+static std::atomic<int> counter;
+
+void RtgOutRpd::hsa_dispatch_kernel(int pid, string tid, hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, string name, uint64_t correlation_id)
 {
     OpTable::row row;
-    row.gpuId = 0; // TODO
-    row.queueId = 0; // TODO
-    row.sequenceId = 0;
+    row.gpuId = agent.handle; // TODO
+    row.queueId = queue->id; // TODO
+    row.sequenceId = counter++;
     //row.completionSignal = "";	//strcpy
     strncpy(row.completionSignal, "", 18);
     row.start = start;
@@ -108,7 +110,7 @@ void RtgOutRpd::hsa_dispatch_kernel(int pid, string tid, hsa_queue_t *queue, hsa
     //row.description_id = EMPTY_STRING_ID;
     row.description_id = s_stringTable->getOrCreate(name.c_str());
     row.opType_id = s_stringTable->getOrCreate("KernelExecution");
-    row.api_id = 0;
+    row.api_id = correlation_id;
     s_opTable->insert(row);
 
     //fprintf(stderr, "RtgOutRpd::hsa_dispatch_kernel NOT IMPLEMENTED\n");
@@ -117,6 +119,21 @@ void RtgOutRpd::hsa_dispatch_kernel(int pid, string tid, hsa_queue_t *queue, hsa
 
 void RtgOutRpd::hsa_dispatch_barrier(int pid, string tid, hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, lu dep[5])
 {
+    OpTable::row row;
+    row.gpuId = agent.handle; // TODO
+    row.queueId = queue->id; // TODO
+    row.sequenceId = counter++;
+    //row.completionSignal = "";	//strcpy
+    strncpy(row.completionSignal, "", 18);
+    row.start = start;
+    row.end = start+stop;
+    //row.description_id = EMPTY_STRING_ID;
+    row.description_id = s_stringTable->getOrCreate("Barrier");
+    row.opType_id = s_stringTable->getOrCreate("Barrier");
+    row.api_id = 0;
+    //row.api_id = row.sequenceId;
+    s_opTable->insert(row);
+
     //fprintf(stderr, "RtgOutRpd::hsa_dispatch_barrier NOT IMPLEMENTED\n");
     //exit(EXIT_FAILURE);
 }
@@ -149,15 +166,15 @@ void RtgOutRpd::hip_api(int pid, string tid, string func_andor_args, int status,
     row.end = tick+ticks;
     row.apiName_id = s_stringTable->getOrCreate(func.c_str());
     row.args_id = EMPTY_STRING_ID;
-    row.phase = ACTIVITY_API_PHASE_ENTER;
+    row.phase = 0;
     if (has_args) {
         row.args_id = s_stringTable->getOrCreate(args.c_str());
     }
     row.api_id = correlation_id;
 
     s_apiTable->insert(row);
-    row.phase = 1;
-    s_apiTable->insert(row);
+    //row.phase = 1;
+    //s_apiTable->insert(row);
 }
 
 void RtgOutRpd::hip_api_kernel(int pid, string tid, string func_andor_args, string kernname, int status, lu tick, lu ticks, uint64_t correlation_id)
@@ -177,8 +194,8 @@ void RtgOutRpd::roctx(int pid, string tid, uint64_t correlation_id, string messa
     row.phase = 0;
     row.api_id = correlation_id;
     s_apiTable->insert(row);
-    row.phase = 1;
-    s_apiTable->insert(row);
+    //row.phase = 1;
+    //s_apiTable->insert(row);
 }
 
 void RtgOutRpd::roctx_mark(int pid, string tid, uint64_t correlation_id, string message, lu tick)

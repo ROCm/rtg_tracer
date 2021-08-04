@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <iomanip>
+#include <list>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -80,11 +81,21 @@ struct roctx_data_t {
 // for tracking agents and streams with 0-based index.
 class AgentInfo {
 public:
+    hsa_agent_t get_agent() { return agent; }
     int get_agent_index() { return index; }
     int get_queue_index(hsa_queue_t *queue);
     hsa_queue_t* get_signal_queue(); // this is the agent's signal_queue, not one of the the per-queue signal queues
 
-    static AgentInfo* Instance(hsa_agent_t agent);
+    struct Op {
+        std::string name;
+        uint64_t id; // correlation_id
+    };
+
+    void insert_op(const Op &op);
+    uint64_t find_op(const std::string &name);
+
+    static AgentInfo* Get(hsa_agent_t agent);
+    static AgentInfo* Get(int index);
     static void get_agent_queue_indexes(hsa_agent_t agent, hsa_queue_t *queue, int &agent_index, int &queue_index);
 
     static void Init(const std::vector<hsa_agent_t> &agents);
@@ -96,7 +107,9 @@ private:
     int index;
     hsa_queue_t *signal_queue;
     std::unordered_map<uint64_t, int> queue_index_map;
-    mutex_t mutex;
+    mutex_t queue_index_mutex;
+    mutex_t op_mutex;
+    std::list<Op> op_list;
     static std::unordered_map<uint64_t, AgentInfo*> s_agent_info_map;
     static std::vector<AgentInfo*> s_agent_info;
 };
@@ -186,12 +199,12 @@ AgentInfo::AgentInfo(hsa_agent_t agent, int index)
     , index{index}
     , signal_queue{nullptr}
     , queue_index_map{}
-    , mutex{}
+    , queue_index_mutex{}
 {
 }
 
 int AgentInfo::get_queue_index(hsa_queue_t *queue) {
-    std::lock_guard<mutex_t> lock(mutex);
+    std::lock_guard<mutex_t> lock(queue_index_mutex);
     if (queue_index_map.count(queue->id) == 0) {
         queue_index_map[queue->id] = queue_index_map.size() + 1;
     }
@@ -223,13 +236,48 @@ hsa_queue_t* AgentInfo::get_signal_queue() {
     return signal_queue;
 }
 
-AgentInfo* AgentInfo::Instance(hsa_agent_t agent) {
+void AgentInfo::insert_op(const Op &op)
+{
+    std::lock_guard<mutex_t> lock(op_mutex);
+    op_list.emplace_back(op);
+}
+
+uint64_t AgentInfo::find_op(const std::string &name)
+{
+    constexpr uint64_t not_found = std::numeric_limits<uint64_t>::max();
+    uint64_t id = not_found;
+
+    {
+        std::lock_guard<mutex_t> lock(op_mutex);
+        auto it = op_list.begin();
+        for (; it != op_list.end(); ++it) {
+            if (it->name == name) {
+                id = it->id;
+                op_list.erase(it);
+                break;
+            }
+        }
+    }
+
+    if (id == not_found) {
+        fprintf(stderr, "RTG Tracer: correlation id error for '%s'\n", name.c_str());
+        exit(EXIT_FAILURE);
+    }
+
+    return id;
+}
+
+AgentInfo* AgentInfo::Get(hsa_agent_t agent) {
     return s_agent_info_map[agent.handle];
+}
+
+AgentInfo* AgentInfo::Get(int index) {
+    return s_agent_info[index];
 }
 
 void AgentInfo::get_agent_queue_indexes(hsa_agent_t agent, hsa_queue_t *queue, int &agent_index, int &queue_index)
 {
-    auto *info = AgentInfo::Instance(agent);
+    auto *info = AgentInfo::Get(agent);
     agent_index = info->get_agent_index();
     queue_index = info->get_queue_index(queue);
 }
@@ -441,9 +489,9 @@ enum CopyDirection {
 
 struct SignalCallbackData
 {
-    SignalCallbackData(std::string name, InterceptCallbackData *data, hsa_signal_t signal, hsa_signal_t orig_signal, bool owns_orig_signal, const hsa_kernel_dispatch_packet_t *packet)
+    SignalCallbackData(std::string name, uint64_t cid, InterceptCallbackData *data, hsa_signal_t signal, hsa_signal_t orig_signal, bool owns_orig_signal, const hsa_kernel_dispatch_packet_t *packet)
         : name(name), data(data), queue(data->queue), agent(data->agent), signal(signal), orig_signal(orig_signal), owns_orig_signal(owns_orig_signal), bytes(0), direction(0),
-            is_copy(false), is_barrier(false), dep{0,0,0,0,0}, id_(gs_did++), seq_num_(data->seq_index++)
+            is_copy(false), is_barrier(false), dep{0,0,0,0,0}, id_(gs_did++), seq_num_(data->seq_index++), cid(cid)
     {
         if (RTG_HSA_HOST_DISPATCH) {
             LOG_DISPATCH_HOST(pid(), tid(), queue, agent, signal, tick(), id_, name, packet);
@@ -462,7 +510,9 @@ struct SignalCallbackData
                   (num_dep_signals>4 ? dep_signals[4].handle : 0)
             },
             id_(0),
-            seq_num_(seq)
+            seq_num_(seq),
+            cid(0)
+
     {}
 
     SignalCallbackData(InterceptCallbackData *data, hsa_signal_t signal, hsa_signal_t orig_signal, bool owns_orig_signal, const hsa_barrier_and_packet_t* packet)
@@ -477,7 +527,8 @@ struct SignalCallbackData
                   (packet->dep_signal[4].handle)
             },
             id_(gs_did++),
-            seq_num_(data->seq_index++)
+            seq_num_(data->seq_index++),
+            cid(0)
     {
         if (RTG_HSA_HOST_DISPATCH) {
             LOG_BARRIER_HOST(pid(), tid(), queue, agent, signal, tick(), id_, dep, packet);
@@ -531,6 +582,7 @@ struct SignalCallbackData
     long unsigned stop;
     long unsigned id_;
     int seq_num_;
+    uint64_t cid;
 };
 
 static void SignalDestroyer(int id, hsa_signal_t ours, hsa_signal_t theirs, bool owns_orig_signal)
@@ -578,37 +630,40 @@ static void SignalWaiter(int id, SignalCallbackData *data)
     if (okay) {
         if (HCC_PROFILE) {
             if (data->is_barrier) {
-                ++gs_cb_count_barriers;
                 LOG_HCC(data->start, data->stop, "barrier", "", "", data->data->agent_index, data->data->queue_index, data->seq_num_);
+                ++gs_cb_count_barriers;
             }
             else if (data->is_copy) {
-                ++gs_cb_count_copies;
                 int agent_id = 0;
                 int queue_id = 0;
                 AgentInfo::get_agent_queue_indexes(data->agent, data->queue, agent_id, queue_id);
                 const char *tag_ = getDirectionString(data->direction);
                 std::string msgstr = getCopyString(data->bytes, data->start, data->stop);
                 LOG_HCC(data->start, data->stop, "copy", tag_, msgstr.c_str(), agent_id, queue_id, data->seq_num_);
+                ++gs_cb_count_copies;
             }
             else {
-                ++gs_cb_count_dispatches;
                 LOG_HCC(data->start, data->stop, "kernel", data->name, "", data->data->agent_index, data->data->queue_index, data->seq_num_);
+                ++gs_cb_count_dispatches;
             }
         }
         else {
             if (data->is_barrier) {
-                ++gs_cb_count_barriers;
                 LOG_BARRIER(pid(), tid(), data->queue, data->agent, data->signal, data->start, data->stop, data->id_, data->dep);
+                ++gs_cb_count_barriers;
             }
             else if (data->is_copy) {
-                ++gs_cb_count_copies;
                 LOG_COPY(pid(), tid(), data->agent, data->signal, data->start, data->stop, data->dep);
+                ++gs_cb_count_copies;
             }
             else {
+                LOG_DISPATCH(pid(), tid(), data->queue, data->agent, data->signal, data->start, data->stop, data->id_, data->name, data->cid);
                 ++gs_cb_count_dispatches;
-                LOG_DISPATCH(pid(), tid(), data->queue, data->agent, data->signal, data->start, data->stop, data->id_, data->name);
             }
         }
+    }
+    else {
+        fprintf(stderr, "SOMETHING IS NOT OKAY\n");
     }
 
     // we created the signal, we must free, but we can't until we know it is no longer needed
@@ -1663,7 +1718,7 @@ hsa_status_t hsa_amd_memory_async_copy(void* dst, hsa_agent_t dst_agent, const v
                 fprintf(stderr, "RTG Tracer: hsa_signal_create_fn failed in hsa_amd_memory_async_copy\n");
                 exit(EXIT_FAILURE);
             }
-            hsa_queue_t *queue = AgentInfo::Instance(agent_to_use)->get_signal_queue();
+            hsa_queue_t *queue = AgentInfo::Get(agent_to_use)->get_signal_queue();
             uint64_t index = submit_to_signal_queue(queue, new_signal, completion_signal);
             gs_pool.push(SignalWaiter, new SignalCallbackData(queue, agent_to_use, new_signal, completion_signal, false, num_dep_signals, dep_signals, size, direction, index));
             TRACE(dst, dst_agent, src, src_agent, size, num_dep_signals, dep_signals, completion_signal);
@@ -1691,7 +1746,7 @@ hsa_status_t hsa_amd_memory_async_copy_rect(const hsa_pitched_ptr_t* dst, const 
                     fprintf(stderr, "RTG Tracer: hsa_amd_signal_create_fn failed in hsa_amd_memory_async_copy_rect\n");
                     exit(EXIT_FAILURE);
                 }
-                hsa_queue_t *queue = AgentInfo::Instance(copy_agent)->get_signal_queue();
+                hsa_queue_t *queue = AgentInfo::Get(copy_agent)->get_signal_queue();
                 uint64_t index = submit_to_signal_queue(queue, new_signal, completion_signal);
                 gs_pool.push(SignalWaiter, new SignalCallbackData(queue, copy_agent, new_signal, completion_signal, false, num_dep_signals, dep_signals, range->x*range->y, dir, index));
                 TRACE(dst, dst_offset, src, src_offset, range, copy_agent, dir, num_dep_signals, dep_signals, completion_signal);
@@ -2336,6 +2391,9 @@ static void hsa_amd_queue_intercept_cb(
             const uint64_t kernel_symbol = kernel_code->runtime_loader_kernel_symbol;
             std::string kernel_name = QueryKernelName(kernel_object, kernel_code);
 
+            // find kernel launch from HIP to get correlation id
+            uint64_t correlation_id = AgentInfo::Get(agent)->find_op(kernel_name);
+
             original_signal = dispatch_packet->completion_signal;
             if (!original_signal.handle) {
                 owns_orig_signal = true;
@@ -2346,7 +2404,7 @@ static void hsa_amd_queue_intercept_cb(
                 }
             }
             const_cast<hsa_kernel_dispatch_packet_t*>(dispatch_packet)->completion_signal = new_signal;
-            gs_pool.push(SignalWaiter, new SignalCallbackData(kernel_name, data_, new_signal, original_signal, owns_orig_signal, dispatch_packet));
+            gs_pool.push(SignalWaiter, new SignalCallbackData(kernel_name, correlation_id, data_, new_signal, original_signal, owns_orig_signal, dispatch_packet));
         }
         else if (type == HSA_PACKET_TYPE_BARRIER_AND || type == HSA_PACKET_TYPE_BARRIER_OR) {
             ++RTG::gs_host_count_barriers;
@@ -2434,8 +2492,7 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
             // demangle kernname
             kernname_str = cpp_demangle(kernname);
             int ord = hipGetStreamDeviceId(stream);
-            // TODO LOG TO STD::DEQUE, per agent, the launched kernel, to be looked up later by async dispatch handler
-            // need to store kernel name and correlation id
+            AgentInfo::Get(ord)->insert_op({kernname_str,data->correlation_id});
         }
     }
     else {

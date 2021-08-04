@@ -20,7 +20,6 @@ public:
     std::array<ApiTable::row, BUFFERSIZE> rows; // Circular buffer
     int head;
     int tail;
-    int count;
 
     std::map<sqlite3_int64, ApiTable::row> inFlight;
     std::map<std::pair<sqlite3_int64, sqlite3_int64>, std::deque<ApiTable::row>> roctxStacks;
@@ -63,6 +62,7 @@ ApiTable::ApiTable(const char *basefile)
 void ApiTable::insert(const ApiTable::row &row)
 {
     std::unique_lock<std::mutex> lock(m_mutex);
+#if 0
 	if (row.phase == 0) {
        d->inFlight.insert({row.api_id, row});
        return;
@@ -85,6 +85,16 @@ void ApiTable::insert(const ApiTable::row &row)
             d->inFlight.erase(it);
         }
     }
+#else
+    if (d->head - d->tail >= ApiTablePrivate::BUFFERSIZE) {
+        // buffer is full; insert in-line or wait
+        printf("Trouble\n");
+        // FIXME: overhead record here
+        m_wait.notify_one();  // make sure working is running
+        m_wait.wait(lock);
+    }
+    d->rows[(++d->head) % ApiTablePrivate::BUFFERSIZE] = row;
+#endif
 
     if (d->workerRunning == false && (d->head - d->tail) >= ApiTablePrivate::BATCHSIZE)
         m_wait.notify_one();
