@@ -80,7 +80,6 @@ struct roctx_data_t {
 // for tracking agents and streams with 0-based index.
 class AgentInfo {
 public:
-    explicit AgentInfo(hsa_agent_t agent, int index);
     int get_agent_index() { return index; }
     int get_queue_index(hsa_queue_t *queue);
     hsa_queue_t* get_signal_queue(); // this is the agent's signal_queue, not one of the the per-queue signal queues
@@ -88,13 +87,18 @@ public:
     static AgentInfo* Instance(hsa_agent_t agent);
     static void get_agent_queue_indexes(hsa_agent_t agent, hsa_queue_t *queue, int &agent_index, int &queue_index);
 
+    static void Init(const std::vector<hsa_agent_t> &agents);
+
 private:
+    explicit AgentInfo(hsa_agent_t agent, int index);
+
     hsa_agent_t agent;
     int index;
     hsa_queue_t *signal_queue;
     std::unordered_map<uint64_t, int> queue_index_map;
     mutex_t mutex;
     static std::unordered_map<uint64_t, AgentInfo*> s_agent_info_map;
+    static std::vector<AgentInfo*> s_agent_info;
 };
 
 //////////////////////////////////////////////////////////////////////////////
@@ -113,7 +117,6 @@ static symbols_map_t* gs_symbols_map_; // maps HSA executable address to kernel 
 
 static std::vector<hsa_agent_t> gs_gpu_agents; // all gpu agents, in order reported by HSA, possibly filtered by visible
 static std::vector<hsa_agent_t> gs_cpu_agents; // all cpu agents, in order reported by HSA
-static std::vector<AgentInfo*> gs_gpu_info; // TODO
 
 static ctpl::thread_pool gs_pool(1);        // thread pool for signal waits
 static ctpl::thread_pool gs_signal_pool(1); // thread pool for signal destroy
@@ -176,6 +179,7 @@ static void hsa_amd_queue_intercept_cb(const void* in_packets, uint64_t count, u
 /// class AgentInfo implementation
 ///////////////////////////////////
 std::unordered_map<uint64_t, AgentInfo*> AgentInfo::s_agent_info_map;
+std::vector<AgentInfo*> AgentInfo::s_agent_info;
 
 AgentInfo::AgentInfo(hsa_agent_t agent, int index)
     : agent(agent)
@@ -184,7 +188,6 @@ AgentInfo::AgentInfo(hsa_agent_t agent, int index)
     , queue_index_map{}
     , mutex{}
 {
-    s_agent_info_map[agent.handle] = this;
 }
 
 int AgentInfo::get_queue_index(hsa_queue_t *queue) {
@@ -221,10 +224,6 @@ hsa_queue_t* AgentInfo::get_signal_queue() {
 }
 
 AgentInfo* AgentInfo::Instance(hsa_agent_t agent) {
-    if (s_agent_info_map.count(agent.handle) == 0) {
-        fprintf(stderr, "RTG Tracer: unknown hsa_agent_t\n");
-        exit(EXIT_FAILURE);
-    }
     return s_agent_info_map[agent.handle];
 }
 
@@ -233,6 +232,16 @@ void AgentInfo::get_agent_queue_indexes(hsa_agent_t agent, hsa_queue_t *queue, i
     auto *info = AgentInfo::Instance(agent);
     agent_index = info->get_agent_index();
     queue_index = info->get_queue_index(queue);
+}
+
+void AgentInfo::Init(const std::vector<hsa_agent_t> &agents)
+{
+    int index = 0;
+    for (auto agent : agents) {
+        auto info = new RTG::AgentInfo(agent, index++);
+        s_agent_info.emplace_back(info);
+        s_agent_info_map.emplace(agent.handle, info);
+    }
 }
 
 struct InterceptCallbackData
@@ -2703,12 +2712,8 @@ extern "C" bool OnLoad(void *pTable,
         } while (pos < ordinals.size());
         RTG::gs_gpu_agents = valid_agents;
     }
-    {
-        int index = 0;
-        for (auto agent : RTG::gs_gpu_agents) {
-            RTG::gs_gpu_info.emplace_back(new RTG::AgentInfo(agent,index++));
-        }
-    }
+
+    RTG::AgentInfo::Init(RTG::gs_gpu_agents);
 
     std::atexit(RTG::finalize);
 
