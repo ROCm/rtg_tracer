@@ -26,5 +26,14 @@ $(MAIN): $(OBJS)
 .cpp.o:
 	$(CXX) -o $@ -c $< $(ROC_INCLUDE) -D__HIP_PLATFORM_AMD__ -DAMD_INTERNAL_BUILD -std=c++14 -fPIC -g -O3
 
+rtg_out_printf.o: rtg_out_printf.h rtg_out.h
+rtg_out_rpd.o: rtg_out_rpd.h rtg_out.h
+Table.o: hsa_rsrc_factory.h Table.h
+OpTable.o: hsa_rsrc_factory.h Table.h
+ApiTable.o: hsa_rsrc_factory.h Table.h
+StringTable.o: hsa_rsrc_factory.h Table.h
+MetadataTable.o: hsa_rsrc_factory.h Table.h
+ApiIdList.o: ApiIdList.h
+
 clean:
 	rm -f *.o *.so

@@ -25,11 +25,11 @@ virtual void hsa_dispatch_kernel (int pid, string tid, hsa_queue_t *queue, hsa_a
 virtual void hsa_dispatch_barrier(int pid, string tid, hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, lu dep[5]) = 0;
 virtual void hsa_dispatch_copy   (int pid, string tid, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu dep[5]) = 0;
 
-virtual void hip_api(int pid, string tid, string func_andor_args, int status, lu tick, lu ticks) = 0;
-virtual void hip_api_kernel(int pid, string tid, string func_andor_args, string kernname, int status, lu tick, lu ticks) = 0;
+virtual void hip_api(int pid, string tid, string func_andor_args, int status, lu tick, lu ticks, uint64_t correlation_id) = 0;
+virtual void hip_api_kernel(int pid, string tid, string func_andor_args, string kernname, int status, lu tick, lu ticks, uint64_t correlation_id) = 0;
 
-virtual void roctx(int pid, string tid, string message, lu tick, lu ticks) = 0;
-virtual void roctx_mark(int pid, string tid, string message, lu tick) = 0;
+virtual void roctx(int pid, string tid, uint64_t correlation_id, string message, lu tick, lu ticks) = 0;
+virtual void roctx_mark(int pid, string tid, uint64_t correlation_id, string message, lu tick) = 0;
 
 virtual void close() = 0;
 

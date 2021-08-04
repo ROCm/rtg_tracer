@@ -1,5 +1,6 @@
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <iomanip>
 #include <mutex>
@@ -71,8 +72,9 @@ typedef std::unordered_map<uint64_t, const char*> symbols_map_t;
 struct roctx_data_t {
     std::string message;
     uint64_t tick;
+    uint64_t correlation_id;
 
-    roctx_data_t(const char *m, uint64_t t) : message(m), tick(t) {}
+    roctx_data_t(const char *m, uint64_t t, uint64_t c) : message(m), tick(t), correlation_id(c) {}
 };
 
 // for tracking agents and streams with 0-based index.
@@ -124,14 +126,16 @@ static counter_t gs_cb_count_dispatches{0};   // counts kernel disaptches that h
 static counter_t gs_cb_count_barriers{0};     // counts barrier dispaches that have completed
 static counter_t gs_cb_count_copies{0};       // counts async copies that have completed
 static counter_t gs_cb_count_signals{0};      // counts signals we destroy
+static counter_t gs_did{0};                   // global dispach id
 
-static counter_t gs_did{0}; // global dispach id
+static std::atomic<uint64_t> gs_correlation_id_counter{0}; // global API counter, for correlation ID, for HIP and roctx calls
 
 static RtgOut* gs_out;  // output interface
 static FILE *gs_stream; // output only used for HCC_PROFILE mode
 
 // Need to allocate hip_api_data_t, but cannot use new operator due to incomplete default constructors.
 static thread_local std::vector<char[sizeof(hip_api_data_t)]> gstl_hip_api_data(HIP_API_ID_NUMBER);
+static thread_local std::vector<uint64_t> gstl_hip_api_tick(HIP_API_ID_NUMBER);
 static std::vector<std::string> gs_hip_api_names(HIP_API_ID_NUMBER); // shared cache of HIP API names
 
 static thread_local std::vector<roctx_data_t> gstl_roctx_stack; // for roctx range push pop
@@ -140,6 +144,10 @@ static thread_local std::unordered_map<int,roctx_data_t> gstl_roctx_range; // fo
 //////////////////////////////////////////////////////////////////////////////
 // global static function declarations ///////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////
+
+// Ensure proper shutdown order. Single funtion to perform all resource cleanup.
+static void finalize();
+static void finalize_once();
 
 // Support for HIP API callbacks.
 static void* hip_activity_callback(uint32_t cid, activity_record_t* record, const void* data, void* arg);
@@ -2162,7 +2170,7 @@ static hsa_status_t hsa_executable_symbols_cb(hsa_executable_t exec, hsa_executa
         status = gs_OrigCoreApiTable.hsa_executable_symbol_get_info_fn(symbol, HSA_EXECUTABLE_SYMBOL_INFO_NAME, name);
         RTG_HSA_CHECK_STATUS("Error in getting kernel name", status);
         name[len] = 0;
-        auto ret = gs_symbols_map_->insert({addr, name});
+        auto ret = gs_symbols_map_->emplace(addr, name);
         if (ret.second == false) {
             delete[] ret.first->second;
             ret.first->second = name;
@@ -2378,51 +2386,85 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
 {
     hip_api_data_t *data = (hip_api_data_t*)data_;
     if (data->phase == 0) {
-        // hack for now, stash tick in the correlation ID
-        data->correlation_id = tick();
+        std::string kernname_str;
+        const char *kernname = NULL;
+        hipStream_t stream;
+
+        switch (cid) {
+            case HIP_API_ID_hipLaunchCooperativeKernel:
+                stream = data->args.hipLaunchCooperativeKernel.stream;
+                kernname = hipKernelNameRefByPtr(data->args.hipLaunchCooperativeKernel.f, stream);
+                break;
+            case HIP_API_ID_hipLaunchKernel:
+                stream = data->args.hipLaunchKernel.stream;
+                kernname = hipKernelNameRefByPtr(data->args.hipLaunchKernel.function_address, stream);
+                break;
+            case HIP_API_ID_hipHccModuleLaunchKernel:
+                stream = data->args.hipHccModuleLaunchKernel.hStream;
+                kernname = hipKernelNameRef(data->args.hipHccModuleLaunchKernel.f);
+                break;
+            case HIP_API_ID_hipExtModuleLaunchKernel:
+                stream = data->args.hipExtModuleLaunchKernel.hStream;
+                kernname = hipKernelNameRef(data->args.hipExtModuleLaunchKernel.f);
+                break;
+            case HIP_API_ID_hipModuleLaunchKernel:
+                stream = data->args.hipModuleLaunchKernel.stream;
+                kernname = hipKernelNameRef(data->args.hipModuleLaunchKernel.f);
+                break;
+            case HIP_API_ID_hipExtLaunchKernel:
+                stream = data->args.hipExtLaunchKernel.stream;
+                kernname = hipKernelNameRefByPtr(data->args.hipExtLaunchKernel.function_address, stream);
+                break;
+        }
+
+        data->correlation_id = gs_correlation_id_counter++;
+        gstl_hip_api_tick[cid] = tick();
+
+        // if this is a kernel op, kernname is set
+        if (kernname) {
+            // demangle kernname
+            kernname_str = cpp_demangle(kernname);
+            int ord = hipGetStreamDeviceId(stream);
+            // TODO LOG TO STD::DEQUE, per agent, the launched kernel, to be looked up later by async dispatch handler
+            // need to store kernel name and correlation id
+        }
     }
     else {
         std::string kernname_str;
         const char *kernname = NULL;
-        uint64_t tick_ = data->correlation_id;
-        uint64_t ticks = tick() - tick_;                                   \
+        uint64_t tick_ = gstl_hip_api_tick[cid];
+        uint64_t ticks = tick() - tick_;
         int localStatus = 0;
-        bool is_kernel = false;
 
         switch (cid) {
             case HIP_API_ID_hipLaunchCooperativeKernel:
                 kernname = hipKernelNameRefByPtr(
                         data->args.hipLaunchCooperativeKernel.f,
                         data->args.hipLaunchCooperativeKernel.stream);
-                is_kernel = true;
                 break;
             case HIP_API_ID_hipLaunchKernel:
                 kernname = hipKernelNameRefByPtr(
                         data->args.hipLaunchKernel.function_address,
                         data->args.hipLaunchKernel.stream);
-                is_kernel = true;
                 break;
             case HIP_API_ID_hipHccModuleLaunchKernel:
                 kernname = hipKernelNameRef(data->args.hipHccModuleLaunchKernel.f);
-                is_kernel = true;
                 break;
             case HIP_API_ID_hipExtModuleLaunchKernel:
                 kernname = hipKernelNameRef(data->args.hipExtModuleLaunchKernel.f);
-                is_kernel = true;
                 break;
             case HIP_API_ID_hipModuleLaunchKernel:
                 kernname = hipKernelNameRef(data->args.hipModuleLaunchKernel.f);
-                is_kernel = true;
                 break;
             case HIP_API_ID_hipExtLaunchKernel:
                 kernname = hipKernelNameRefByPtr(
                         data->args.hipExtLaunchKernel.function_address,
                         data->args.hipExtLaunchKernel.stream);
-                is_kernel = true;
                 break;
         }
 
-        if (is_kernel) {
+        // if this is a kernel op, kernname is set
+        if (kernname) {
             // demangle kernname
             kernname_str = cpp_demangle(kernname);
         }
@@ -2432,20 +2474,20 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
             const char* args = hipApiString((hip_api_id_t)cid, data);
             std::string func = args;
             free((char*)args);
-            if (is_kernel) {
-                LOG_HIP_KERNEL(pid(), tid(), func, kernname_str, localStatus, tick_, ticks);
+            if (kernname) {
+                LOG_HIP_KERNEL(pid(), tid(), func, kernname_str, localStatus, tick_, ticks, data->correlation_id);
             }
             else {
-                LOG_HIP(pid(), tid(), func, localStatus, tick_, ticks);
+                LOG_HIP(pid(), tid(), func, localStatus, tick_, ticks, data->correlation_id);
             }
         }
         else {
             std::string &func = gs_hip_api_names[cid];
-            if (is_kernel) {
-                LOG_HIP_KERNEL(pid(), tid(), func, kernname_str, localStatus, tick_, ticks);
+            if (kernname) {
+                LOG_HIP_KERNEL(pid(), tid(), func, kernname_str, localStatus, tick_, ticks, data->correlation_id);
             }
             else {
-                LOG_HIP(pid(), tid(), func, localStatus, tick_, ticks);
+                LOG_HIP(pid(), tid(), func, localStatus, tick_, ticks, data->correlation_id);
             }
         }
         // Now that we're done with the api data, zero it for the next time.
@@ -2463,31 +2505,81 @@ static void* roctx_callback(uint32_t domain, uint32_t cid, const void* data_, vo
 
     switch (cid) {
         case ROCTX_API_ID_roctxMarkA:
-            LOG_ROCTX_MARK(pid(), tid(), data->args.message, new_tick);
+            LOG_ROCTX_MARK(pid(), tid(), gs_correlation_id_counter++, data->args.message, new_tick);
             break;
         case ROCTX_API_ID_roctxRangePushA:
-            gstl_roctx_stack.emplace_back(data->args.message, new_tick);
+            gstl_roctx_stack.emplace_back(data->args.message, new_tick, gs_correlation_id_counter++);
             break;
         case ROCTX_API_ID_roctxRangePop:
-            LOG_ROCTX(pid(), tid(), gstl_roctx_stack.back().message, gstl_roctx_stack.back().tick, new_tick - gstl_roctx_stack.back().tick);
-            gstl_roctx_stack.pop_back();
+            {
+                auto& item = gstl_roctx_stack.back();
+                LOG_ROCTX(pid(), tid(), item.correlation_id, item.message, item.tick, new_tick - item.tick);
+                gstl_roctx_stack.pop_back();
+            }
             break;
         case ROCTX_API_ID_roctxRangeStartA:
-            gstl_roctx_range.emplace(data->args.id, roctx_data_t{data->args.message,new_tick});
+            gstl_roctx_range.emplace(data->args.id, roctx_data_t{data->args.message,new_tick,gs_correlation_id_counter++});
             break;
         case ROCTX_API_ID_roctxRangeStop:
             {
-                auto item = gstl_roctx_range.find(data->args.id);
-                if (item == gstl_roctx_range.end()) {
+                auto it = gstl_roctx_range.find(data->args.id);
+                if (it == gstl_roctx_range.end()) {
                     fprintf(stderr, "RTG Tracer: invalid roctx range: %lu\n", data->args.id);
                     exit(EXIT_FAILURE);
                 }
-                LOG_ROCTX(pid(), tid(), item->second.message, item->second.tick, new_tick - item->second.tick);
+                auto &item = it->second;
+                LOG_ROCTX(pid(), tid(), item.correlation_id, item.message, item.tick, new_tick - item.tick);
+                gstl_roctx_range.erase(it);
             }
             break;
     }
 
     return NULL;
+}
+
+static void finalize_once()
+{
+    fprintf(stderr, "RTG Tracer: Finalizing\n");
+
+    if (RTG_PROFILE || RTG_PROFILE_COPY) {
+        fprintf(stderr, "RTG Tracer: host_count_dispatches=%u\n", RTG::gs_host_count_dispatches.load());
+        fprintf(stderr, "RTG Tracer:   cb_count_dispatches=%u\n", RTG::gs_cb_count_dispatches.load());
+        fprintf(stderr, "RTG Tracer:   host_count_barriers=%u\n", RTG::gs_host_count_barriers.load());
+        fprintf(stderr, "RTG Tracer:     cb_count_barriers=%u\n", RTG::gs_cb_count_barriers.load());
+        fprintf(stderr, "RTG Tracer:     host_count_copies=%u\n", RTG::gs_host_count_copies.load());
+        fprintf(stderr, "RTG Tracer:       cb_count_copies=%u\n", RTG::gs_cb_count_copies.load());
+        fprintf(stderr, "RTG Tracer:    host_count_signals=%u\n", RTG::gs_host_count_signals.load());
+        fprintf(stderr, "RTG Tracer:      cb_count_signals=%u\n", RTG::gs_cb_count_signals.load());
+    }
+    for (int i=0; i<5; ++i) {
+        if (RTG::gs_host_count_dispatches != RTG::gs_cb_count_dispatches
+                || RTG::gs_host_count_barriers != RTG::gs_cb_count_barriers) {
+            fprintf(stderr, "RTG Tracer: not all callbacks have completed, waiting... dispatches %u vs %u barriers %u vs %u signals %u vs %u\n",
+                    RTG::gs_host_count_dispatches.load(),
+                    RTG::gs_cb_count_dispatches.load(),
+                    RTG::gs_host_count_barriers.load(),
+                    RTG::gs_cb_count_barriers.load(),
+                    RTG::gs_host_count_signals.load(),
+                    RTG::gs_cb_count_signals.load()
+            );
+            sleep(2);
+        }
+    }
+
+    if (HCC_PROFILE) {
+        fclose(RTG::gs_stream);
+    }
+    else {
+        RTG::gs_out->close();
+    }
+
+    RTG::RestoreHsaTable(RTG::gs_OrigHsaTable);
+}
+
+std::once_flag flag;
+static void finalize()
+{
+    std::call_once(flag, finalize_once);
 }
 
 } // namespace RTG
@@ -2614,9 +2706,11 @@ extern "C" bool OnLoad(void *pTable,
     {
         int index = 0;
         for (auto agent : RTG::gs_gpu_agents) {
-            RTG::gs_gpu_info.emplace_back(new RTG::AgentInfo{agent,index++});
+            RTG::gs_gpu_info.emplace_back(new RTG::AgentInfo(agent,index++));
         }
     }
+
+    std::atexit(RTG::finalize);
 
     return true;
 }
@@ -2624,40 +2718,10 @@ extern "C" bool OnLoad(void *pTable,
 extern "C" void OnUnload()
 {
     fprintf(stderr, "RTG Tracer: Unloading\n");
-    RTG::RestoreHsaTable(RTG::gs_OrigHsaTable);
+    RTG::finalize();
 }
 
 __attribute__((destructor)) static void destroy() {
     fprintf(stderr, "RTG Tracer: Destructing\n");
-    if (RTG_PROFILE || RTG_PROFILE_COPY) {
-        fprintf(stderr, "RTG Tracer: host_count_dispatches=%u\n", RTG::gs_host_count_dispatches.load());
-        fprintf(stderr, "RTG Tracer:   cb_count_dispatches=%u\n", RTG::gs_cb_count_dispatches.load());
-        fprintf(stderr, "RTG Tracer:   host_count_barriers=%u\n", RTG::gs_host_count_barriers.load());
-        fprintf(stderr, "RTG Tracer:     cb_count_barriers=%u\n", RTG::gs_cb_count_barriers.load());
-        fprintf(stderr, "RTG Tracer:     host_count_copies=%u\n", RTG::gs_host_count_copies.load());
-        fprintf(stderr, "RTG Tracer:       cb_count_copies=%u\n", RTG::gs_cb_count_copies.load());
-        fprintf(stderr, "RTG Tracer:    host_count_signals=%u\n", RTG::gs_host_count_signals.load());
-        fprintf(stderr, "RTG Tracer:      cb_count_signals=%u\n", RTG::gs_cb_count_signals.load());
-    }
-    for (int i=0; i<5; ++i) {
-        if (RTG::gs_host_count_dispatches != RTG::gs_cb_count_dispatches
-                || RTG::gs_host_count_barriers != RTG::gs_cb_count_barriers) {
-            fprintf(stderr, "RTG Tracer: not all callbacks have completed, waiting... dispatches %u vs %u barriers %u vs %u signals %u vs %u\n",
-                    RTG::gs_host_count_dispatches.load(),
-                    RTG::gs_cb_count_dispatches.load(),
-                    RTG::gs_host_count_barriers.load(),
-                    RTG::gs_cb_count_barriers.load(),
-                    RTG::gs_host_count_signals.load(),
-                    RTG::gs_cb_count_signals.load()
-            );
-            sleep(2);
-        }
-    }
-
-    if (HCC_PROFILE) {
-        fclose(RTG::gs_stream);
-    }
-    else {
-        RTG::gs_out->close();
-    }
+    RTG::finalize();
 }

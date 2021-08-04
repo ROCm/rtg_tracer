@@ -34,8 +34,6 @@ static inline const char* cxx_demangle(const char* symbol) {
 
 const sqlite_int64 EMPTY_STRING_ID = 1;
 
-static std::atomic<sqlite_int64> counter{0};
-
 void RtgOutRpd::open(string filename)
 {
     s_metadataTable = new MetadataTable(filename.c_str());
@@ -129,7 +127,7 @@ void RtgOutRpd::hsa_dispatch_copy(int pid, string tid, hsa_agent_t agent, hsa_si
     //exit(EXIT_FAILURE);
 }
 
-void RtgOutRpd::hip_api(int pid, string tid, string func_andor_args, int status, lu tick, lu ticks)
+void RtgOutRpd::hip_api(int pid, string tid, string func_andor_args, int status, lu tick, lu ticks, uint64_t correlation_id)
 {
     string func;
     string args;
@@ -155,19 +153,19 @@ void RtgOutRpd::hip_api(int pid, string tid, string func_andor_args, int status,
     if (has_args) {
         row.args_id = s_stringTable->getOrCreate(args.c_str());
     }
-    row.api_id = counter++;
+    row.api_id = correlation_id;
 
     s_apiTable->insert(row);
     row.phase = 1;
     s_apiTable->insert(row);
 }
 
-void RtgOutRpd::hip_api_kernel(int pid, string tid, string func_andor_args, string kernname, int status, lu tick, lu ticks)
+void RtgOutRpd::hip_api_kernel(int pid, string tid, string func_andor_args, string kernname, int status, lu tick, lu ticks, uint64_t correlation_id)
 {
-    hip_api(pid, tid, func_andor_args, status, tick, ticks);
+    hip_api(pid, tid, func_andor_args, status, tick, ticks, correlation_id);
 }
 
-void RtgOutRpd::roctx(int pid, string tid, string message, lu tick, lu ticks)
+void RtgOutRpd::roctx(int pid, string tid, uint64_t correlation_id, string message, lu tick, lu ticks)
 {
     ApiTable::row row;
     row.pid = GetPid();
@@ -177,15 +175,15 @@ void RtgOutRpd::roctx(int pid, string tid, string message, lu tick, lu ticks)
     row.apiName_id = s_stringTable->getOrCreate(std::string("UserMarker"));   // FIXME: can cache
     row.args_id = s_stringTable->getOrCreate(message.c_str());
     row.phase = 0;
-    row.api_id = counter++;
+    row.api_id = correlation_id;
     s_apiTable->insert(row);
     row.phase = 1;
     s_apiTable->insert(row);
 }
 
-void RtgOutRpd::roctx_mark(int pid, string tid, string message, lu tick)
+void RtgOutRpd::roctx_mark(int pid, string tid, uint64_t correlation_id, string message, lu tick)
 {
-    roctx(pid, tid, message, tick, tick+1);
+    roctx(pid, tid, correlation_id, message, tick, tick+1);
 }
 
 void RtgOutRpd::close()
