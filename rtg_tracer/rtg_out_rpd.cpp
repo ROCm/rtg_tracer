@@ -1,6 +1,7 @@
 #include <atomic>
 #include <iostream>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -21,8 +22,21 @@ typedef uint64_t timestamp_t;
 
 #include <cxxabi.h>
 
-static inline uint32_t GetPid() { return syscall(__NR_getpid); }
-static inline uint32_t GetTid() { return syscall(__NR_gettid); }
+typedef sqlite_int64 tid_t;
+
+static inline tid_t get_tid_value() {
+    tid_t val;
+    std::ostringstream oss;
+    oss << std::this_thread::get_id();
+    std::istringstream iss(oss.str());
+    iss >> val;
+    return val;
+}
+
+static inline tid_t tid() {
+    thread_local tid_t tid_ = get_tid_value();
+    return tid_;
+}
 
 // C++ symbol demangle
 static inline const char* cxx_demangle(const char* symbol) {
@@ -34,8 +48,10 @@ static inline const char* cxx_demangle(const char* symbol) {
 
 const sqlite_int64 EMPTY_STRING_ID = 1;
 
-void RtgOutRpd::open(string filename)
+void RtgOutRpd::open(const string& filename)
 {
+    pid = getpid();
+
     s_metadataTable = new MetadataTable(filename.c_str());
     s_stringTable = new StringTable(filename.c_str());
     s_opTable = new OpTable(filename.c_str());
@@ -65,31 +81,31 @@ void RtgOutRpd::open(string filename)
     s_apiList->add("hipEventCreateWithFlags");
 }
 
-void RtgOutRpd::hsa_api(int pid, string tid, string func, string args, lu tick, lu ticks, int localStatus)
+void RtgOutRpd::hsa_api(const string& func, const string& args, lu tick, lu ticks, int localStatus)
 {
     fprintf(stderr, "RtgOutRpd::hsa_api NOT IMPLEMENTED\n");
     exit(EXIT_FAILURE);
 }
 
-void RtgOutRpd::hsa_api(int pid, string tid, string func, string args, lu tick, lu ticks, uint64_t localStatus)
+void RtgOutRpd::hsa_api(const string& func, const string& args, lu tick, lu ticks, uint64_t localStatus)
 {
     fprintf(stderr, "RtgOutRpd::hsa_api NOT IMPLEMENTED\n");
     exit(EXIT_FAILURE);
 }
 
-void RtgOutRpd::hsa_api(int pid, string tid, string func, string args, lu tick, lu ticks)
+void RtgOutRpd::hsa_api(const string& func, const string& args, lu tick, lu ticks)
 {
     fprintf(stderr, "RtgOutRpd::hsa_api NOT IMPLEMENTED\n");
     exit(EXIT_FAILURE);
 }
 
-void RtgOutRpd::hsa_host_dispatch_kernel(int pid, string tid, hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, string name, const hsa_kernel_dispatch_packet_t *packet)
+void RtgOutRpd::hsa_host_dispatch_kernel(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, const string& name, const hsa_kernel_dispatch_packet_t *packet)
 {
     fprintf(stderr, "RtgOutRpd::hsa_host_dispatch_kernel NOT IMPLEMENTED\n");
     exit(EXIT_FAILURE);
 }
 
-void RtgOutRpd::hsa_host_dispatch_barrier(int pid, string tid, hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, lu dep[5], const hsa_barrier_and_packet_t *packet)
+void RtgOutRpd::hsa_host_dispatch_barrier(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, lu dep[5], const hsa_barrier_and_packet_t *packet)
 {
     fprintf(stderr, "RtgOutRpd::hsa_host_dispatch_barrier NOT IMPLEMENTED\n");
     exit(EXIT_FAILURE);
@@ -97,7 +113,7 @@ void RtgOutRpd::hsa_host_dispatch_barrier(int pid, string tid, hsa_queue_t *queu
 
 static std::atomic<int> counter;
 
-void RtgOutRpd::hsa_dispatch_kernel(int pid, string tid, hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, string name, uint64_t correlation_id)
+void RtgOutRpd::hsa_dispatch_kernel(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, const string& name, uint64_t correlation_id)
 {
     OpTable::row row;
     row.gpuId = agent.handle; // TODO
@@ -117,7 +133,7 @@ void RtgOutRpd::hsa_dispatch_kernel(int pid, string tid, hsa_queue_t *queue, hsa
     //exit(EXIT_FAILURE);
 }
 
-void RtgOutRpd::hsa_dispatch_barrier(int pid, string tid, hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, lu dep[5])
+void RtgOutRpd::hsa_dispatch_barrier(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, lu dep[5])
 {
     OpTable::row row;
     row.gpuId = agent.handle; // TODO
@@ -139,13 +155,13 @@ void RtgOutRpd::hsa_dispatch_barrier(int pid, string tid, hsa_queue_t *queue, hs
     //exit(EXIT_FAILURE);
 }
 
-void RtgOutRpd::hsa_dispatch_copy(int pid, string tid, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu dep[5])
+void RtgOutRpd::hsa_dispatch_copy(hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu dep[5])
 {
     //fprintf(stderr, "RtgOutRpd::hsa_dispatch_copy NOT IMPLEMENTED\n");
     //exit(EXIT_FAILURE);
 }
 
-void RtgOutRpd::hip_api(int pid, string tid, string func_andor_args, int status, lu tick, lu ticks, uint64_t correlation_id)
+void RtgOutRpd::hip_api(const string& func_andor_args, int status, lu tick, lu ticks, uint64_t correlation_id)
 {
     string func;
     string args;
@@ -161,8 +177,8 @@ void RtgOutRpd::hip_api(int pid, string tid, string func_andor_args, int status,
     }
 
     ApiTable::row row;
-    row.pid = GetPid();
-    row.tid = GetTid();
+    row.pid = pid;
+    row.tid = tid();
     row.start = tick;
     row.end = tick+ticks;
     row.apiName_id = s_stringTable->getOrCreate(func.c_str());
@@ -178,16 +194,16 @@ void RtgOutRpd::hip_api(int pid, string tid, string func_andor_args, int status,
     //s_apiTable->insert(row);
 }
 
-void RtgOutRpd::hip_api_kernel(int pid, string tid, string func_andor_args, string kernname, int status, lu tick, lu ticks, uint64_t correlation_id)
+void RtgOutRpd::hip_api_kernel(const string& func_andor_args, const string& kernname, int status, lu tick, lu ticks, uint64_t correlation_id)
 {
-    hip_api(pid, tid, func_andor_args, status, tick, ticks, correlation_id);
+    hip_api(func_andor_args, status, tick, ticks, correlation_id);
 }
 
-void RtgOutRpd::roctx(int pid, string tid, uint64_t correlation_id, string message, lu tick, lu ticks)
+void RtgOutRpd::roctx(uint64_t correlation_id, const string& message, lu tick, lu ticks)
 {
     ApiTable::row row;
-    row.pid = GetPid();
-    row.tid = GetTid();
+    row.pid = pid;
+    row.tid = tid();
     row.start = tick;
     row.end = tick+ticks;
     row.apiName_id = s_stringTable->getOrCreate(std::string("UserMarker"));   // FIXME: can cache
@@ -199,9 +215,9 @@ void RtgOutRpd::roctx(int pid, string tid, uint64_t correlation_id, string messa
     //s_apiTable->insert(row);
 }
 
-void RtgOutRpd::roctx_mark(int pid, string tid, uint64_t correlation_id, string message, lu tick)
+void RtgOutRpd::roctx_mark(uint64_t correlation_id, const string& message, lu tick)
 {
-    roctx(pid, tid, correlation_id, message, tick, 1);
+    roctx(correlation_id, message, tick, 1);
 }
 
 void RtgOutRpd::close()
