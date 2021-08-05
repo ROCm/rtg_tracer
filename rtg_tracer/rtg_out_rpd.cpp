@@ -130,7 +130,8 @@ void RtgOutRpd::hsa_dispatch_barrier(int pid, string tid, hsa_queue_t *queue, hs
     //row.description_id = EMPTY_STRING_ID;
     row.description_id = s_stringTable->getOrCreate("Barrier");
     row.opType_id = s_stringTable->getOrCreate("Barrier");
-    row.api_id = 0;
+    // barriers do not current associate with HIP API calls, so set this to something that should never match a correlation_id
+    row.api_id = std::numeric_limits<sqlite_int64>::max();
     //row.api_id = row.sequenceId;
     s_opTable->insert(row);
 
