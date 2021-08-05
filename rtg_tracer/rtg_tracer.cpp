@@ -2666,13 +2666,16 @@ extern "C" bool OnLoad(void *pTable,
     Flag::init_all();
 
     std::string outname = RTG_FILENAME;
+#ifdef RPD_TRACER
     if (RTG_RPD) {
         auto pos = outname.find(".txt");
         if (pos != std::string::npos) {
             outname = outname.substr(0, pos) + std::string(".rpd");
         }
     }
-    else {
+    else
+#endif
+    {
         // PID is needed to avoid clashses in multi-process use cases
         outname += ".";
         outname += RTG::pidstr();
@@ -2684,10 +2687,13 @@ extern "C" bool OnLoad(void *pTable,
         RTG::gs_stream = fopen(outname.c_str(), "w");
     }
     else {
+#ifdef RPD_TRACER
         if (RTG_RPD) {
             RTG::gs_out = new RtgOutRpd;
         }
-        else {
+        else
+#endif
+        {
             RTG::gs_out = new RtgOutPrintf;
         }
         RTG::gs_out->open(outname);

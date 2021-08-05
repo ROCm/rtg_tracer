@@ -43,8 +43,11 @@ std::vector<Flag*> Flag::flags;
 #define FLAG_BOOL(name, default_, desc) Flag name(#name, #default_, desc, true)
 #define FLAG_CHAR(name, default_, desc) Flag name(#name, default_, desc, false)
 
+#ifdef RPD_TRACER
+FLAG_BOOL(RTG_RPD, 1, "write output in rpd format");
+#endif
+
 FLAG_BOOL(RTG_VERBOSE, 0, "Verbose logging from RTG");
-FLAG_BOOL(RTG_RPD, 0, "write output in rpd format");
 FLAG_CHAR(RTG_FILENAME, "rtg_trace.txt", "Output filename, default rtg_trace.txt -- pid always appended");
 FLAG_BOOL(RTG_HIP_API_ARGS, false, "Capture HIP API name and function arguments, otherwise just the name");
 FLAG_CHAR(RTG_HIP_API_FILTER, "all", "Trace specific HIP calls. Special case 'all', otherwise simple string matching. Separate tokens with ','");

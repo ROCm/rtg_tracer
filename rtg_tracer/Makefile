@@ -5,26 +5,42 @@ HIPCC=$(HIP_PATH)/bin/hipcc
 ROC_LIBS = -lroctx64 -lroctracer64 -lamdhip64 -lhsa-runtime64 -lsqlite3
 ROC_INCLUDE = -I/opt/rocm/include -I/opt/rocm/hip/include -I/opt/rocm/roctracer/include -I/opt/rocm/hsa/include/hsa
 
-MAIN = rtg_tracer.so
+RTG_MAIN = rtg_tracer.so
+RPD_MAIN = rpd_tracer.so
 
-SRCS =
-SRCS += rtg_tracer.cpp
-SRCS += rtg_out_printf.cpp
-SRCS += rtg_out_rpd.cpp
-SRCS += Table.cpp
-SRCS += OpTable.cpp
-SRCS += ApiTable.cpp
-SRCS += StringTable.cpp
-SRCS += MetadataTable.cpp
-SRCS += ApiIdList.cpp
+all: $(RTG_MAIN) $(RPD_MAIN)
 
-OBJS = $(SRCS:.cpp=.o)
+RTG_SRCS =
+RTG_SRCS += rtg_tracer.cpp
+RTG_SRCS += rtg_out_printf.cpp
 
-$(MAIN): $(OBJS)
-	$(CXX) -o $@ $(OBJS) -shared -rdynamic -std=c++14 -L/opt/rocm/lib $(ROC_LIBS) -g
+RTG_OBJS = $(RTG_SRCS:.cpp=.o)
+
+$(RTG_MAIN): $(RTG_OBJS)
+	$(CXX) -o $@ $(RTG_OBJS) -shared -rdynamic -std=c++14 -L/opt/rocm/lib $(ROC_LIBS) -g
+
+RPD_SRCS =
+RPD_SRCS += rtg_out_printf.cpp
+RPD_SRCS += rtg_out_rpd.cpp
+RPD_SRCS += Table.cpp
+RPD_SRCS += OpTable.cpp
+RPD_SRCS += ApiTable.cpp
+RPD_SRCS += StringTable.cpp
+RPD_SRCS += MetadataTable.cpp
+RPD_SRCS += ApiIdList.cpp
+
+RPD_OBJS = $(RPD_SRCS:.cpp=.o)
+RPD_OBJS += rpd_tracer.o
+
+$(RPD_MAIN): $(RPD_OBJS)
+	$(CXX) -o $@ $(RPD_OBJS) -shared -rdynamic -std=c++14 -L/opt/rocm/lib $(ROC_LIBS) -g
 
 .cpp.o:
 	$(CXX) -o $@ -c $< $(ROC_INCLUDE) -D__HIP_PLATFORM_AMD__ -DAMD_INTERNAL_BUILD -std=c++14 -fPIC -g -O3
+
+rpd_tracer.o: rtg_tracer.cpp
+	$(CXX) -o $@ -c $< $(ROC_INCLUDE) -D__HIP_PLATFORM_AMD__ -DAMD_INTERNAL_BUILD -std=c++14 -fPIC -g -O3 -DRPD_TRACER
+
 
 rtg_out_printf.o: rtg_out_printf.h rtg_out.h
 rtg_out_rpd.o: rtg_out_rpd.h rtg_out.h
