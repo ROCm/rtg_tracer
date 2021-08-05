@@ -438,7 +438,6 @@ for filename in non_opt_args:
                 args = None
                 kernname = None
                 ts = int(ts)/1000
-                dur = int(dur)/1000
                 out.write('{"name":"%s", "ph":"i", "ts":%s, "pid":%d, "tid":%s},\n'%(
                     func, ts, pid, tid))
                 continue
