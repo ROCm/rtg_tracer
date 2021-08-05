@@ -2606,6 +2606,11 @@ static void* roctx_callback(uint32_t domain, uint32_t cid, const void* data_, vo
             break;
     }
 
+    // NOTE: roctx uses strdup() with all messages stored in the roctx_api_data_t ; user must free
+    if (data->args.message) {
+        free(const_cast<char*>(data->args.message));
+    }
+
     return NULL;
 }
 
