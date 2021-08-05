@@ -106,7 +106,7 @@ void RtgOutRpd::hsa_dispatch_kernel(int pid, string tid, hsa_queue_t *queue, hsa
     //row.completionSignal = "";	//strcpy
     strncpy(row.completionSignal, "", 18);
     row.start = start;
-    row.end = start+stop;
+    row.end = stop;
     //row.description_id = EMPTY_STRING_ID;
     row.description_id = s_stringTable->getOrCreate(name.c_str());
     row.opType_id = s_stringTable->getOrCreate("KernelExecution");
@@ -126,7 +126,7 @@ void RtgOutRpd::hsa_dispatch_barrier(int pid, string tid, hsa_queue_t *queue, hs
     //row.completionSignal = "";	//strcpy
     strncpy(row.completionSignal, "", 18);
     row.start = start;
-    row.end = start+stop;
+    row.end = stop;
     //row.description_id = EMPTY_STRING_ID;
     row.description_id = s_stringTable->getOrCreate("Barrier");
     row.opType_id = s_stringTable->getOrCreate("Barrier");
@@ -200,7 +200,7 @@ void RtgOutRpd::roctx(int pid, string tid, uint64_t correlation_id, string messa
 
 void RtgOutRpd::roctx_mark(int pid, string tid, uint64_t correlation_id, string message, lu tick)
 {
-    roctx(pid, tid, correlation_id, message, tick, tick+1);
+    roctx(pid, tid, correlation_id, message, tick, 1);
 }
 
 void RtgOutRpd::close()
