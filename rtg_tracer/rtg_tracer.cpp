@@ -2392,7 +2392,8 @@ static void hsa_amd_queue_intercept_cb(
             std::string kernel_name = QueryKernelName(kernel_object, kernel_code);
 
             // find kernel launch from HIP to get correlation id
-            uint64_t correlation_id = AgentInfo::Get(agent)->find_op(kernel_name);
+            // HCC output does not need correlation_id
+            uint64_t correlation_id = HCC_PROFILE ? 0 : AgentInfo::Get(agent)->find_op(kernel_name);
 
             original_signal = dispatch_packet->completion_signal;
             if (!original_signal.handle) {
@@ -2492,7 +2493,12 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
             // demangle kernname
             kernname_str = cpp_demangle(kernname);
             int ord = hipGetStreamDeviceId(stream);
-            AgentInfo::Get(ord)->insert_op({kernname_str,data->correlation_id});
+            if (HCC_PROFILE) {
+                // HCC output does not need correlation id
+            }
+            else {
+                AgentInfo::Get(ord)->insert_op({kernname_str,data->correlation_id});
+            }
         }
     }
     else {
