@@ -146,8 +146,9 @@ static counter_t gs_did{0};                   // global dispach id
 
 static std::atomic<uint64_t> gs_correlation_id_counter{0}; // global API counter, for correlation ID, for HIP and roctx calls
 
-static RtgOut* gs_out;  // output interface
-static FILE *gs_stream; // output only used for HCC_PROFILE mode
+static bool loaded{false};
+static RtgOut* gs_out{NULL};  // output interface
+static FILE *gs_stream{NULL}; // output only used for HCC_PROFILE mode
 
 // Need to allocate hip_api_data_t, but cannot use new operator due to incomplete default constructors.
 static thread_local std::vector<char[sizeof(hip_api_data_t)]> gstl_hip_api_data(HIP_API_ID_NUMBER);
@@ -2614,6 +2615,10 @@ static void finalize_once()
 {
     fprintf(stderr, "RTG Tracer: Finalizing\n");
 
+    if (!RTG::loaded) {
+        return;
+    }
+
     if (RTG_PROFILE || RTG_PROFILE_COPY) {
         fprintf(stderr, "RTG Tracer: host_count_dispatches=%u\n", RTG::gs_host_count_dispatches.load());
         fprintf(stderr, "RTG Tracer:   cb_count_dispatches=%u\n", RTG::gs_cb_count_dispatches.load());
@@ -2662,6 +2667,7 @@ extern "C" bool OnLoad(void *pTable,
         const char *const *pFailedToolNames)
 {
     fprintf(stderr, "RTG Tracer: Loading\n");
+    RTG::loaded = true;
 
     Flag::init_all();
 
