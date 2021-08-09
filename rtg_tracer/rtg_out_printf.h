@@ -6,7 +6,7 @@ class RtgOutPrintf : public RtgOut {
 
 public:
 
-virtual void open(const string& filename);
+virtual void open(const string& filename) override;
 
 virtual void hsa_api(const string& func, const string& args, lu tick, lu ticks, int localStatus) override;
 virtual void hsa_api(const string& func, const string& args, lu tick, lu ticks, uint64_t localStatus) override;
