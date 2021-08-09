@@ -188,10 +188,10 @@ void RtgOutRpd::hip_api(const string& func_andor_args, int status, lu tick, lu t
         row.args_id = s_stringTable->getOrCreate(args.c_str());
     }
     row.api_id = correlation_id;
-
+    // ApiTable expects two inserts, one for each phase
     s_apiTable->insert(row);
-    //row.phase = 1;
-    //s_apiTable->insert(row);
+    row.phase = 1;
+    s_apiTable->insert(row);
 }
 
 void RtgOutRpd::hip_api_kernel(const string& func_andor_args, const string& kernname, int status, lu tick, lu ticks, uint64_t correlation_id)
@@ -211,8 +211,9 @@ void RtgOutRpd::roctx(uint64_t correlation_id, const string& message, lu tick, l
     row.phase = 0;
     row.api_id = correlation_id;
     s_apiTable->insert(row);
-    //row.phase = 1;
-    //s_apiTable->insert(row);
+    // ApiTable expects two inserts, one for each phase
+    row.phase = 1;
+    s_apiTable->insert(row);
 }
 
 void RtgOutRpd::roctx_mark(uint64_t correlation_id, const string& message, lu tick)

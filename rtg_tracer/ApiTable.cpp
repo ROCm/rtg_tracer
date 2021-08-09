@@ -62,7 +62,7 @@ ApiTable::ApiTable(const char *basefile)
 void ApiTable::insert(const ApiTable::row &row)
 {
     std::unique_lock<std::mutex> lock(m_mutex);
-#if 0
+#if 1
 	if (row.phase == 0) {
        d->inFlight.insert({row.api_id, row});
        return;
