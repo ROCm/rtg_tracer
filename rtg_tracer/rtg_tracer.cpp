@@ -261,8 +261,11 @@ uint64_t AgentInfo::find_op(const std::string &name)
     }
 
     if (id == not_found) {
-        fprintf(stderr, "RTG Tracer: correlation id error for '%s'\n", name.c_str());
-        exit(EXIT_FAILURE);
+        // HIP runtime (rocclr) can launch kernels without a corresponding HIP API call
+        if (name.find("__amd_rocclr") == std::string::npos) {
+            fprintf(stderr, "RTG Tracer: correlation id error for '%s'\n", name.c_str());
+            exit(EXIT_FAILURE);
+        }
     }
 
     return id;
@@ -2297,6 +2300,7 @@ static inline const char* GetKernelNameRef(uint64_t addr) {
 // Demangle C++ symbol name
 static std::string cpp_demangle(const char* symname) {
     std::string retval;
+    std::size_t pos;
 
     if (RTG_DEMANGLE) {
         size_t size = 0;
@@ -2308,21 +2312,24 @@ static std::string cpp_demangle(const char* symname) {
             free(result);
         }
         else {
+            // demangle failed?
             retval = symname;
-        }
-        // for some reason ' [clone .kd]' appears at the end of some kernels; remove it
-        std::size_t pos = retval.find(" [clone .kd]");
-        if (pos != std::string::npos) {
-            retval = retval.substr(0, pos);
         }
     }
     else {
         retval = symname;
-        // for some reason '.kd' appears at the end of some kernels; remove it
-        std::size_t pos = retval.find(".kd");
-        if (pos != std::string::npos) {
-            retval = retval.substr(0, pos);
-        }
+    }
+
+    // for some reason ' [clone .kd]' appears at the end of some kernels; remove it
+    pos = retval.find(" [clone .kd]");
+    if (pos != std::string::npos) {
+        retval = retval.substr(0, pos);
+    }
+
+    // for some reason '.kd' appears at the end of some kernels; remove it
+    pos = retval.find(".kd");
+    if (pos != std::string::npos) {
+        retval = retval.substr(0, pos);
     }
 
     return retval;
