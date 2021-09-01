@@ -390,7 +390,7 @@ uint64_t inline tick() {
         hsa_status_t localStatus = status; /*local copy so status only evaluated once*/  \
         if (is_enabled) {                                                                \
             uint64_t ticks = tick() - tick_;                                             \
-            gs_out->hsa_api(func, args, localStatus, tick_, ticks);                      \
+            gs_out->hsa_api(func, args, tick_, ticks, localStatus);                      \
         }                                                                                \
         localStatus;                                                                     \
     })
@@ -400,7 +400,7 @@ uint64_t inline tick() {
         hsa_signal_value_t localStatus = status; /*local copy so status only evaluated once*/  \
         if (is_enabled) {                                                                      \
             uint64_t ticks = tick() - tick_;                                                   \
-            gs_out->hsa_api(func, args, localStatus, tick_, ticks);                            \
+            gs_out->hsa_api(func, args, tick_, ticks, static_cast<int>(localStatus));          \
         }                                                                                      \
         localStatus;                                                                           \
     })
@@ -410,19 +410,19 @@ uint64_t inline tick() {
         uint64_t localStatus = status; /*local copy so status only evaluated once*/  \
         if (is_enabled) {                                                            \
             uint64_t ticks = tick() - tick_;                                         \
-            gs_out->hsa_api(func, args, localStatus, tick_, ticks);                  \
+            gs_out->hsa_api(func, args, tick_, ticks, localStatus);                  \
         }                                                                            \
         localStatus;                                                                 \
     })
 
-#define LOG_UINT32(status)                                                           \
-    ({                                                                               \
-        uint32_t localStatus = status; /*local copy so status only evaluated once*/  \
-        if (is_enabled) {                                                            \
-            uint64_t ticks = tick() - tick_;                                         \
-            gs_out->hsa_api(func, args, localStatus, tick_, ticks);                  \
-        }                                                                            \
-        localStatus;                                                                 \
+#define LOG_UINT32(status)                                                                 \
+    ({                                                                                     \
+        uint32_t localStatus = status; /*local copy so status only evaluated once*/        \
+        if (is_enabled) {                                                                  \
+            uint64_t ticks = tick() - tick_;                                               \
+            gs_out->hsa_api(func, args, tick_, ticks, static_cast<uint64_t>(localStatus)); \
+        }                                                                                  \
+        localStatus;                                                                       \
     })
 
 #define LOG_VOID(status)                               \
