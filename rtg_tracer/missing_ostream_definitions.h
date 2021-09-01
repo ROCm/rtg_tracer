@@ -65,3 +65,13 @@ std::ostream& operator<<(std::ostream& out, const hipPointerAttribute_t obj) {
     return out << "hipPointerAttribute_t";
 }
 
+#if (HIP_VERSION_MAJOR == 4 && HIP_VERSION_MINOR >= 3) || HIP_VERSION_MAJOR > 4
+std::ostream& operator<<(std::ostream& out, const hipExternalMemoryHandleDesc obj) {
+    return out << "hipExternalMemoryHandleDesc";
+}
+
+std::ostream& operator<<(std::ostream& out, const hipExternalMemoryBufferDesc obj) {
+    return out << "hipExternalMemoryBufferDesc";
+}
+#endif
+
