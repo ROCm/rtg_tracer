@@ -2,7 +2,7 @@ HIP_PATH = /opt/rocm/hip
 
 HIPCC=$(HIP_PATH)/bin/hipcc
 
-ROC_LIBS = -lroctx64 -lroctracer64 -lamdhip64 -lhsa-runtime64 -lsqlite3
+ROC_LIBS = -lroctx64 -lroctracer64 -lamdhip64 -lhsa-runtime64 -lsqlite3 -lunwind
 ROC_INCLUDE = -I/opt/rocm/include -I/opt/rocm/hip/include -I/opt/rocm/roctracer/include -I/opt/rocm/hsa/include/hsa
 
 RTG_MAIN = rtg_tracer.so

@@ -2473,6 +2473,44 @@ static void* hip_activity_callback(uint32_t cid, activity_record_t* record, cons
     return (hip_api_data_t*)gstl_hip_api_data[cid];
 }
 
+#define UNW_LOCAL_ONLY
+#include <libunwind.h>
+static void backtrace()
+{
+  unw_cursor_t cursor;
+  unw_context_t context;
+
+  unw_getcontext(&context);
+  unw_init_local(&cursor, &context);
+
+  int n=0;
+  while ( unw_step(&cursor) ) {
+    unw_word_t ip, sp, off;
+
+    unw_get_reg(&cursor, UNW_REG_IP, &ip);
+    unw_get_reg(&cursor, UNW_REG_SP, &sp);
+
+    char symbol[256] = {"<unknown>"};
+    char *name = symbol;
+
+    if ( !unw_get_proc_name(&cursor, symbol, sizeof(symbol), &off) ) {
+      int status;
+      if ( (name = abi::__cxa_demangle(symbol, NULL, NULL, &status)) == 0 )
+        name = symbol;
+    }
+
+    fprintf(stderr, "#%-2d 0x%016" PRIxPTR " sp=0x%016" PRIxPTR " %s + 0x%" PRIxPTR "\n",
+        ++n,
+        static_cast<uintptr_t>(ip),
+        static_cast<uintptr_t>(sp),
+        name,
+        static_cast<uintptr_t>(off));
+
+    if ( name != symbol )
+      free(name);
+  }
+}
+
 static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, void* arg)
 {
     hip_api_data_t *data = (hip_api_data_t*)data_;
@@ -2575,6 +2613,10 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
             else {
                 LOG_HIP(func, localStatus, tick_, ticks, data->correlation_id);
             }
+            if (cid == HIP_API_ID_hipMalloc) {
+                fprintf(stderr, "backtrace for %s\n", func.c_str());
+                backtrace();
+            }
         }
         else {
             std::string &func = gs_hip_api_names[cid];
@@ -2585,6 +2627,8 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
                 LOG_HIP(func, localStatus, tick_, ticks, data->correlation_id);
             }
         }
+
+
         // Now that we're done with the api data, zero it for the next time.
         // Otherwise, phase is always wrong because HIP doesn't set the phase to 0 during API start.
         memset(data, 0, sizeof(hip_api_data_t));
