@@ -118,6 +118,8 @@ private:
 // global static variables ///////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////
 
+static hsa_signal_t gs_NullSignal; // handle is always 0
+
 static HsaApiTable* gs_OrigHsaTable;     // The HSA Runtime's original table
 static CoreApiTable gs_OrigCoreApiTable; // The HSA Runtime's versions of HSA core API functions
 static AmdExtTable gs_OrigExtApiTable;   // The HSA Runtime's versions of HSA ext API functions
@@ -188,6 +190,10 @@ static hsa_status_t hsa_executable_symbols_cb(hsa_executable_t exec, hsa_executa
 // HSA iterator callbcaks
 static hsa_status_t hsa_iterate_agent_cb(hsa_agent_t agent, void* data);
 static void hsa_amd_queue_intercept_cb(const void* in_packets, uint64_t count, uint64_t user_que_idx, void* data, hsa_amd_queue_intercept_packet_writer writer);
+
+// HSA helpers
+static hsa_signal_t CreateSignal();
+static void DestroySignal(hsa_signal_t signal);
 
 ///////////////////////////////////
 /// class AgentInfo implementation
@@ -473,7 +479,9 @@ static uint64_t submit_to_signal_queue(hsa_queue_t *signal_queue, hsa_signal_t n
     hsa_barrier_and_packet_t *barrier = &((hsa_barrier_and_packet_t*)(signal_queue->base_address))[index & queueMask];
     *barrier = kBarrierPacket;
     barrier->completion_signal = original_signal;
-    barrier->dep_signal[0] = new_signal;
+    if (new_signal.handle) {
+        barrier->dep_signal[0] = new_signal;
+    }
     barrier->header = kBarrierHeader;
     gs_OrigCoreApiTable.hsa_signal_store_relaxed_fn(signal_queue->doorbell_signal, index);
     //fprintf(stderr, "RTG Tracer: wrote new BARRIER AND at queue %lu index %lu (prev read was %lu)\n", signal_queue->id, index, read);
@@ -489,8 +497,8 @@ enum CopyDirection {
 
 struct SignalCallbackData
 {
-    SignalCallbackData(std::string name, uint64_t cid, InterceptCallbackData *data, hsa_signal_t signal, hsa_signal_t orig_signal, bool owns_orig_signal, const hsa_kernel_dispatch_packet_t *packet)
-        : name(name), data(data), queue(data->queue), agent(data->agent), signal(signal), orig_signal(orig_signal), owns_orig_signal(owns_orig_signal), bytes(0), direction(0),
+    SignalCallbackData(std::string name, uint64_t cid, InterceptCallbackData *data, hsa_signal_t deleter_signal, hsa_signal_t signal, hsa_signal_t orig_signal, bool owns_orig_signal, const hsa_kernel_dispatch_packet_t *packet)
+        : name(name), data(data), queue(data->queue), agent(data->agent), deleter_signal(deleter_signal), signal(signal), orig_signal(orig_signal), owns_orig_signal(owns_orig_signal), bytes(0), direction(0),
             is_copy(false), is_barrier(false), dep{0,0,0,0,0}, id_(gs_did++), seq_num_(data->seq_index++), cid(cid)
     {
         if (RTG_HSA_HOST_DISPATCH) {
@@ -498,8 +506,8 @@ struct SignalCallbackData
         }
     }
 
-    SignalCallbackData(hsa_queue_t* queue, hsa_agent_t agent, hsa_signal_t signal, hsa_signal_t orig_signal, bool owns_orig_signal, uint32_t num_dep_signals, const hsa_signal_t* dep_signals, size_t bytes, int direction, int seq)
-        : name(), queue(queue), agent(agent), signal(signal), orig_signal(orig_signal), owns_orig_signal(owns_orig_signal), bytes(bytes), direction(direction),
+    SignalCallbackData(hsa_queue_t* queue, hsa_agent_t agent, hsa_signal_t deleter_signal, hsa_signal_t signal, hsa_signal_t orig_signal, bool owns_orig_signal, uint32_t num_dep_signals, const hsa_signal_t* dep_signals, size_t bytes, int direction, int seq)
+        : name(), queue(queue), agent(agent), deleter_signal(deleter_signal), signal(signal), orig_signal(orig_signal), owns_orig_signal(owns_orig_signal), bytes(bytes), direction(direction),
             is_copy(true),
             is_barrier(false),
             dep{
@@ -515,8 +523,8 @@ struct SignalCallbackData
 
     {}
 
-    SignalCallbackData(InterceptCallbackData *data, hsa_signal_t signal, hsa_signal_t orig_signal, bool owns_orig_signal, const hsa_barrier_and_packet_t* packet)
-        : name(), data(data), queue(data->queue), agent(data->agent), signal(signal), orig_signal(orig_signal), owns_orig_signal(owns_orig_signal), bytes(0), direction(0),
+    SignalCallbackData(InterceptCallbackData *data, hsa_signal_t deleter_signal, hsa_signal_t signal, hsa_signal_t orig_signal, bool owns_orig_signal, const hsa_barrier_and_packet_t* packet)
+        : name(), data(data), queue(data->queue), agent(data->agent), deleter_signal(deleter_signal), signal(signal), orig_signal(orig_signal), owns_orig_signal(owns_orig_signal), bytes(0), direction(0),
             is_copy(false),
             is_barrier(true),
             dep{
@@ -572,6 +580,7 @@ struct SignalCallbackData
     hsa_agent_t agent;
     hsa_signal_t signal;
     hsa_signal_t orig_signal;
+    hsa_signal_t deleter_signal;
     bool owns_orig_signal;
     size_t bytes;
     int direction;
@@ -585,20 +594,14 @@ struct SignalCallbackData
     uint64_t cid;
 };
 
-static void SignalDestroyer(int id, hsa_signal_t ours, hsa_signal_t theirs, bool owns_orig_signal)
+static void SignalDestroyer(int id, hsa_signal_t deleter, hsa_signal_t ours, hsa_signal_t theirs, bool owns_orig_signal)
 {
-    //fprintf(stderr, "RTG Tracer: SignalDestroyer id=%d ours=%lu theirs=%lu\n", id, ours.handle, theirs.handle);
-    gs_OrigCoreApiTable.hsa_signal_wait_relaxed_fn(theirs, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
-    hsa_status_t status = gs_OrigCoreApiTable.hsa_signal_destroy_fn(ours);
-    ++gs_cb_count_signals;
-    if (status != HSA_STATUS_SUCCESS) {
-        fprintf(stderr, "RTG Tracer: signal destroy failed %lu\n", ours.handle);
-    }
+    //fprintf(stderr, "RTG Tracer: SignalDestroyer id=%d deleter=%lu ours=%lu theirs=%lu\n", id, deleter.handle, ours.handle, theirs.handle);
+    gs_OrigCoreApiTable.hsa_signal_wait_relaxed_fn(deleter, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
+    DestroySignal(ours);
+    DestroySignal(deleter);
     if (owns_orig_signal) {
-        status = gs_OrigCoreApiTable.hsa_signal_destroy_fn(theirs);
-        if (status != HSA_STATUS_SUCCESS) {
-            fprintf(stderr, "RTG Tracer: signal destroy failed %lu\n", theirs.handle);
-        }
+        DestroySignal(theirs);
     }
 }
 
@@ -623,7 +626,7 @@ std::string getCopyString(size_t sizeBytes, uint64_t start, uint64_t end)
 
 static void SignalWaiter(int id, SignalCallbackData *data)
 {
-    //fprintf(stderr, "RTG Tracer: SignalWaiter id=%d signal=%lu\n", id, signal.handle);
+    //fprintf(stderr, "RTG Tracer: SignalWaiter id=%d queue=%lu agent=%lu signal=%lu orig_signal=%lu\n", id, data->queue->id, data->agent.handle, data->signal.handle, data->orig_signal.handle);
     gs_OrigCoreApiTable.hsa_signal_wait_relaxed_fn(data->signal, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
 
     bool okay = data->compute_profile();
@@ -668,7 +671,7 @@ static void SignalWaiter(int id, SignalCallbackData *data)
 
     // we created the signal, we must free, but we can't until we know it is no longer needed
     // so wait on the associated original signal
-    gs_signal_pool.push(SignalDestroyer, data->signal, data->orig_signal, data->owns_orig_signal);
+    gs_signal_pool.push(SignalDestroyer, data->deleter_signal, data->signal, data->orig_signal, data->owns_orig_signal);
     delete data;
 }
 
@@ -986,6 +989,7 @@ hsa_status_t hsa_signal_create(hsa_signal_value_t initial_value, uint32_t num_co
 }
 
 hsa_status_t hsa_signal_destroy(hsa_signal_t signal) {
+    //fprintf(stderr, "RTG Tracer: hsa_signal_destroy signal=%lu\n", signal.handle);
     TRACE(signal);
     return LOG_STATUS(gs_OrigCoreApiTable.hsa_signal_destroy_fn(signal));
 }
@@ -1711,16 +1715,12 @@ hsa_status_t hsa_amd_memory_async_copy(void* dst, hsa_agent_t dst_agent, const v
                 direction = D2D;
                 agent_to_use = src_agent;
             }
-            ++RTG::gs_host_count_signals;
-            hsa_signal_t new_signal;
-            hsa_status_t status = gs_OrigCoreApiTable.hsa_signal_create_fn(1, 0, nullptr, &new_signal);
-            if (status != HSA_STATUS_SUCCESS) {
-                fprintf(stderr, "RTG Tracer: hsa_signal_create_fn failed in hsa_amd_memory_async_copy\n");
-                exit(EXIT_FAILURE);
-            }
+            hsa_signal_t new_signal = CreateSignal();
+            hsa_signal_t deleter_signal = CreateSignal();
             hsa_queue_t *queue = AgentInfo::Get(agent_to_use)->get_signal_queue();
             uint64_t index = submit_to_signal_queue(queue, new_signal, completion_signal);
-            gs_pool.push(SignalWaiter, new SignalCallbackData(queue, agent_to_use, new_signal, completion_signal, false, num_dep_signals, dep_signals, size, direction, index));
+            submit_to_signal_queue(queue, gs_NullSignal, deleter_signal);
+            gs_pool.push(SignalWaiter, new SignalCallbackData(queue, agent_to_use, deleter_signal, new_signal, completion_signal, false, num_dep_signals, dep_signals, size, direction, index));
             TRACE(dst, dst_agent, src, src_agent, size, num_dep_signals, dep_signals, completion_signal);
             return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_memory_async_copy_fn(dst, dst_agent, src, src_agent, size, num_dep_signals, dep_signals, new_signal));
         }
@@ -1739,16 +1739,12 @@ hsa_status_t hsa_amd_memory_async_copy_rect(const hsa_pitched_ptr_t* dst, const 
         }
         else {
             if (agent_type(copy_agent) != HSA_DEVICE_TYPE_CPU) {
-                ++RTG::gs_host_count_signals;
-                hsa_signal_t new_signal;
-                hsa_status_t status = gs_OrigCoreApiTable.hsa_signal_create_fn(1, 0, nullptr, &new_signal);
-                if (status != HSA_STATUS_SUCCESS) {
-                    fprintf(stderr, "RTG Tracer: hsa_amd_signal_create_fn failed in hsa_amd_memory_async_copy_rect\n");
-                    exit(EXIT_FAILURE);
-                }
+                hsa_signal_t new_signal = CreateSignal();
+                hsa_signal_t deleter_signal = CreateSignal();
                 hsa_queue_t *queue = AgentInfo::Get(copy_agent)->get_signal_queue();
                 uint64_t index = submit_to_signal_queue(queue, new_signal, completion_signal);
-                gs_pool.push(SignalWaiter, new SignalCallbackData(queue, copy_agent, new_signal, completion_signal, false, num_dep_signals, dep_signals, range->x*range->y, dir, index));
+                submit_to_signal_queue(queue, gs_NullSignal, deleter_signal);
+                gs_pool.push(SignalWaiter, new SignalCallbackData(queue, copy_agent, deleter_signal, new_signal, completion_signal, false, num_dep_signals, dep_signals, range->x*range->y, dir, index));
                 TRACE(dst, dst_offset, src, src_offset, range, copy_agent, dir, num_dep_signals, dep_signals, completion_signal);
                 return gs_OrigExtApiTable.hsa_amd_memory_async_copy_rect_fn(dst, dst_offset, src, src_offset, range, copy_agent, dir, num_dep_signals, dep_signals, new_signal);
             }
@@ -2373,16 +2369,13 @@ static void hsa_amd_queue_intercept_cb(
         const packet_t* packet = &packets_arr[j];
         bool to_submit = true;
         hsa_packet_type_t type = GetHeaderType(packet);
+        hsa_signal_t deleter_signal{0};
         hsa_signal_t new_signal{0};
         hsa_signal_t original_signal{0};
         bool owns_orig_signal = false;
 
-        ++gs_host_count_signals;
-        hsa_status_t status = gs_OrigCoreApiTable.hsa_signal_create_fn(1, 0, nullptr, &new_signal);
-        if (status != HSA_STATUS_SUCCESS) {
-            fprintf(stderr, "RTG Tracer: failed to allocate signal\n");
-            exit(EXIT_FAILURE);
-        }
+        new_signal = CreateSignal();
+        deleter_signal = CreateSignal();
 
         // Checking for dispatch packet type
         if (type == HSA_PACKET_TYPE_KERNEL_DISPATCH) {
@@ -2402,14 +2395,10 @@ static void hsa_amd_queue_intercept_cb(
             original_signal = dispatch_packet->completion_signal;
             if (!original_signal.handle) {
                 owns_orig_signal = true;
-                status = gs_OrigCoreApiTable.hsa_signal_create_fn(1, 0, nullptr, &original_signal);
-                if (status != HSA_STATUS_SUCCESS) {
-                    fprintf(stderr, "RTG Tracer: failed to allocate signal\n");
-                    exit(EXIT_FAILURE);
-                }
+                original_signal = CreateSignal();
             }
             const_cast<hsa_kernel_dispatch_packet_t*>(dispatch_packet)->completion_signal = new_signal;
-            gs_pool.push(SignalWaiter, new SignalCallbackData(kernel_name, correlation_id, data_, new_signal, original_signal, owns_orig_signal, dispatch_packet));
+            gs_pool.push(SignalWaiter, new SignalCallbackData(kernel_name, correlation_id, data_, deleter_signal, new_signal, original_signal, owns_orig_signal, dispatch_packet));
         }
         else if (type == HSA_PACKET_TYPE_BARRIER_AND || type == HSA_PACKET_TYPE_BARRIER_OR) {
             ++RTG::gs_host_count_barriers;
@@ -2419,14 +2408,10 @@ static void hsa_amd_queue_intercept_cb(
             original_signal = barrier_packet->completion_signal;
             if (!original_signal.handle) {
                 owns_orig_signal = true;
-                status = gs_OrigCoreApiTable.hsa_signal_create_fn(1, 0, nullptr, &original_signal);
-                if (status != HSA_STATUS_SUCCESS) {
-                    fprintf(stderr, "RTG Tracer: failed to allocate signal\n");
-                    exit(EXIT_FAILURE);
-                }
+                original_signal = CreateSignal();
             }
             const_cast<hsa_barrier_and_packet_t*>(barrier_packet)->completion_signal = new_signal;
-            gs_pool.push(SignalWaiter, new SignalCallbackData(data_, new_signal, original_signal, owns_orig_signal, barrier_packet));
+            gs_pool.push(SignalWaiter, new SignalCallbackData(data_, deleter_signal, new_signal, original_signal, owns_orig_signal, barrier_packet));
         }
         else {
             fprintf(stderr, "RTG Tracer: unrecognized packet type %d\n", type);
@@ -2439,6 +2424,7 @@ static void hsa_amd_queue_intercept_cb(
         // Submit a new packet just for decrementing the original signal. This is done in a separate queue. Signal packet depends on real packet.
         if (original_signal.handle) {
             submit_to_signal_queue(signal_queue, new_signal, original_signal);
+            submit_to_signal_queue(signal_queue, gs_NullSignal, deleter_signal);
         }
         else {
             fprintf(stderr, "RTG Tracer: fatal, intercept callback missing original signal\n");
@@ -2446,6 +2432,27 @@ static void hsa_amd_queue_intercept_cb(
         }
 
     }
+}
+
+static hsa_signal_t CreateSignal()
+{
+    ++gs_host_count_signals;
+    hsa_signal_t signal;
+    hsa_status_t status = gs_OrigCoreApiTable.hsa_signal_create_fn(1, 0, nullptr, &signal);
+    if (status != HSA_STATUS_SUCCESS) {
+        fprintf(stderr, "RTG Tracer: hsa_signal_create_fn failed\n");
+        exit(EXIT_FAILURE);
+    }
+    return signal;
+}
+
+static void DestroySignal(hsa_signal_t signal)
+{
+    hsa_status_t status = gs_OrigCoreApiTable.hsa_signal_destroy_fn(signal);
+    if (status != HSA_STATUS_SUCCESS) {
+        fprintf(stderr, "RTG Tracer: hsa_signal_destroy_fn failed %lu\n", signal.handle);
+    }
+    ++gs_cb_count_signals;
 }
 
 static void* hip_activity_callback(uint32_t cid, activity_record_t* record, const void* data, void* arg)
@@ -2675,6 +2682,7 @@ extern "C" bool OnLoad(void *pTable,
 {
     fprintf(stderr, "RTG Tracer: Loading\n");
     RTG::loaded = true;
+    RTG::gs_NullSignal.handle = 0;
 
     Flag::init_all();
 
