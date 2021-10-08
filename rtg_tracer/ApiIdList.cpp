@@ -1,5 +1,9 @@
 #include "ApiIdList.h"
 
+#if (HIP_VERSION_MAJOR == 4 && HIP_VERSION_MINOR >= 4) || HIP_VERSION_MAJOR > 4
+#define HIP_API_ID_NUMBER HIP_API_ID_LAST
+#endif
+
 ApiIdList::ApiIdList()
 : m_invert(true)
 {

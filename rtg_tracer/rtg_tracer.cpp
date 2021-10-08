@@ -1825,16 +1825,28 @@ hsa_status_t hsa_amd_image_create(hsa_agent_t agent, const hsa_ext_image_descrip
 }
 
 // Mirrors Amd Extension Apis
-hsa_status_t hsa_amd_pointer_info(void* ptr, hsa_amd_pointer_info_t* info, void* (*alloc)(size_t), uint32_t* num_agents_accessible, hsa_agent_t** accessible) {
+#if (HIP_VERSION_MAJOR == 4 && HIP_VERSION_MINOR >= 4) || HIP_VERSION_MAJOR > 4
+#define MAYBE_CONST const
+#else
+#define MAYBE_CONST
+#endif
+hsa_status_t hsa_amd_pointer_info(MAYBE_CONST void* ptr, hsa_amd_pointer_info_t* info, void* (*alloc)(size_t), uint32_t* num_agents_accessible, hsa_agent_t** accessible) {
     TRACE(ptr, info, alloc, accessible);
     return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_pointer_info_fn(ptr, info, alloc, num_agents_accessible, accessible));
 }
+#undef MAYBE_CONST
 
 // Mirrors Amd Extension Apis
-hsa_status_t hsa_amd_pointer_info_set_userdata(void* ptr, void* userptr) {
+#if (HIP_VERSION_MAJOR == 4 && HIP_VERSION_MINOR >= 4) || HIP_VERSION_MAJOR > 4
+#define MAYBE_CONST const
+#else
+#define MAYBE_CONST
+#endif
+hsa_status_t hsa_amd_pointer_info_set_userdata(MAYBE_CONST void* ptr, void* userptr) {
     TRACE(ptr, userptr);
     return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_pointer_info_set_userdata_fn(ptr, userptr));
 }
+#undef MAYBE_CONST
 
 // Mirrors Amd Extension Apis
 hsa_status_t hsa_amd_ipc_memory_create(void* ptr, size_t len, hsa_amd_ipc_memory_t* handle) {
