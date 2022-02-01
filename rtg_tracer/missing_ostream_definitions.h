@@ -43,3 +43,6 @@ DUMMY(hipMipmappedArray)
 #define HIP_API_ID_NUMBER HIP_API_ID_LAST
 #endif
 
+#if (HIP_VERSION_MAJOR == 5 && HIP_VERSION_MINOR >= 0) || HIP_VERSION_MAJOR > 5
+DUMMY(hipHostNodeParams)
+#endif
