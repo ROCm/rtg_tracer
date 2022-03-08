@@ -2513,13 +2513,13 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
 
         // if this is a kernel op, kernname is set
         if (kernname) {
-            // demangle kernname
-            kernname_str = cpp_demangle(kernname);
-            int ord = hipGetStreamDeviceId(stream);
             if (HCC_PROFILE) {
                 // HCC output does not need correlation id
             }
             else {
+                // demangle kernname
+                kernname_str = cpp_demangle(kernname);
+                int ord = hipGetStreamDeviceId(stream);
                 AgentInfo::Get(ord)->insert_op({kernname_str,data->correlation_id});
             }
         }

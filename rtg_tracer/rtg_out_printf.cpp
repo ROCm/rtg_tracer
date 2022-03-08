@@ -133,8 +133,8 @@ void RtgOutPrintf::hsa_host_dispatch_barrier(hsa_queue_t *queue, hsa_agent_t age
 void RtgOutPrintf::hsa_dispatch_kernel(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, const string& name, uint64_t correlation_id)
 {
     char *buf = new char[BUF_SIZE];
-    check(snprintf(buf, BUF_SIZE, "HSA: pid:%d tid:%s dispatch queue:%lu agent:%lu signal:%lu name:'%s' start:%lu stop:%lu id:%lu\n",
-            pid, tid(), queue->id, agent.handle, signal.handle, name.c_str(), start, stop, id));
+    check(snprintf(buf, BUF_SIZE, "HSA: pid:%d tid:%s dispatch queue:%lu agent:%lu signal:%lu name:'%s' start:%lu stop:%lu id:%lu cid:%lu\n",
+            pid, tid(), queue->id, agent.handle, signal.handle, name.c_str(), start, stop, id, correlation_id));
     TlsData::Get(stream)->push(buf);
 }
 
@@ -157,28 +157,28 @@ void RtgOutPrintf::hsa_dispatch_copy(hsa_agent_t agent, hsa_signal_t signal, lu 
 void RtgOutPrintf::hip_api(const string& func_andor_args, int status, lu tick, lu ticks, uint64_t correlation_id)
 {
     char *buf = new char[BUF_SIZE];
-    check(snprintf(buf, BUF_SIZE, "HIP: pid:%d tid:%s %s ret=%d @%lu +%lu\n", pid, tid(), func_andor_args.c_str(), status, tick, ticks));
+    check(snprintf(buf, BUF_SIZE, "HIP: pid:%d tid:%s %s ret=%d @%lu +%lu cid:%lu\n", pid, tid(), func_andor_args.c_str(), status, tick, ticks, correlation_id));
     TlsData::Get(stream)->push(buf);
 }
 
 void RtgOutPrintf::hip_api_kernel(const string& func_andor_args, const string& kernname, int status, lu tick, lu ticks, uint64_t correlation_id)
 {
     char *buf = new char[BUF_SIZE];
-    check(snprintf(buf, BUF_SIZE, "HIP: pid:%d tid:%s %s [%s] ret=%d @%lu +%lu\n", pid, tid(), func_andor_args.c_str(), kernname.c_str(), status, tick, ticks));
+    check(snprintf(buf, BUF_SIZE, "HIP: pid:%d tid:%s %s [%s] ret=%d @%lu +%lu cid:%lu\n", pid, tid(), func_andor_args.c_str(), kernname.c_str(), status, tick, ticks, correlation_id));
     TlsData::Get(stream)->push(buf);
 }
 
 void RtgOutPrintf::roctx(uint64_t correlation_id, const string& message, lu tick, lu ticks)
 {
     char *buf = new char[BUF_SIZE];
-    check(snprintf(buf, BUF_SIZE, "RTX: pid:%d tid:%s %s @%lu +%lu\n", pid, tid(), message.c_str(), tick, ticks));
+    check(snprintf(buf, BUF_SIZE, "RTX: pid:%d tid:%s %s @%lu +%lu cid:%lu\n", pid, tid(), message.c_str(), tick, ticks, correlation_id));
     TlsData::Get(stream)->push(buf);
 }
 
 void RtgOutPrintf::roctx_mark(uint64_t correlation_id, const string& message, lu tick)
 {
     char *buf = new char[BUF_SIZE];
-    check(snprintf(buf, BUF_SIZE, "RTX: pid:%d tid:%s %s @%lu\n", pid, tid(), message.c_str(), tick));
+    check(snprintf(buf, BUF_SIZE, "RTX: pid:%d tid:%s %s @%lu cid:%lu\n", pid, tid(), message.c_str(), tick, correlation_id));
     TlsData::Get(stream)->push(buf);
 }
 

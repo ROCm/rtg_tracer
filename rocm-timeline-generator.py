@@ -49,11 +49,11 @@ import sys
 
 RE_HSA              = re.compile(r"HSA: pid:(\d+) tid:(\d+) (.*) (\(.*\)) ret=(.*) @(\d+) \+(\d+)")
 RE_HSA_DISPATCH_HOST= re.compile(r"HSA: pid:(\d+) tid:(\d+) dispatch queue:(.*) agent:(\d+) signal:(\d+) name:'(.*)' tick:(\d+) id:(\d+) workgroup:{(\d+),(\d+),(\d+)} grid:{(\d+),(\d+),(\d+)}")
-RE_HSA_DISPATCH     = re.compile(r"HSA: pid:(\d+) tid:(\d+) dispatch queue:(.*) agent:(\d+) signal:(\d+) name:'(.*)' start:(\d+) stop:(\d+) id:(\d+)")
+RE_HSA_DISPATCH     = re.compile(r"HSA: pid:(\d+) tid:(\d+) dispatch queue:(.*) agent:(\d+) signal:(\d+) name:'(.*)' start:(\d+) stop:(\d+) id:(\d+) cid:(\d+)")
 RE_HSA_BARRIER_HOST = re.compile(r"HSA: pid:(\d+) tid:(\d+) barrier queue:(.*) agent:(\d+) signal:(\d+) dep1:(\d+) dep2:(\d+) dep3:(\d+) dep4:(\d+) dep5:(\d+) tick:(\d+) id:(\d+)")
 RE_HSA_BARRIER      = re.compile(r"HSA: pid:(\d+) tid:(\d+) barrier queue:(.*) agent:(\d+) signal:(\d+) start:(\d+) stop:(\d+) dep1:(\d+) dep2:(\d+) dep3:(\d+) dep4:(\d+) dep5:(\d+) id:(\d+)")
 RE_HSA_COPY         = re.compile(r"HSA: pid:(\d+) tid:(\d+) copy agent:(\d+) signal:(\d+) start:(\d+) stop:(\d+) dep1:(\d+) dep2:(\d+) dep3:(\d+) dep4:(\d+) dep5:(\d+)")
-RE_HIP              = re.compile(r"HIP: pid:(\d+) tid:(\d+) (.*) ret=(.*) @(\d+) \+(\d+)")
+RE_HIP              = re.compile(r"HIP: pid:(\d+) tid:(\d+) (.*) ret=(.*) @(\d+) \+(\d+) cid:(\d+)")
 RE_ROCTX            = re.compile(r"RTX: pid:(\d+) tid:(\d+) (.*) @(\d+) \+(\d+)")
 RE_ROCTX_MARKER     = re.compile(r"RTX: pid:(\d+) tid:(\d+) (.*) @(\d+)")
 RE_HCC_PROF_TS_OPX  = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;\s+(\d+);\s+(\d+);\s+#(\d+\.\d+\.\d+);\s+(.*)")
@@ -128,11 +128,14 @@ try:
     output_filename = None
     show_gaps = False
     show_flow = False
+    show_correlation = False
     verbose = False
     print_workgroups = False
     for o,a in opts:
         if o == "-f":
             show_flow = True
+        elif o == "-c":
+            show_correlation = True
         elif o == "-g":
             show_gaps = True
         elif o == "-h":
@@ -281,7 +284,7 @@ for filename in non_opt_args:
             match = RE_HIP.search(line)
             if match:
                 count_hip_api += 1
-                pid,tid,func,retcode,ts,dur = match.groups()
+                pid,tid,func,retcode,ts,dur,cid = match.groups()
                 all_pids[pid] = pid
                 pid,tid = get_hip_pid_tid(pid, tid)
                 args = None
@@ -311,6 +314,9 @@ for filename in non_opt_args:
                     else:
                         out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%d, "tid":%s},\n'%(
                             func, ts, dur, pid, tid))
+                if show_correlation and kernname is not None:
+                    out.write('{"name":"%s", "cat":"correlation", "ph":"s", "ts":%s, "pid":%s, "tid":%s, "id":%s},\n'%(
+                        func, ts, pid, tid, cid))
                 continue
 
             if 'HIP:' in line:
@@ -352,7 +358,7 @@ for filename in non_opt_args:
             match = RE_HSA_DISPATCH.search(line)
             if match:
                 count_hsa_dispatch += 1
-                pid,tid,queue,agent,signal,name,start,stop,did = match.groups()
+                pid,tid,queue,agent,signal,name,start,stop,did,cid = match.groups()
                 all_pids[pid] = pid
                 pid,tid = get_gpu_pid_tid(pid, queue, agent)
                 ts = (int(start)/1000)
@@ -362,6 +368,9 @@ for filename in non_opt_args:
                 if show_flow:
                     out.write('{"name":"%s", "cat":"dispatch", "ph":"f", "ts":%s, "pid":%s, "tid":%s, "id":%s},\n'%(
                         name, ts, pid, tid, did))
+                if show_correlation:
+                    out.write('{"name":"%s", "cat":"correlation", "ph":"f", "ts":%s, "pid":%s, "tid":%s, "id":%s},\n'%(
+                        name, ts, pid, tid, cid))
                 continue
 
             match = RE_HSA_BARRIER_HOST.search(line)
