@@ -1794,6 +1794,48 @@ hsa_status_t hsa_amd_memory_lock_to_pool(void* host_ptr, size_t size, hsa_agent_
 #endif
 
 // Mirrors Amd Extension Apis
+hsa_status_t hsa_amd_register_deallocation_callback(void* ptr, hsa_amd_deallocation_callback_t callback, void* user_data) {
+    TRACE(ptr, callback, user_data);
+    return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_register_deallocation_callback_fn(ptr, callback, user_data));
+}
+
+// Mirrors Amd Extension Apis
+hsa_status_t hsa_amd_deregister_deallocation_callback(void* ptr, hsa_amd_deallocation_callback_t callback) {
+    TRACE(ptr, callback);
+    return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_deregister_deallocation_callback_fn(ptr, callback));
+}
+
+// Mirrors Amd Extension Apis
+hsa_status_t hsa_amd_signal_value_pointer(hsa_signal_t signal, volatile hsa_signal_value_t** value_ptr) {
+    TRACE(signal, value_ptr);
+    return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_signal_value_pointer_fn(signal, value_ptr));
+}
+
+// Mirrors Amd Extension Apis
+hsa_status_t hsa_amd_svm_attributes_set(void* ptr, size_t size, hsa_amd_svm_attribute_pair_t* attribute_list, size_t attribute_count) {
+    TRACE(ptr, size, attribute_list, attribute_count);
+    return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_svm_attributes_set_fn(ptr, size, attribute_list, attribute_count));
+}
+
+// Mirrors Amd Extension Apis
+hsa_status_t hsa_amd_svm_attributes_get(void* ptr, size_t size, hsa_amd_svm_attribute_pair_t* attribute_list, size_t attribute_count) {
+    TRACE(ptr, size, attribute_list, attribute_count);
+    return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_svm_attributes_get_fn(ptr, size, attribute_list, attribute_count));
+}
+
+// Mirrors Amd Extension Apis
+hsa_status_t hsa_amd_svm_prefetch_async(void* ptr, size_t size, hsa_agent_t agent, uint32_t num_dep_signals, const hsa_signal_t* dep_signals, hsa_signal_t completion_signal) {
+    TRACE(ptr, size, agent, num_dep_signals, dep_signals, completion_signal);
+    return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_svm_prefetch_async_fn(ptr, size, agent, num_dep_signals, dep_signals, completion_signal));
+}
+
+// Mirrors Amd Extension Apis
+hsa_status_t HSA_API hsa_amd_queue_cu_get_mask(const hsa_queue_t* queue, uint32_t num_cu_mask_count, uint32_t* cu_mask) {
+    TRACE(queue, num_cu_mask_count, cu_mask);
+    return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_queue_cu_get_mask_fn(queue, num_cu_mask_count, cu_mask));
+}
+
+// Mirrors Amd Extension Apis
 hsa_status_t hsa_amd_memory_unlock(void* host_ptr) {
     TRACE(host_ptr);
     return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_memory_unlock_fn(host_ptr));
@@ -1935,6 +1977,7 @@ static void InitAmdExtTable(AmdExtTable* table) {
     table->hsa_amd_memory_fill_fn = RTG::hsa_amd_memory_fill;
     table->hsa_amd_interop_map_buffer_fn = RTG::hsa_amd_interop_map_buffer;
     table->hsa_amd_interop_unmap_buffer_fn = RTG::hsa_amd_interop_unmap_buffer;
+    table->hsa_amd_image_create_fn = RTG::hsa_amd_image_create;
     table->hsa_amd_pointer_info_fn = RTG::hsa_amd_pointer_info;
     table->hsa_amd_pointer_info_set_userdata_fn = RTG::hsa_amd_pointer_info_set_userdata;
     table->hsa_amd_ipc_memory_create_fn = RTG::hsa_amd_ipc_memory_create;
@@ -1954,6 +1997,13 @@ static void InitAmdExtTable(AmdExtTable* table) {
 #if RTG_ENABLE_HSA_AMD_MEMORY_LOCK_TO_POOL
     table->hsa_amd_memory_lock_to_pool_fn = RTG::hsa_amd_memory_lock_to_pool;
 #endif
+    table->hsa_amd_register_deallocation_callback_fn = RTG::hsa_amd_register_deallocation_callback;
+    table->hsa_amd_deregister_deallocation_callback_fn = RTG::hsa_amd_deregister_deallocation_callback;
+    table->hsa_amd_signal_value_pointer_fn = RTG::hsa_amd_signal_value_pointer;
+    table->hsa_amd_svm_attributes_set_fn = RTG::hsa_amd_svm_attributes_set;
+    table->hsa_amd_svm_attributes_get_fn = RTG::hsa_amd_svm_attributes_get;
+    table->hsa_amd_svm_prefetch_async_fn = RTG::hsa_amd_svm_prefetch_async;
+    table->hsa_amd_queue_cu_get_mask_fn = RTG::hsa_amd_queue_cu_get_mask;
 }
 
 static std::vector<std::string> split(const std::string& s, char delimiter)
@@ -2199,6 +2249,7 @@ static void InitEnabledTableExtApi(bool value) {
     gs_hsa_enabled_map["hsa_amd_memory_fill"] = value;
     gs_hsa_enabled_map["hsa_amd_interop_map_buffer"] = value;
     gs_hsa_enabled_map["hsa_amd_interop_unmap_buffer"] = value;
+    gs_hsa_enabled_map["hsa_amd_image_create"] = value;
     gs_hsa_enabled_map["hsa_amd_pointer_info"] = value;
     gs_hsa_enabled_map["hsa_amd_pointer_info_set_userdata"] = value;
     gs_hsa_enabled_map["hsa_amd_ipc_memory_create"] = value;
@@ -2218,6 +2269,13 @@ static void InitEnabledTableExtApi(bool value) {
 #if RTG_ENABLE_HSA_AMD_MEMORY_LOCK_TO_POOL
     gs_hsa_enabled_map["hsa_amd_memory_lock_to_pool"] = value;
 #endif
+    gs_hsa_enabled_map["hsa_amd_register_deallocation_callback"] = value;
+    gs_hsa_enabled_map["hsa_amd_deregister_deallocation_callback"] = value;
+    gs_hsa_enabled_map["hsa_amd_signal_value_pointer"] = value;
+    gs_hsa_enabled_map["hsa_amd_svm_attributes_set"] = value;
+    gs_hsa_enabled_map["hsa_amd_svm_attributes_get"] = value;
+    gs_hsa_enabled_map["hsa_amd_svm_prefetch_async"] = value;
+    gs_hsa_enabled_map["hsa_amd_queue_cu_get_mask"] = value;
 }
 
 #define RTG_HSA_CHECK_STATUS(msg, status) do { \
