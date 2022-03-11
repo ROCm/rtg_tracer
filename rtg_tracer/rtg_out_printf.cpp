@@ -26,6 +26,8 @@ static inline const char * tid() {
     return tid_.c_str();
 }
 
+namespace {
+
 struct TlsData {
     std::vector<const char *> out;
     FILE *stream;
@@ -76,6 +78,8 @@ struct TlsData {
 
 std::mutex TlsData::the_mutex;
 std::unordered_map<std::thread::id, TlsData*> TlsData::the_map;
+
+}
 
 static void check(int ret)
 {

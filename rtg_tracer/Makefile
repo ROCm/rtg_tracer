@@ -13,6 +13,7 @@ all: $(RTG_MAIN) $(RPD_MAIN)
 RTG_SRCS =
 RTG_SRCS += rtg_tracer.cpp
 RTG_SRCS += rtg_out_printf.cpp
+RTG_SRCS += rtg_out_printf_lockless.cpp
 
 RTG_OBJS = $(RTG_SRCS:.cpp=.o)
 
@@ -21,6 +22,7 @@ $(RTG_MAIN): $(RTG_OBJS)
 
 RPD_SRCS =
 RPD_SRCS += rtg_out_printf.cpp
+RPD_SRCS += rtg_out_printf_lockless.cpp
 RPD_SRCS += rtg_out_rpd.cpp
 RPD_SRCS += Table.cpp
 RPD_SRCS += OpTable.cpp
@@ -43,6 +45,7 @@ rpd_tracer.o: rtg_tracer.cpp
 
 
 rtg_out_printf.o: rtg_out_printf.h rtg_out.h
+rtg_out_printf_lockless.o: rtg_out_printf_lockless.h rtg_out.h
 rtg_out_rpd.o: rtg_out_rpd.h rtg_out.h
 Table.o: hsa_rsrc_factory.h Table.h
 OpTable.o: hsa_rsrc_factory.h Table.h

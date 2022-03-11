@@ -42,6 +42,7 @@
 #include "ToStringDefinitions.h"
 
 #include "rtg_out_printf.h"
+#include "rtg_out_printf_lockless.h"
 #include "rtg_out_rpd.h"
 
 #define RTG_DISABLE_LOGGING 0
@@ -2790,7 +2791,12 @@ extern "C" bool OnLoad(void *pTable,
         else
 #endif
         {
-            RTG::gs_out = new RtgOutPrintf;
+            if (RTG_LEGACY_PRINTF) {
+                RTG::gs_out = new RtgOutPrintf;
+            }
+            else {
+                RTG::gs_out = new RtgOutPrintfLockless;
+            }
         }
         RTG::gs_out->open(outname);
 

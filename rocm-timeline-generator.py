@@ -273,6 +273,7 @@ for filename in non_opt_args:
         continue
 
     # the JSON attempt above consumes the open file lines, so re-open
+    print("Parsing '%s'" % filename)
     with open(filename) as input_file:
         for line in input_file:
             match = None
