@@ -2728,6 +2728,11 @@ static void finalize_once()
         }
     }
 
+    // Unregister ROCTX
+    for (int i=0; i<ROCTX_API_ID_NUMBER; ++i) {
+        RemoveApiCallback(i);
+    }
+
     if (HCC_PROFILE) {
         fclose(RTG::gs_stream);
     }
