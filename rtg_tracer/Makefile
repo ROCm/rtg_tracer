@@ -18,7 +18,7 @@ RTG_SRCS += rtg_out_printf_lockless.cpp
 RTG_OBJS = $(RTG_SRCS:.cpp=.o)
 
 $(RTG_MAIN): $(RTG_OBJS)
-	$(CXX) -o $@ $(RTG_OBJS) -shared -rdynamic -std=c++14 -L/opt/rocm/lib $(ROC_LIBS) -g
+	$(CXX) -o $@ $(RTG_OBJS) -shared -rdynamic -std=c++14 -L/opt/rocm/lib $(ROC_LIBS) -g -Wl,-rpath,/opt/rocm/lib
 
 RPD_SRCS =
 RPD_SRCS += rtg_out_printf.cpp
