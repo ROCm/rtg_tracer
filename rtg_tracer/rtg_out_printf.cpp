@@ -13,7 +13,8 @@
 #include "rtg_out_printf.h"
 
 constexpr std::size_t BUF_SIZE = 4096;
-constexpr std::size_t OUT_SIZE = 10240;
+//constexpr std::size_t OUT_SIZE = 10240;
+constexpr std::size_t OUT_SIZE = 1;
 
 static inline std::string get_tid_string() {
     std::ostringstream tid_os;
@@ -92,7 +93,12 @@ static void check(int ret)
 void RtgOutPrintf::open(const string& filename)
 {
     pid = getpid();
-    stream = fopen(filename.c_str(), "w");
+    if ("stderr" == filename) {
+        stream = stderr;
+    }
+    else {
+        stream = fopen(filename.c_str(), "w");
+    }
 }
 
 void RtgOutPrintf::hsa_api(const string& func, const string& args, lu tick, lu ticks, int localStatus)
@@ -188,7 +194,12 @@ void RtgOutPrintf::roctx_mark(uint64_t correlation_id, const string& message, lu
 
 void RtgOutPrintf::close()
 {
-    TlsData::flush_all(stream);
-    fclose(stream);
+    if (stderr == stream) {
+        // do nothing
+    }
+    else {
+        TlsData::flush_all(stream);
+        fclose(stream);
+    }
 }
 

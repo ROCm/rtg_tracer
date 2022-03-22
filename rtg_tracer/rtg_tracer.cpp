@@ -2774,8 +2774,12 @@ extern "C" bool OnLoad(void *pTable,
 #endif
     {
         // PID is needed to avoid clashses in multi-process use cases
+#if 0
         outname += ".";
         outname += RTG::pidstr();
+#else
+        outname = "stderr";
+#endif
     }
     fprintf(stderr, "RTG Tracer: Filename %s\n", outname.c_str());
 
@@ -2791,12 +2795,16 @@ extern "C" bool OnLoad(void *pTable,
         else
 #endif
         {
+#if 0
             if (RTG_LEGACY_PRINTF) {
                 RTG::gs_out = new RtgOutPrintf;
             }
             else {
                 RTG::gs_out = new RtgOutPrintfLockless;
             }
+#else
+            RTG::gs_out = new RtgOutPrintf;
+#endif
         }
         RTG::gs_out->open(outname);
 
