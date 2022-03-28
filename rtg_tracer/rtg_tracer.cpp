@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -82,6 +83,8 @@ struct roctx_data_t {
 // for tracking agents and streams with 0-based index.
 class AgentInfo {
 public:
+    explicit AgentInfo(hsa_agent_t agent);
+
     hsa_agent_t get_agent() { return agent; }
     int get_agent_index() { return index; }
     int get_queue_index(hsa_queue_t *queue);
@@ -97,13 +100,13 @@ public:
 
     static AgentInfo* Get(hsa_agent_t agent);
     static AgentInfo* Get(int index);
+    static bool IsCpuAgent(hsa_agent_t agent);
+    static bool IsGpuMemoryPool(hsa_amd_memory_pool_t pool);
     static void get_agent_queue_indexes(hsa_agent_t agent, hsa_queue_t *queue, int &agent_index, int &queue_index);
 
-    static void Init(const std::vector<hsa_agent_t> &agents);
+    static void SetVisibleGpuAgents(const std::vector<hsa_agent_t> &agents);
 
 private:
-    explicit AgentInfo(hsa_agent_t agent, int index);
-
     hsa_agent_t agent;
     int index;
     hsa_queue_t *signal_queue;
@@ -111,8 +114,13 @@ private:
     mutex_t queue_index_mutex;
     mutex_t op_mutex;
     std::list<Op> op_list;
+    bool is_cpu;
+    hsa_amd_memory_pool_t fine_grain_pool;
+    hsa_amd_memory_pool_t coarse_grain_pool;
+    hsa_amd_memory_pool_t kern_arg_pool;
     static std::unordered_map<uint64_t, AgentInfo*> s_agent_info_map;
-    static std::vector<AgentInfo*> s_agent_info;
+    static std::vector<AgentInfo*> s_visible_gpus;
+    static int s_counter;
 };
 
 //////////////////////////////////////////////////////////////////////////////
@@ -130,9 +138,6 @@ static std::unordered_map<std::string,bool> gs_hsa_enabled_map; // Lookup which 
 // Executables loading tracking, for looking up kernel names.
 static mutex_t gs_kernel_name_mutex_; // protects gs_symbols_map_
 static symbols_map_t* gs_symbols_map_; // maps HSA executable address to kernel name, protected by gs_kernel_name_mutex_
-
-static std::vector<hsa_agent_t> gs_gpu_agents; // all gpu agents, in order reported by HSA, possibly filtered by visible
-static std::vector<hsa_agent_t> gs_cpu_agents; // all cpu agents, in order reported by HSA
 
 static ctpl::thread_pool gs_pool(1);        // thread pool for signal waits
 static ctpl::thread_pool gs_signal_pool(1); // thread pool for signal destroy
@@ -160,6 +165,14 @@ static std::vector<std::string> gs_hip_api_names(HIP_API_ID_NUMBER); // shared c
 
 static thread_local std::vector<roctx_data_t> gstl_roctx_stack; // for roctx range push pop
 static thread_local std::unordered_map<int,roctx_data_t> gstl_roctx_range; // for roctx range start stop
+
+constexpr size_t GUARD_SIZE = 2 * 1024 * 1024;
+constexpr char GUARD_BYTE = 1;
+constexpr int GUARD_INT = 0xdead;
+constexpr int GUARD_INT_COUNT = GUARD_SIZE / GUARD_INT;
+static std::unordered_map<void*, size_t> gs_allocations;
+static thread_local int gstl_guard_int_buffer[GUARD_INT_COUNT];
+static thread_local hsa_signal_t gstl_guard_signal;
 
 //////////////////////////////////////////////////////////////////////////////
 // global static function declarations ///////////////////////////////////////
@@ -190,25 +203,47 @@ static hsa_status_t hsa_executable_symbols_cb(hsa_executable_t exec, hsa_executa
 
 // HSA iterator callbcaks
 static hsa_status_t hsa_iterate_agent_cb(hsa_agent_t agent, void* data);
+static hsa_status_t hsa_iterate_cpu_agent_memory_pools_cb(hsa_amd_memory_pool_t pool, void* data);
+static hsa_status_t hsa_iterate_gpu_agent_memory_pools_cb(hsa_amd_memory_pool_t pool, void* data);
 static void hsa_amd_queue_intercept_cb(const void* in_packets, uint64_t count, uint64_t user_que_idx, void* data, hsa_amd_queue_intercept_packet_writer writer);
 
 // HSA helpers
-static hsa_signal_t CreateSignal();
+static hsa_signal_t CreateSignal(bool count=true);
 static void DestroySignal(hsa_signal_t signal);
+
+// page guard
+static void init_page_guard_once();
 
 ///////////////////////////////////
 /// class AgentInfo implementation
 ///////////////////////////////////
 std::unordered_map<uint64_t, AgentInfo*> AgentInfo::s_agent_info_map;
-std::vector<AgentInfo*> AgentInfo::s_agent_info;
+std::vector<AgentInfo*> AgentInfo::s_visible_gpus;
+int AgentInfo::s_counter{0};
 
-AgentInfo::AgentInfo(hsa_agent_t agent, int index)
+AgentInfo::AgentInfo(hsa_agent_t agent)
     : agent(agent)
-    , index{index}
+    , index{s_counter++}
     , signal_queue{nullptr}
     , queue_index_map{}
     , queue_index_mutex{}
+    , op_mutex{}
+    , op_list{}
+    , is_cpu{}
+    , fine_grain_pool{0}
+    , coarse_grain_pool{0}
+    , kern_arg_pool{0}
 {
+}
+
+bool AgentInfo::IsCpuAgent(hsa_agent_t agent)
+{
+    return Get(agent)->is_cpu;
+}
+
+bool AgentInfo::IsGpuMemoryPool(hsa_amd_memory_pool_t pool)
+{
+    return s_gpu_memory_pools.count(pool.handle) != 0;
 }
 
 int AgentInfo::get_queue_index(hsa_queue_t *queue) {
@@ -283,7 +318,7 @@ AgentInfo* AgentInfo::Get(hsa_agent_t agent) {
 }
 
 AgentInfo* AgentInfo::Get(int index) {
-    return s_agent_info[index];
+    return s_visible_gpus[index];
 }
 
 void AgentInfo::get_agent_queue_indexes(hsa_agent_t agent, hsa_queue_t *queue, int &agent_index, int &queue_index)
@@ -293,13 +328,11 @@ void AgentInfo::get_agent_queue_indexes(hsa_agent_t agent, hsa_queue_t *queue, i
     queue_index = info->get_queue_index(queue);
 }
 
-void AgentInfo::Init(const std::vector<hsa_agent_t> &agents)
+void AgentInfo::SetVisibleGpuAgents(const std::vector<hsa_agent_t> &agents)
 {
     int index = 0;
     for (auto agent : agents) {
-        auto info = new RTG::AgentInfo(agent, index++);
-        s_agent_info.emplace_back(info);
-        s_agent_info_map.emplace(agent.handle, info);
+        s_visible_gpus.emplace_back(Get(agent));
     }
 }
 
@@ -1669,6 +1702,117 @@ hsa_status_t hsa_amd_agent_iterate_memory_pools(hsa_agent_t agent, hsa_status_t 
     return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_agent_iterate_memory_pools_fn(agent, callback, data));
 }
 
+#define RTG_HSA_CHECK_STATUS(msg, status) do { \
+    if (status != HSA_STATUS_SUCCESS) {        \
+        fprintf(stderr, "RTG Tracer: " msg);   \
+        abort();                               \
+    }                                          \
+} while (false)
+
+static void my_hsa_copy(void *dst, const void *src, size_t size)
+{
+    hsa_signal_t signal = CreateSignal();
+    hsa_status_t status;
+    hsa_amd_pointer_info_t src_info;
+    hsa_amd_pointer_info_t dst_info;
+
+    status = gs_OrigExtApiTable.hsa_amd_pointer_info_fn(src, &src_info, NULL, NULL, NULL);
+    RTG_HSA_CHECK_STATUS("Error getting hsa_amd_pointer_info src_info", status);
+    status = gs_OrigExtApiTable.hsa_amd_pointer_info_fn(dst, &dst_info, NULL, NULL, NULL);
+    RTG_HSA_CHECK_STATUS("Error getting hsa_amd_pointer_info dst_info", status);
+    //status = gs_OrigExtApiTable.hsa_amd_memory_async_copy_fn(dst, dst_info.agentOwner, src, src_info.agentOwner, GUARD_SIZE, 0, NULL, signal);
+    status = gs_OrigExtApiTable.hsa_amd_memory_async_copy_fn(dst_info.agentBaseAddress, dst_info.agentOwner, src_info.agentBaseAddress, src_info.agentOwner, GUARD_SIZE, 0, NULL, signal);
+    RTG_HSA_CHECK_STATUS("Error hsa_amd_memory_async_copy failed", status);
+    gs_OrigCoreApiTable.hsa_signal_wait_relaxed_fn(signal, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
+
+    DestroySignal(signal);
+}
+
+#if 0
+static void guard_check(void *ptr)
+{
+    auto loc = gs_allocations.find(ptr);
+    if (loc == gs_allocations.end()) {
+        fprintf(stderr, "RTG Tracer: allocation lookup error\n");
+        //exit(EXIT_FAILURE);
+    }
+    size_t size = gs_allocations[ptr];
+    char *cptr = (char*)ptr + loc->second; // + size
+    int dst[GUARD_INT_COUNT];
+    hipMemcpy(dst, cptr, GUARD_SIZE, hipMemcpyDeviceToHost);
+    bool okay = true;
+    for (size_t i=0; i<GUARD_INT_COUNT; ++i) {
+        if (dst[i] != GUARD_INT) {
+            okay = false;
+            fprintf(stderr, "RTG Tracer: dst[%zu]=%d != %d=GUARD_INT\n", i, dst[i], GUARD_INT);
+            break;
+        }
+    }
+    if (!okay) {
+        fprintf(stderr, "RTG Tracer: guard error\n");
+    }
+}
+#else
+static void guard_check(void *ptr)
+{
+    auto loc = gs_allocations.find(ptr);
+    if (loc == gs_allocations.end()) {
+        fprintf(stderr, "RTG Tracer: allocation lookup error\n");
+        //exit(EXIT_FAILURE);
+    }
+    size_t size = gs_allocations[ptr];
+    char *cptr = (char*)ptr + loc->second; // + size
+    int dst[GUARD_INT_COUNT];
+    my_hsa_copy(dst, cptr, GUARD_SIZE);
+    bool okay = true;
+    for (size_t i=0; i<GUARD_INT_COUNT; ++i) {
+        if (dst[i] != GUARD_INT) {
+            okay = false;
+            fprintf(stderr, "RTG Tracer: dst[%zu]=%d != %d=GUARD_INT\n", i, dst[i], GUARD_INT);
+            break;
+        }
+    }
+    if (!okay) {
+        fprintf(stderr, "RTG Tracer: guard error\n");
+    }
+}
+#endif
+
+static void init_page_guard_once()
+{
+    if (gstl_guard_signal.handle == 0) {
+        for (size_t i=0; i<GUARD_INT_COUNT; ++i) {
+            gstl_guard_int_buffer[i] = GUARD_INT;
+        }
+        gstl_guard_signal = CreateSignal(false);
+    }
+}
+
+#if 1
+// Mirrors Amd Extension Apis
+hsa_status_t hsa_amd_memory_pool_allocate(hsa_amd_memory_pool_t memory_pool, size_t size, uint32_t flags, void** ptr) {
+    auto status = gs_OrigExtApiTable.hsa_amd_memory_pool_allocate_fn(memory_pool, size + GUARD_SIZE, flags, ptr);
+    if (AgentInfo::IsGpuMemoryPool(memory_pool)) {
+        fprintf(stderr, "gs_allocations insert ptr=%p size=%zu\n", *ptr, size);
+        gs_allocations[*ptr] = size;
+        char *cptr = (char*)*ptr + size;
+        fprintf(stderr, "gs_allocations gptr=%p size=%zu\n", cptr, GUARD_SIZE);
+        my_hsa_copy(cptr, gstl_guard_int_buffer, GUARD_SIZE);
+        guard_check(*ptr);
+    }
+    else {
+        fprintf(stderr, "CPU pool, skipping\n");
+    }
+    return status;
+}
+
+// Mirrors Amd Extension Apis
+hsa_status_t hsa_amd_memory_pool_free(void* ptr) {
+    fprintf(stderr, "gs_allocations.find ptr=%p\n", ptr);
+    guard_check(ptr);
+    return gs_OrigExtApiTable.hsa_amd_memory_pool_free_fn(ptr);
+}
+#else
 // Mirrors Amd Extension Apis
 hsa_status_t hsa_amd_memory_pool_allocate(hsa_amd_memory_pool_t memory_pool, size_t size, uint32_t flags, void** ptr) {
     TRACE(memory_pool, size, flags, ptr);
@@ -1680,6 +1824,7 @@ hsa_status_t hsa_amd_memory_pool_free(void* ptr) {
     TRACE(ptr);
     return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_memory_pool_free_fn(ptr));
 }
+#endif
 
 inline hsa_device_type_t agent_type(hsa_agent_t x)
 {
@@ -2279,13 +2424,6 @@ static void InitEnabledTableExtApi(bool value) {
     gs_hsa_enabled_map["hsa_amd_queue_cu_get_mask"] = value;
 }
 
-#define RTG_HSA_CHECK_STATUS(msg, status) do { \
-    if (status != HSA_STATUS_SUCCESS) {        \
-        fprintf(stderr, "RTG Tracer: " msg);   \
-        abort();                               \
-    }                                          \
-} while (false)
-
 static hsa_status_t hsa_executable_symbols_cb(hsa_executable_t exec, hsa_executable_symbol_t symbol, void *data) {
     hsa_symbol_kind_t value = (hsa_symbol_kind_t)0;
     hsa_status_t status = gs_OrigCoreApiTable.hsa_executable_symbol_get_info_fn(symbol, HSA_EXECUTABLE_SYMBOL_INFO_TYPE, &value);
@@ -2319,6 +2457,7 @@ static hsa_status_t hsa_iterate_agent_cb(hsa_agent_t agent, void* data) {
         return stat;
     }
 
+    AgentInfo info = new AgentInfo(agent);
     if (dev_type == HSA_DEVICE_TYPE_CPU) {
         gs_cpu_agents.push_back(agent);
     } else if (dev_type == HSA_DEVICE_TYPE_GPU) {
@@ -2326,6 +2465,20 @@ static hsa_status_t hsa_iterate_agent_cb(hsa_agent_t agent, void* data) {
     }
 
     return stat;
+}
+
+static hsa_status_t hsa_iterate_cpu_agent_memory_pools_cb(hsa_amd_memory_pool_t pool, void* data) {
+    auto pools = reinterpret_cast<std::vector<hsa_amd_memory_pool_t>*>(data);
+    pools->push_back(pool);
+
+    return HSA_STATUS_SUCCESS;
+}
+
+static hsa_status_t hsa_iterate_gpu_agent_memory_pools_cb(hsa_amd_memory_pool_t pool, void* data) {
+    auto pools = reinterpret_cast<std::vector<hsa_amd_memory_pool_t>*>(data);
+    pools->push_back(pool);
+
+    return HSA_STATUS_SUCCESS;
 }
 
 static hsa_status_t hsa_executable_freeze_interceptor(hsa_executable_t executable, const char *options) {
@@ -2505,9 +2658,9 @@ static void hsa_amd_queue_intercept_cb(
     }
 }
 
-static hsa_signal_t CreateSignal()
+static hsa_signal_t CreateSignal(bool count)
 {
-    ++gs_host_count_signals;
+    if (count) ++gs_host_count_signals;
     hsa_signal_t signal;
     hsa_status_t status = gs_OrigCoreApiTable.hsa_signal_create_fn(1, 0, nullptr, &signal);
     if (status != HSA_STATUS_SUCCESS) {
@@ -2893,7 +3046,7 @@ extern "C" bool OnLoad(void *pTable,
         RTG::gs_gpu_agents = valid_agents;
     }
 
-    RTG::AgentInfo::Init(RTG::gs_gpu_agents);
+    RTG::AgentInfo::SetVisibleGpuAgents(RTG::gs_gpu_agents);
 
     std::atexit(RTG::finalize);
 

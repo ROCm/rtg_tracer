@@ -8,7 +8,8 @@ ROC_INCLUDE = -I/opt/rocm/include -I/opt/rocm/hip/include -I/opt/rocm/roctracer/
 RTG_MAIN = rtg_tracer.so
 RPD_MAIN = rpd_tracer.so
 
-all: $(RTG_MAIN) $(RPD_MAIN)
+#all: $(RTG_MAIN) $(RPD_MAIN)
+all: $(RTG_MAIN)
 
 RTG_SRCS =
 RTG_SRCS += rtg_tracer.cpp
@@ -18,7 +19,7 @@ RTG_SRCS += rtg_out_printf_lockless.cpp
 RTG_OBJS = $(RTG_SRCS:.cpp=.o)
 
 $(RTG_MAIN): $(RTG_OBJS)
-	$(CXX) -o $@ $(RTG_OBJS) -shared -rdynamic -std=c++14 -L/opt/rocm/lib $(ROC_LIBS) -g -Wl,-rpath,/opt/rocm/lib
+	$(CXX) -o $@ $(RTG_OBJS) -shared -rdynamic -std=c++14 -L/opt/rocm/lib $(ROC_LIBS) -g -O0 -Wl,-rpath,/opt/rocm/lib
 
 RPD_SRCS =
 RPD_SRCS += rtg_out_printf.cpp
@@ -38,10 +39,10 @@ $(RPD_MAIN): $(RPD_OBJS)
 	$(CXX) -o $@ $(RPD_OBJS) -shared -rdynamic -std=c++14 -L/opt/rocm/lib $(ROC_LIBS) -g
 
 .cpp.o:
-	$(CXX) -o $@ -c $< $(ROC_INCLUDE) -D__HIP_PLATFORM_AMD__ -DAMD_INTERNAL_BUILD -std=c++14 -fPIC -g -O3
+	$(CXX) -o $@ -c $< $(ROC_INCLUDE) -D__HIP_PLATFORM_AMD__ -DAMD_INTERNAL_BUILD -std=c++14 -fPIC -g -O0
 
 rpd_tracer.o: rtg_tracer.cpp
-	$(CXX) -o $@ -c $< $(ROC_INCLUDE) -D__HIP_PLATFORM_AMD__ -DAMD_INTERNAL_BUILD -std=c++14 -fPIC -g -O3 -DRPD_TRACER
+	$(CXX) -o $@ -c $< $(ROC_INCLUDE) -D__HIP_PLATFORM_AMD__ -DAMD_INTERNAL_BUILD -std=c++14 -fPIC -g -O0 -DRPD_TRACER
 
 
 rtg_out_printf.o: rtg_out_printf.h rtg_out.h
