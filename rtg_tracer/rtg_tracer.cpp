@@ -175,6 +175,7 @@ constexpr size_t GUARD_SIZE = 2 * 1024 * 1024;
 constexpr char GUARD_BYTE = 1;
 constexpr int GUARD_INT = 0xdead;
 constexpr int GUARD_INT_COUNT = GUARD_SIZE / GUARD_INT;
+static mutex_t gs_allocations_mutex_; // protects gs_allocations
 static std::unordered_map<void*, size_t> gs_allocations;
 static thread_local int* gstl_guard_int_buffer{NULL};
 
@@ -439,12 +440,16 @@ static void guard_check(void *ptr)
         if (RTG_VERBOSE) fprintf(stderr, "RTG Tracer: allocated gstl_guard_int_buffer %p\n", gstl_guard_int_buffer);
     }
 
-    auto loc = gs_allocations.find(ptr);
-    if (loc == gs_allocations.end()) {
-        fprintf(stderr, "RTG Tracer: allocation lookup error\n");
-        //exit(EXIT_FAILURE);
+
+    std::unordered_map<void*, size_t>::iterator loc;
+    {
+        std::lock_guard<mutex_t> lck(gs_allocations_mutex_);
+        loc = gs_allocations.find(ptr);
+        if (loc == gs_allocations.end()) {
+            fprintf(stderr, "RTG Tracer: allocation lookup error\n");
+            //exit(EXIT_FAILURE);
+        }
     }
-    size_t size = gs_allocations[ptr];
     char *cptr = (char*)ptr + loc->second; // + size
     my_hsa_copy(gstl_guard_int_buffer, cptr, GUARD_SIZE);
     bool okay = true;
@@ -482,6 +487,7 @@ static void guard_check_all()
         if (RTG_VERBOSE) fprintf(stderr, "RTG Tracer: allocated gstl_guard_int_buffer %p\n", gstl_guard_int_buffer);
     }
 
+    std::lock_guard<mutex_t> lck(gs_allocations_mutex_);
     for (auto& it: gs_allocations) {
         auto ptr = it.first;
         auto size = it.second;
@@ -1846,16 +1852,22 @@ hsa_status_t hsa_amd_memory_pool_allocate(hsa_amd_memory_pool_t memory_pool, siz
         if (RTG_VERBOSE) fprintf(stderr, "RTG Tracer: CPU pool, skipping\n");
     }
     else if (info->fine_grain_pool.handle == memory_pool.handle) {
-        if (RTG_VERBOSE) fprintf(stderr, "RTG Tracer: gs_allocations insert fine ptr=%p size=%zu\n", *ptr, size);
-        gs_allocations[*ptr] = size;
+        {
+            std::lock_guard<mutex_t> lck(gs_allocations_mutex_);
+            if (RTG_VERBOSE) fprintf(stderr, "RTG Tracer: gs_allocations insert fine ptr=%p size=%zu\n", *ptr, size);
+            gs_allocations[*ptr] = size;
+        }
         char *cptr = (char*)*ptr + size;
         if (RTG_VERBOSE) fprintf(stderr, "RTG Tracer: gs_allocations gptr=%p size=%zu\n", cptr, GUARD_SIZE);
         my_hsa_copy(cptr, AgentInfo::s_cpu_agents[0]->guard_page, GUARD_SIZE);
         //guard_check(*ptr);
     }
     else if (info->coarse_grain_pool.handle == memory_pool.handle) {
-        if (RTG_VERBOSE) fprintf(stderr, "RTG Tracer: gs_allocations insert coarse ptr=%p size=%zu\n", *ptr, size);
-        gs_allocations[*ptr] = size;
+        {
+            std::lock_guard<mutex_t> lck(gs_allocations_mutex_);
+            if (RTG_VERBOSE) fprintf(stderr, "RTG Tracer: gs_allocations insert coarse ptr=%p size=%zu\n", *ptr, size);
+            gs_allocations[*ptr] = size;
+        }
         char *cptr = (char*)*ptr + size;
         if (RTG_VERBOSE) fprintf(stderr, "RTG Tracer: gs_allocations gptr=%p size=%zu\n", cptr, GUARD_SIZE);
         my_hsa_copy(cptr, AgentInfo::s_cpu_agents[0]->guard_page, GUARD_SIZE);
@@ -1866,7 +1878,6 @@ hsa_status_t hsa_amd_memory_pool_allocate(hsa_amd_memory_pool_t memory_pool, siz
 
 // Mirrors Amd Extension Apis
 hsa_status_t hsa_amd_memory_pool_free(void* ptr) {
-    if (RTG_VERBOSE) fprintf(stderr, "gs_allocations.find ptr=%p\n", ptr);
     guard_check(ptr);
     return gs_OrigExtApiTable.hsa_amd_memory_pool_free_fn(ptr);
 }
