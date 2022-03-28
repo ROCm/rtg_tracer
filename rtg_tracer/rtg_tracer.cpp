@@ -100,13 +100,13 @@ public:
 
     static AgentInfo* Get(hsa_agent_t agent);
     static AgentInfo* Get(int index);
+    static AgentInfo* Get(hsa_amd_memory_pool_t pool);
     static bool IsCpuAgent(hsa_agent_t agent);
     static bool IsGpuMemoryPool(hsa_amd_memory_pool_t pool);
-    static void get_agent_queue_indexes(hsa_agent_t agent, hsa_queue_t *queue, int &agent_index, int &queue_index);
-
+    static void GetAgentQueueIndexes(hsa_agent_t agent, hsa_queue_t *queue, int &agent_index, int &queue_index);
     static void SetVisibleGpuAgents(const std::vector<hsa_agent_t> &agents);
 
-private:
+//private:
     hsa_agent_t agent;
     int index;
     hsa_queue_t *signal_queue;
@@ -118,7 +118,12 @@ private:
     hsa_amd_memory_pool_t fine_grain_pool;
     hsa_amd_memory_pool_t coarse_grain_pool;
     hsa_amd_memory_pool_t kern_arg_pool;
-    static std::unordered_map<uint64_t, AgentInfo*> s_agent_info_map;
+    int *guard_page;
+    std::unordered_map<uint64_t, std::string> completed_kernel;
+    static std::unordered_map<uint64_t, AgentInfo*> s_agent_map;
+    static std::unordered_map<uint64_t, AgentInfo*> s_pool_to_agent_map;
+    static std::vector<AgentInfo*> s_cpu_agents;
+    static std::vector<AgentInfo*> s_gpu_agents;
     static std::vector<AgentInfo*> s_visible_gpus;
     static int s_counter;
 };
@@ -171,8 +176,7 @@ constexpr char GUARD_BYTE = 1;
 constexpr int GUARD_INT = 0xdead;
 constexpr int GUARD_INT_COUNT = GUARD_SIZE / GUARD_INT;
 static std::unordered_map<void*, size_t> gs_allocations;
-static thread_local int gstl_guard_int_buffer[GUARD_INT_COUNT];
-static thread_local hsa_signal_t gstl_guard_signal;
+static thread_local int* gstl_guard_int_buffer{NULL};
 
 //////////////////////////////////////////////////////////////////////////////
 // global static function declarations ///////////////////////////////////////
@@ -208,16 +212,16 @@ static hsa_status_t hsa_iterate_gpu_agent_memory_pools_cb(hsa_amd_memory_pool_t 
 static void hsa_amd_queue_intercept_cb(const void* in_packets, uint64_t count, uint64_t user_que_idx, void* data, hsa_amd_queue_intercept_packet_writer writer);
 
 // HSA helpers
-static hsa_signal_t CreateSignal(bool count=true);
+static hsa_signal_t CreateSignal(int initial_value=1);
 static void DestroySignal(hsa_signal_t signal);
-
-// page guard
-static void init_page_guard_once();
 
 ///////////////////////////////////
 /// class AgentInfo implementation
 ///////////////////////////////////
-std::unordered_map<uint64_t, AgentInfo*> AgentInfo::s_agent_info_map;
+std::unordered_map<uint64_t, AgentInfo*> AgentInfo::s_agent_map;
+std::unordered_map<uint64_t, AgentInfo*> AgentInfo::s_pool_to_agent_map;
+std::vector<AgentInfo*> AgentInfo::s_cpu_agents;
+std::vector<AgentInfo*> AgentInfo::s_gpu_agents;
 std::vector<AgentInfo*> AgentInfo::s_visible_gpus;
 int AgentInfo::s_counter{0};
 
@@ -229,11 +233,14 @@ AgentInfo::AgentInfo(hsa_agent_t agent)
     , queue_index_mutex{}
     , op_mutex{}
     , op_list{}
-    , is_cpu{}
+    , is_cpu{false}
     , fine_grain_pool{0}
     , coarse_grain_pool{0}
     , kern_arg_pool{0}
+    , guard_page{NULL}
+    , completed_kernel{}
 {
+    s_agent_map[agent.handle] = this;
 }
 
 bool AgentInfo::IsCpuAgent(hsa_agent_t agent)
@@ -243,7 +250,7 @@ bool AgentInfo::IsCpuAgent(hsa_agent_t agent)
 
 bool AgentInfo::IsGpuMemoryPool(hsa_amd_memory_pool_t pool)
 {
-    return s_gpu_memory_pools.count(pool.handle) != 0;
+    return !Get(pool)->is_cpu;
 }
 
 int AgentInfo::get_queue_index(hsa_queue_t *queue) {
@@ -314,14 +321,18 @@ uint64_t AgentInfo::find_op(const std::string &name)
 }
 
 AgentInfo* AgentInfo::Get(hsa_agent_t agent) {
-    return s_agent_info_map[agent.handle];
+    return s_agent_map[agent.handle];
 }
 
 AgentInfo* AgentInfo::Get(int index) {
     return s_visible_gpus[index];
 }
 
-void AgentInfo::get_agent_queue_indexes(hsa_agent_t agent, hsa_queue_t *queue, int &agent_index, int &queue_index)
+AgentInfo* AgentInfo::Get(hsa_amd_memory_pool_t pool) {
+    return s_pool_to_agent_map[pool.handle];
+}
+
+void AgentInfo::GetAgentQueueIndexes(hsa_agent_t agent, hsa_queue_t *queue, int &agent_index, int &queue_index)
 {
     auto *info = AgentInfo::Get(agent);
     agent_index = info->get_agent_index();
@@ -330,7 +341,6 @@ void AgentInfo::get_agent_queue_indexes(hsa_agent_t agent, hsa_queue_t *queue, i
 
 void AgentInfo::SetVisibleGpuAgents(const std::vector<hsa_agent_t> &agents)
 {
-    int index = 0;
     for (auto agent : agents) {
         s_visible_gpus.emplace_back(Get(agent));
     }
@@ -341,7 +351,7 @@ struct InterceptCallbackData
     InterceptCallbackData(hsa_queue_t *queue, hsa_agent_t agent, hsa_queue_t *signal_queue)
         : queue(queue), agent(agent), signal_queue(signal_queue), agent_index(0), queue_index(0), seq_index(0)
     {
-        AgentInfo::get_agent_queue_indexes(agent, queue, agent_index, queue_index);
+        AgentInfo::GetAgentQueueIndexes(agent, queue, agent_index, queue_index);
     }
     hsa_queue_t *queue;
     hsa_agent_t agent;
@@ -372,6 +382,125 @@ uint64_t inline tick() {
     struct timespec tp;
     ::clock_gettime(CLOCK_MONOTONIC, &tp);
     return (uint64_t)tp.tv_sec * (1000ULL * 1000ULL * 1000ULL) + (uint64_t)tp.tv_nsec;
+}
+
+#define RTG_HSA_CHECK_STATUS(msg, status) do { \
+    if (status != HSA_STATUS_SUCCESS) {        \
+        fprintf(stderr, "RTG Tracer: " msg);   \
+        abort();                               \
+    }                                          \
+} while (false)
+
+static void my_hsa_copy(void *dst, const void *src, size_t size)
+{
+    hsa_signal_t signal = CreateSignal();
+    hsa_status_t status;
+    hsa_amd_pointer_info_t src_info;
+    hsa_amd_pointer_info_t dst_info;
+
+    status = gs_OrigExtApiTable.hsa_amd_pointer_info_fn(src, &src_info, NULL, NULL, NULL);
+    RTG_HSA_CHECK_STATUS("Error getting hsa_amd_pointer_info src_info\n", status);
+    status = gs_OrigExtApiTable.hsa_amd_pointer_info_fn(dst, &dst_info, NULL, NULL, NULL);
+    RTG_HSA_CHECK_STATUS("Error getting hsa_amd_pointer_info dst_info\n", status);
+    status = gs_OrigExtApiTable.hsa_amd_memory_async_copy_fn(dst, dst_info.agentOwner, src, src_info.agentOwner, GUARD_SIZE, 0, NULL, signal);
+    RTG_HSA_CHECK_STATUS("Error hsa_amd_memory_async_copy failed\n", status);
+    gs_OrigCoreApiTable.hsa_signal_wait_relaxed_fn(signal, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
+
+    DestroySignal(signal);
+}
+
+static void print_all_queues_last_kernel()
+{
+    for (auto &agent : AgentInfo::s_gpu_agents) {
+        fprintf(stderr, "RTG Tracer: agent %d\n", agent->index);
+        for (auto &queue : agent->completed_kernel) {
+            fprintf(stderr, "RTG Tracer:   queue %lu : last kernel %s\n", queue.first, queue.second.c_str());
+        }
+    }
+}
+
+static void guard_check(void *ptr)
+{
+    if (gstl_guard_int_buffer == NULL) {
+        auto status = gs_OrigExtApiTable.hsa_amd_memory_pool_allocate_fn(AgentInfo::s_cpu_agents[0]->fine_grain_pool, GUARD_SIZE, 0, (void**)&gstl_guard_int_buffer);
+        if (status != HSA_STATUS_SUCCESS) {
+            fprintf(stderr, "RTG Tracer: gstl_guard_int_buffer failed to allocate\n");
+            exit(EXIT_FAILURE);
+        }
+        std::vector<hsa_agent_t> agents;
+        for (size_t i=0; i<AgentInfo::s_gpu_agents.size(); ++i) {
+            agents.push_back(AgentInfo::s_gpu_agents[i]->agent);
+        }
+        status = gs_OrigExtApiTable.hsa_amd_agents_allow_access_fn(agents.size(), &agents[0], NULL, gstl_guard_int_buffer);
+        if (status != HSA_STATUS_SUCCESS) {
+            fprintf(stderr, "RTG Tracer: gstl_guard_int_buffer failed to allow access to GPUs\n");
+            exit(EXIT_FAILURE);
+        }
+        if (RTG_VERBOSE) fprintf(stderr, "RTG Tracer: allocated gstl_guard_int_buffer %p\n", gstl_guard_int_buffer);
+    }
+
+    auto loc = gs_allocations.find(ptr);
+    if (loc == gs_allocations.end()) {
+        fprintf(stderr, "RTG Tracer: allocation lookup error\n");
+        //exit(EXIT_FAILURE);
+    }
+    size_t size = gs_allocations[ptr];
+    char *cptr = (char*)ptr + loc->second; // + size
+    my_hsa_copy(gstl_guard_int_buffer, cptr, GUARD_SIZE);
+    bool okay = true;
+    for (size_t i=0; i<GUARD_INT_COUNT; ++i) {
+        if (gstl_guard_int_buffer[i] != GUARD_INT) {
+            okay = false;
+            fprintf(stderr, "RTG Tracer: dst[%zu]=%d != %d=GUARD_INT\n", i, gstl_guard_int_buffer[i], GUARD_INT);
+            break;
+        }
+    }
+    if (!okay) {
+        fprintf(stderr, "RTG Tracer: guard error\n");
+        print_all_queues_last_kernel();
+        exit(EXIT_FAILURE);
+    }
+}
+
+static void guard_check_all()
+{
+    if (gstl_guard_int_buffer == NULL) {
+        auto status = gs_OrigExtApiTable.hsa_amd_memory_pool_allocate_fn(AgentInfo::s_cpu_agents[0]->fine_grain_pool, GUARD_SIZE, 0, (void**)&gstl_guard_int_buffer);
+        if (status != HSA_STATUS_SUCCESS) {
+            fprintf(stderr, "RTG Tracer: gstl_guard_int_buffer failed to allocate\n");
+            exit(EXIT_FAILURE);
+        }
+        std::vector<hsa_agent_t> agents;
+        for (size_t i=0; i<AgentInfo::s_gpu_agents.size(); ++i) {
+            agents.push_back(AgentInfo::s_gpu_agents[i]->agent);
+        }
+        status = gs_OrigExtApiTable.hsa_amd_agents_allow_access_fn(agents.size(), &agents[0], NULL, gstl_guard_int_buffer);
+        if (status != HSA_STATUS_SUCCESS) {
+            fprintf(stderr, "RTG Tracer: gstl_guard_int_buffer failed to allow access to GPUs\n");
+            exit(EXIT_FAILURE);
+        }
+        if (RTG_VERBOSE) fprintf(stderr, "RTG Tracer: allocated gstl_guard_int_buffer %p\n", gstl_guard_int_buffer);
+    }
+
+    for (auto& it: gs_allocations) {
+        auto ptr = it.first;
+        auto size = it.second;
+        char *cptr = (char*)ptr + size;
+        my_hsa_copy(gstl_guard_int_buffer, cptr, GUARD_SIZE);
+        bool okay = true;
+        for (size_t i=0; i<GUARD_INT_COUNT; ++i) {
+            if (gstl_guard_int_buffer[i] != GUARD_INT) {
+                okay = false;
+                fprintf(stderr, "RTG Tracer: dst[%zu]=%d != %d=GUARD_INT\n", i, gstl_guard_int_buffer[i], GUARD_INT);
+                break;
+            }
+        }
+        if (!okay) {
+            fprintf(stderr, "RTG Tracer: guard error\n");
+            print_all_queues_last_kernel();
+            exit(EXIT_FAILURE);
+        }
+    }
 }
 
 #if RTG_DISABLE_LOGGING
@@ -661,7 +790,7 @@ std::string getCopyString(size_t sizeBytes, uint64_t start, uint64_t end)
 static void SignalWaiter(int id, SignalCallbackData *data)
 {
     //fprintf(stderr, "RTG Tracer: SignalWaiter id=%d queue=%lu agent=%lu signal=%lu orig_signal=%lu\n", id, data->queue->id, data->agent.handle, data->signal.handle, data->orig_signal.handle);
-    gs_OrigCoreApiTable.hsa_signal_wait_relaxed_fn(data->signal, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
+    gs_OrigCoreApiTable.hsa_signal_wait_relaxed_fn(data->signal, HSA_SIGNAL_CONDITION_EQ, 1, UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
 
     bool okay = data->compute_profile();
     if (okay) {
@@ -673,7 +802,7 @@ static void SignalWaiter(int id, SignalCallbackData *data)
             else if (data->is_copy) {
                 int agent_id = 0;
                 int queue_id = 0;
-                AgentInfo::get_agent_queue_indexes(data->agent, data->queue, agent_id, queue_id);
+                AgentInfo::GetAgentQueueIndexes(data->agent, data->queue, agent_id, queue_id);
                 const char *tag_ = getDirectionString(data->direction);
                 std::string msgstr = getCopyString(data->bytes, data->start, data->stop);
                 LOG_HCC(data->start, data->stop, "copy", tag_, msgstr.c_str(), agent_id, queue_id, data->seq_num_);
@@ -686,15 +815,16 @@ static void SignalWaiter(int id, SignalCallbackData *data)
         }
         else {
             if (data->is_barrier) {
-                LOG_BARRIER(data->queue, data->agent, data->signal, data->start, data->stop, data->id_, data->dep);
+                //LOG_BARRIER(data->queue, data->agent, data->signal, data->start, data->stop, data->id_, data->dep);
                 ++gs_cb_count_barriers;
             }
             else if (data->is_copy) {
-                LOG_COPY(data->agent, data->signal, data->start, data->stop, data->dep);
+                //LOG_COPY(data->agent, data->signal, data->start, data->stop, data->dep);
                 ++gs_cb_count_copies;
             }
             else {
-                LOG_DISPATCH(data->queue, data->agent, data->signal, data->start, data->stop, data->id_, data->name, data->cid);
+                AgentInfo::Get(data->agent)->completed_kernel[data->queue->id] = data->name;
+                //LOG_DISPATCH(data->queue, data->agent, data->signal, data->start, data->stop, data->id_, data->name, data->cid);
                 ++gs_cb_count_dispatches;
             }
         }
@@ -702,6 +832,11 @@ static void SignalWaiter(int id, SignalCallbackData *data)
     else {
         fprintf(stderr, "SOMETHING IS NOT OKAY\n");
     }
+
+    guard_check_all();
+
+    // decrement signal again to unblock the queue
+    gs_OrigCoreApiTable.hsa_signal_subtract_relaxed_fn(data->signal, 1);
 
     // we created the signal, we must free, but we can't until we know it is no longer needed
     // so wait on the associated original signal
@@ -1702,113 +1837,36 @@ hsa_status_t hsa_amd_agent_iterate_memory_pools(hsa_agent_t agent, hsa_status_t 
     return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_agent_iterate_memory_pools_fn(agent, callback, data));
 }
 
-#define RTG_HSA_CHECK_STATUS(msg, status) do { \
-    if (status != HSA_STATUS_SUCCESS) {        \
-        fprintf(stderr, "RTG Tracer: " msg);   \
-        abort();                               \
-    }                                          \
-} while (false)
-
-static void my_hsa_copy(void *dst, const void *src, size_t size)
-{
-    hsa_signal_t signal = CreateSignal();
-    hsa_status_t status;
-    hsa_amd_pointer_info_t src_info;
-    hsa_amd_pointer_info_t dst_info;
-
-    status = gs_OrigExtApiTable.hsa_amd_pointer_info_fn(src, &src_info, NULL, NULL, NULL);
-    RTG_HSA_CHECK_STATUS("Error getting hsa_amd_pointer_info src_info", status);
-    status = gs_OrigExtApiTable.hsa_amd_pointer_info_fn(dst, &dst_info, NULL, NULL, NULL);
-    RTG_HSA_CHECK_STATUS("Error getting hsa_amd_pointer_info dst_info", status);
-    //status = gs_OrigExtApiTable.hsa_amd_memory_async_copy_fn(dst, dst_info.agentOwner, src, src_info.agentOwner, GUARD_SIZE, 0, NULL, signal);
-    status = gs_OrigExtApiTable.hsa_amd_memory_async_copy_fn(dst_info.agentBaseAddress, dst_info.agentOwner, src_info.agentBaseAddress, src_info.agentOwner, GUARD_SIZE, 0, NULL, signal);
-    RTG_HSA_CHECK_STATUS("Error hsa_amd_memory_async_copy failed", status);
-    gs_OrigCoreApiTable.hsa_signal_wait_relaxed_fn(signal, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
-
-    DestroySignal(signal);
-}
-
-#if 0
-static void guard_check(void *ptr)
-{
-    auto loc = gs_allocations.find(ptr);
-    if (loc == gs_allocations.end()) {
-        fprintf(stderr, "RTG Tracer: allocation lookup error\n");
-        //exit(EXIT_FAILURE);
-    }
-    size_t size = gs_allocations[ptr];
-    char *cptr = (char*)ptr + loc->second; // + size
-    int dst[GUARD_INT_COUNT];
-    hipMemcpy(dst, cptr, GUARD_SIZE, hipMemcpyDeviceToHost);
-    bool okay = true;
-    for (size_t i=0; i<GUARD_INT_COUNT; ++i) {
-        if (dst[i] != GUARD_INT) {
-            okay = false;
-            fprintf(stderr, "RTG Tracer: dst[%zu]=%d != %d=GUARD_INT\n", i, dst[i], GUARD_INT);
-            break;
-        }
-    }
-    if (!okay) {
-        fprintf(stderr, "RTG Tracer: guard error\n");
-    }
-}
-#else
-static void guard_check(void *ptr)
-{
-    auto loc = gs_allocations.find(ptr);
-    if (loc == gs_allocations.end()) {
-        fprintf(stderr, "RTG Tracer: allocation lookup error\n");
-        //exit(EXIT_FAILURE);
-    }
-    size_t size = gs_allocations[ptr];
-    char *cptr = (char*)ptr + loc->second; // + size
-    int dst[GUARD_INT_COUNT];
-    my_hsa_copy(dst, cptr, GUARD_SIZE);
-    bool okay = true;
-    for (size_t i=0; i<GUARD_INT_COUNT; ++i) {
-        if (dst[i] != GUARD_INT) {
-            okay = false;
-            fprintf(stderr, "RTG Tracer: dst[%zu]=%d != %d=GUARD_INT\n", i, dst[i], GUARD_INT);
-            break;
-        }
-    }
-    if (!okay) {
-        fprintf(stderr, "RTG Tracer: guard error\n");
-    }
-}
-#endif
-
-static void init_page_guard_once()
-{
-    if (gstl_guard_signal.handle == 0) {
-        for (size_t i=0; i<GUARD_INT_COUNT; ++i) {
-            gstl_guard_int_buffer[i] = GUARD_INT;
-        }
-        gstl_guard_signal = CreateSignal(false);
-    }
-}
-
 #if 1
 // Mirrors Amd Extension Apis
 hsa_status_t hsa_amd_memory_pool_allocate(hsa_amd_memory_pool_t memory_pool, size_t size, uint32_t flags, void** ptr) {
     auto status = gs_OrigExtApiTable.hsa_amd_memory_pool_allocate_fn(memory_pool, size + GUARD_SIZE, flags, ptr);
-    if (AgentInfo::IsGpuMemoryPool(memory_pool)) {
-        fprintf(stderr, "gs_allocations insert ptr=%p size=%zu\n", *ptr, size);
+    auto info = AgentInfo::Get(memory_pool);
+    if (info->is_cpu) {
+        if (RTG_VERBOSE) fprintf(stderr, "RTG Tracer: CPU pool, skipping\n");
+    }
+    else if (info->fine_grain_pool.handle == memory_pool.handle) {
+        if (RTG_VERBOSE) fprintf(stderr, "RTG Tracer: gs_allocations insert fine ptr=%p size=%zu\n", *ptr, size);
         gs_allocations[*ptr] = size;
         char *cptr = (char*)*ptr + size;
-        fprintf(stderr, "gs_allocations gptr=%p size=%zu\n", cptr, GUARD_SIZE);
-        my_hsa_copy(cptr, gstl_guard_int_buffer, GUARD_SIZE);
-        guard_check(*ptr);
+        if (RTG_VERBOSE) fprintf(stderr, "RTG Tracer: gs_allocations gptr=%p size=%zu\n", cptr, GUARD_SIZE);
+        my_hsa_copy(cptr, AgentInfo::s_cpu_agents[0]->guard_page, GUARD_SIZE);
+        //guard_check(*ptr);
     }
-    else {
-        fprintf(stderr, "CPU pool, skipping\n");
+    else if (info->coarse_grain_pool.handle == memory_pool.handle) {
+        if (RTG_VERBOSE) fprintf(stderr, "RTG Tracer: gs_allocations insert coarse ptr=%p size=%zu\n", *ptr, size);
+        gs_allocations[*ptr] = size;
+        char *cptr = (char*)*ptr + size;
+        if (RTG_VERBOSE) fprintf(stderr, "RTG Tracer: gs_allocations gptr=%p size=%zu\n", cptr, GUARD_SIZE);
+        my_hsa_copy(cptr, AgentInfo::s_cpu_agents[0]->guard_page, GUARD_SIZE);
+        //guard_check(*ptr);
     }
     return status;
 }
 
 // Mirrors Amd Extension Apis
 hsa_status_t hsa_amd_memory_pool_free(void* ptr) {
-    fprintf(stderr, "gs_allocations.find ptr=%p\n", ptr);
+    if (RTG_VERBOSE) fprintf(stderr, "gs_allocations.find ptr=%p\n", ptr);
     guard_check(ptr);
     return gs_OrigExtApiTable.hsa_amd_memory_pool_free_fn(ptr);
 }
@@ -1861,7 +1919,7 @@ hsa_status_t hsa_amd_memory_async_copy(void* dst, hsa_agent_t dst_agent, const v
                 direction = D2D;
                 agent_to_use = src_agent;
             }
-            hsa_signal_t new_signal = CreateSignal();
+            hsa_signal_t new_signal = CreateSignal(2);
             hsa_signal_t deleter_signal = CreateSignal();
             hsa_queue_t *queue = AgentInfo::Get(agent_to_use)->get_signal_queue();
             uint64_t index = submit_to_signal_queue(queue, new_signal, completion_signal);
@@ -1885,7 +1943,7 @@ hsa_status_t hsa_amd_memory_async_copy_rect(const hsa_pitched_ptr_t* dst, const 
         }
         else {
             if (agent_type(copy_agent) != HSA_DEVICE_TYPE_CPU) {
-                hsa_signal_t new_signal = CreateSignal();
+                hsa_signal_t new_signal = CreateSignal(2);
                 hsa_signal_t deleter_signal = CreateSignal();
                 hsa_queue_t *queue = AgentInfo::Get(copy_agent)->get_signal_queue();
                 uint64_t index = submit_to_signal_queue(queue, new_signal, completion_signal);
@@ -2454,29 +2512,130 @@ static hsa_status_t hsa_iterate_agent_cb(hsa_agent_t agent, void* data) {
     hsa_status_t stat = gs_OrigCoreApiTable.hsa_agent_get_info_fn(agent, HSA_AGENT_INFO_DEVICE, &dev_type);
 
     if (stat != HSA_STATUS_SUCCESS) {
+        fprintf(stderr, "RTG Tracer: failed to get agent device info\n");
         return stat;
     }
 
-    AgentInfo info = new AgentInfo(agent);
+    AgentInfo *info = new AgentInfo(agent);
     if (dev_type == HSA_DEVICE_TYPE_CPU) {
-        gs_cpu_agents.push_back(agent);
+        stat = gs_OrigExtApiTable.hsa_amd_agent_iterate_memory_pools_fn(agent, hsa_iterate_cpu_agent_memory_pools_cb, reinterpret_cast<void*>(info));
+        info->is_cpu = true;
+        stat = gs_OrigExtApiTable.hsa_amd_memory_pool_allocate_fn(info->coarse_grain_pool, GUARD_SIZE, 0, (void**)&info->guard_page);
+        if (stat != HSA_STATUS_SUCCESS) {
+            fprintf(stderr, "RTG Tracer: failed to create CPU guard page\n");
+            return stat;
+        }
+        for (size_t i=0; i<GUARD_INT_COUNT; ++i) {
+            info->guard_page[i] = GUARD_INT;
+        }
+        AgentInfo::s_cpu_agents.push_back(info);
     } else if (dev_type == HSA_DEVICE_TYPE_GPU) {
-        gs_gpu_agents.push_back(agent);
+        stat = gs_OrigExtApiTable.hsa_amd_agent_iterate_memory_pools_fn(agent, hsa_iterate_gpu_agent_memory_pools_cb, reinterpret_cast<void*>(info));
+        AgentInfo::s_gpu_agents.push_back(info);
     }
 
     return stat;
 }
 
 static hsa_status_t hsa_iterate_cpu_agent_memory_pools_cb(hsa_amd_memory_pool_t pool, void* data) {
-    auto pools = reinterpret_cast<std::vector<hsa_amd_memory_pool_t>*>(data);
-    pools->push_back(pool);
+    if (data == nullptr) {
+        return HSA_STATUS_ERROR_INVALID_ARGUMENT;
+    }
 
-    return HSA_STATUS_SUCCESS;
+    hsa_region_segment_t segment_type = (hsa_region_segment_t)0;
+    hsa_status_t stat = gs_OrigExtApiTable.hsa_amd_memory_pool_get_info_fn(pool, HSA_AMD_MEMORY_POOL_INFO_SEGMENT, &segment_type);
+    if (stat != HSA_STATUS_SUCCESS) {
+        return stat;
+    }
+
+    AgentInfo* agentInfo = reinterpret_cast<AgentInfo*>(data);
+
+    switch (segment_type) {
+        case HSA_REGION_SEGMENT_GLOBAL: {
+            uint32_t global_flag = 0;
+            stat = gs_OrigExtApiTable.hsa_amd_memory_pool_get_info_fn(pool, HSA_AMD_MEMORY_POOL_INFO_GLOBAL_FLAGS, &global_flag);
+            if (stat != HSA_STATUS_SUCCESS) {
+                break;
+            }
+
+            if ((global_flag & HSA_REGION_GLOBAL_FLAG_FINE_GRAINED) != 0) {
+                if (agentInfo->fine_grain_pool.handle == 0) {
+                    agentInfo->fine_grain_pool = pool;
+                    AgentInfo::s_pool_to_agent_map[pool.handle] = agentInfo;
+                } else if ((global_flag & HSA_REGION_GLOBAL_FLAG_KERNARG) == 0) {
+                    // If the fine_grain_pool was already filled, but kern_args flag was not set over-write.
+                    // This means this is region-1(fine_grain only), so over-write this with memory pool set
+                    // from "fine_grain and kern_args".
+                    agentInfo->fine_grain_pool = pool;
+                    AgentInfo::s_pool_to_agent_map[pool.handle] = agentInfo;
+                }
+                assert(((global_flag & HSA_REGION_GLOBAL_FLAG_COARSE_GRAINED) == 0)
+                        && ("Memory Segment cannot be both coarse and fine grained"));
+            } else {
+                // If the flag is not set to fine grained, then it is coarse_grained by default.
+                agentInfo->coarse_grain_pool = pool;
+                AgentInfo::s_pool_to_agent_map[pool.handle] = agentInfo;
+                assert(((global_flag & HSA_REGION_GLOBAL_FLAG_COARSE_GRAINED) != 0)
+                        && ("Memory Segments that are not fine grained has to be coarse grained"));
+                assert(((global_flag & HSA_REGION_GLOBAL_FLAG_FINE_GRAINED) == 0)
+                        && ("Memory Segment cannot be both coarse and fine grained"));
+                assert(((global_flag & HSA_REGION_GLOBAL_FLAG_KERNARG) == 0)
+                        && ("Coarse grained memory segment cannot have kern_args tag"));
+            }
+
+            if ((global_flag & HSA_REGION_GLOBAL_FLAG_KERNARG) != 0) {
+                agentInfo->kern_arg_pool = pool;
+                AgentInfo::s_pool_to_agent_map[pool.handle] = agentInfo;
+                assert(((global_flag & HSA_REGION_GLOBAL_FLAG_COARSE_GRAINED) == 0)
+                        && ("Coarse grained memory segment cannot have kern_args tag"));
+            }
+
+            break;
+        }
+        default:
+            break;
+    }
+
+    return stat;
 }
 
 static hsa_status_t hsa_iterate_gpu_agent_memory_pools_cb(hsa_amd_memory_pool_t pool, void* data) {
-    auto pools = reinterpret_cast<std::vector<hsa_amd_memory_pool_t>*>(data);
-    pools->push_back(pool);
+    if (data == nullptr) {
+        return HSA_STATUS_ERROR_INVALID_ARGUMENT;
+    }
+
+    hsa_region_segment_t segment_type = (hsa_region_segment_t)0;
+    hsa_status_t stat = gs_OrigExtApiTable.hsa_amd_memory_pool_get_info_fn(pool, HSA_AMD_MEMORY_POOL_INFO_SEGMENT, &segment_type);
+    if (stat != HSA_STATUS_SUCCESS) {
+        return stat;
+    }
+
+    AgentInfo* agentInfo = reinterpret_cast<AgentInfo*>(data);
+    switch (segment_type) {
+        case HSA_REGION_SEGMENT_GLOBAL: {
+            uint32_t global_flag = 0;
+            hsa_status_t stat = gs_OrigExtApiTable.hsa_amd_memory_pool_get_info_fn(pool, HSA_AMD_MEMORY_POOL_INFO_GLOBAL_FLAGS, &global_flag);
+            if (stat != HSA_STATUS_SUCCESS) {
+                return stat;
+            }
+
+            if ((global_flag & HSA_REGION_GLOBAL_FLAG_FINE_GRAINED) != 0) {
+                agentInfo->fine_grain_pool = pool;
+                AgentInfo::s_pool_to_agent_map[pool.handle] = agentInfo;
+            } else if ((global_flag & HSA_REGION_GLOBAL_FLAG_COARSE_GRAINED) != 0) {
+                agentInfo->coarse_grain_pool = pool;
+                AgentInfo::s_pool_to_agent_map[pool.handle] = agentInfo;
+            }
+
+            if (agentInfo->coarse_grain_pool.handle == 0) {
+                agentInfo->coarse_grain_pool = pool;
+                AgentInfo::s_pool_to_agent_map[pool.handle] = agentInfo;
+            }
+            break;
+        }
+        default:
+            break;
+    }
 
     return HSA_STATUS_SUCCESS;
 }
@@ -2598,7 +2757,7 @@ static void hsa_amd_queue_intercept_cb(
         hsa_signal_t original_signal{0};
         bool owns_orig_signal = false;
 
-        new_signal = CreateSignal();
+        new_signal = CreateSignal(2);
         deleter_signal = CreateSignal();
 
         // Checking for dispatch packet type
@@ -2614,7 +2773,19 @@ static void hsa_amd_queue_intercept_cb(
 
             // find kernel launch from HIP to get correlation id
             // HCC output does not need correlation_id
-            uint64_t correlation_id = HCC_PROFILE ? 0 : AgentInfo::Get(agent)->find_op(kernel_name);
+            //uint64_t correlation_id = HCC_PROFILE ? 0 : AgentInfo::Get(agent)->find_op(kernel_name);
+            
+#if 0
+            // check for valid workgroup size <= 1024
+            int workgroup_size = 1;
+            workgroup_size *= dispatch_packet->workgroup_size_x;
+            workgroup_size *= dispatch_packet->workgroup_size_y;
+            workgroup_size *= dispatch_packet->workgroup_size_z;
+            if (workgroup_size > 1024) {
+                fprintf(stderr, "RTG Tracer: fatal, workgroup size %d > 1024 for kernel %s\n", workgroup_size, kernel_name.c_str());
+                exit(EXIT_FAILURE);
+            }
+#endif
 
             original_signal = dispatch_packet->completion_signal;
             if (!original_signal.handle) {
@@ -2622,7 +2793,8 @@ static void hsa_amd_queue_intercept_cb(
                 original_signal = CreateSignal();
             }
             const_cast<hsa_kernel_dispatch_packet_t*>(dispatch_packet)->completion_signal = new_signal;
-            gs_pool.push(SignalWaiter, new SignalCallbackData(kernel_name, correlation_id, data_, deleter_signal, new_signal, original_signal, owns_orig_signal, dispatch_packet));
+            //gs_pool.push(SignalWaiter, new SignalCallbackData(kernel_name, correlation_id, data_, deleter_signal, new_signal, original_signal, owns_orig_signal, dispatch_packet));
+            gs_pool.push(SignalWaiter, new SignalCallbackData(kernel_name, 0, data_, deleter_signal, new_signal, original_signal, owns_orig_signal, dispatch_packet));
         }
         else if (type == HSA_PACKET_TYPE_BARRIER_AND || type == HSA_PACKET_TYPE_BARRIER_OR) {
             ++RTG::gs_host_count_barriers;
@@ -2658,11 +2830,11 @@ static void hsa_amd_queue_intercept_cb(
     }
 }
 
-static hsa_signal_t CreateSignal(bool count)
+static hsa_signal_t CreateSignal(int initial_value)
 {
-    if (count) ++gs_host_count_signals;
+    ++gs_host_count_signals;
     hsa_signal_t signal;
-    hsa_status_t status = gs_OrigCoreApiTable.hsa_signal_create_fn(1, 0, nullptr, &signal);
+    hsa_status_t status = gs_OrigCoreApiTable.hsa_signal_create_fn(initial_value, 0, nullptr, &signal);
     if (status != HSA_STATUS_SUCCESS) {
         fprintf(stderr, "RTG Tracer: hsa_signal_create_fn failed\n");
         exit(EXIT_FAILURE);
@@ -2867,10 +3039,14 @@ static void finalize_once()
         fprintf(stderr, "RTG Tracer:    host_count_signals=%u\n", RTG::gs_host_count_signals.load());
         fprintf(stderr, "RTG Tracer:      cb_count_signals=%u\n", RTG::gs_cb_count_signals.load());
     }
+#if 0
     for (int i=0; i<5; ++i) {
+#else 
+    {
         if (RTG::gs_host_count_dispatches != RTG::gs_cb_count_dispatches
                 || RTG::gs_host_count_barriers != RTG::gs_cb_count_barriers) {
-            fprintf(stderr, "RTG Tracer: not all callbacks have completed, waiting... dispatches %u vs %u barriers %u vs %u signals %u vs %u\n",
+            //fprintf(stderr, "RTG Tracer: not all callbacks have completed, waiting... dispatches %u vs %u barriers %u vs %u signals %u vs %u\n",
+            fprintf(stderr, "RTG Tracer: not all callbacks completed; dispatches %u vs %u barriers %u vs %u signals %u vs %u\n",
                     RTG::gs_host_count_dispatches.load(),
                     RTG::gs_cb_count_dispatches.load(),
                     RTG::gs_host_count_barriers.load(),
@@ -2878,9 +3054,9 @@ static void finalize_once()
                     RTG::gs_host_count_signals.load(),
                     RTG::gs_cb_count_signals.load()
             );
-            sleep(2);
         }
     }
+#endif
 
     // Unregister ROCTX
     for (int i=0; i<ROCTX_API_ID_NUMBER; ++i) {
@@ -2963,6 +3139,7 @@ extern "C" bool OnLoad(void *pTable,
 
         RTG::InitEnabledTable(RTG_HSA_API_FILTER, RTG_HSA_API_FILTER_OUT);
 
+#if 0
         // Register HIP APIs
         std::vector<std::string> tokens_keep = RTG::split(RTG_HIP_API_FILTER, ',');
         std::vector<std::string> tokens_prune = RTG::split(RTG_HIP_API_FILTER_OUT, ',');
@@ -2990,6 +3167,7 @@ extern "C" bool OnLoad(void *pTable,
                 fprintf(stderr, "RTG Tracer: HIP API %s %s\n", keep ? "keep" : "skip", name.c_str());
             }
         }
+#endif
 
         // Register ROCTX
         for (int i=0; i<ROCTX_API_ID_NUMBER; ++i) {
@@ -3006,6 +3184,17 @@ extern "C" bool OnLoad(void *pTable,
         fprintf(stderr, "RTG Tracer: could not iterate hsa agents\n");
         exit(EXIT_FAILURE);
     }
+    {
+        std::vector<hsa_agent_t> agents;
+        for (size_t i=0; i<RTG::AgentInfo::s_gpu_agents.size(); ++i) {
+            agents.push_back(RTG::AgentInfo::s_gpu_agents[i]->agent);
+        }
+        hsa_status_t status = RTG::gs_OrigExtApiTable.hsa_amd_agents_allow_access_fn(agents.size(), &agents[0], NULL, RTG::AgentInfo::s_cpu_agents[0]->guard_page);
+        if (status != HSA_STATUS_SUCCESS) {
+            fprintf(stderr, "RTG Tracer: guard_page failed to allow access to GPUs\n");
+            exit(EXIT_FAILURE);
+        }
+    }
     std::string ordinals;
     if (HIP_VISIBLE_DEVICES) {
         ordinals = std::string(HIP_VISIBLE_DEVICES);
@@ -3013,9 +3202,9 @@ extern "C" bool OnLoad(void *pTable,
     else if (CUDA_VISIBLE_DEVICES) {
         ordinals = std::string(CUDA_VISIBLE_DEVICES);
     }
+    std::vector<hsa_agent_t> valid_agents;
     if (ordinals[0] != '\0') {
         size_t end, pos = 0;
-        std::vector<hsa_agent_t> valid_agents;
         std::set<size_t> valid_indexes;
         do {
             bool deviceIdValid = true;
@@ -3026,7 +3215,7 @@ extern "C" bool OnLoad(void *pTable,
             std::string strIndex = ordinals.substr(pos, end - pos);
             int index = atoi(strIndex.c_str());
             if (index < 0 ||
-                    static_cast<size_t>(index) >= RTG::gs_gpu_agents.size() ||
+                    static_cast<size_t>(index) >= RTG::AgentInfo::s_gpu_agents.size() ||
                     strIndex != std::to_string(index)) {
                 deviceIdValid = false;
             }
@@ -3037,16 +3226,19 @@ extern "C" bool OnLoad(void *pTable,
                 break;
             } else {
                 if (valid_indexes.find(index) == valid_indexes.end()) {
-                    valid_agents.push_back(RTG::gs_gpu_agents[index]);
+                    valid_agents.push_back(RTG::AgentInfo::s_gpu_agents[index]->agent);
                     valid_indexes.insert(index);
                 }
             }
             pos = end + 1;
         } while (pos < ordinals.size());
-        RTG::gs_gpu_agents = valid_agents;
+        RTG::AgentInfo::SetVisibleGpuAgents(valid_agents);
+    }
+    else {
+        // all agents visible
+        RTG::AgentInfo::s_visible_gpus = RTG::AgentInfo::s_gpu_agents;
     }
 
-    RTG::AgentInfo::SetVisibleGpuAgents(RTG::gs_gpu_agents);
 
     std::atexit(RTG::finalize);
 
