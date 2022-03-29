@@ -171,10 +171,9 @@ static std::vector<std::string> gs_hip_api_names(HIP_API_ID_NUMBER); // shared c
 static thread_local std::vector<roctx_data_t> gstl_roctx_stack; // for roctx range push pop
 static thread_local std::unordered_map<int,roctx_data_t> gstl_roctx_range; // for roctx range start stop
 
-constexpr size_t GUARD_SIZE = 2 * 1024 * 1024;
-constexpr char GUARD_BYTE = 1;
-constexpr int GUARD_INT = 0xdead;
-constexpr int GUARD_INT_COUNT = GUARD_SIZE / GUARD_INT;
+static size_t GUARD_SIZE = 2 * 1024 * 1024;
+static int GUARD_INT = 0xdead;
+static int GUARD_INT_COUNT = GUARD_SIZE / GUARD_INT;
 static mutex_t gs_allocations_mutex_; // protects gs_allocations
 static std::unordered_map<void*, size_t> gs_allocations;
 static thread_local int* gstl_guard_int_buffer{NULL};
@@ -401,19 +400,25 @@ static bool my_hsa_copy(void *dst, const void *src, size_t size)
 
     status = gs_OrigExtApiTable.hsa_amd_pointer_info_fn(src, &src_info, NULL, NULL, NULL);
     if (HSA_STATUS_SUCCESS != status) {
-        fprintf(stderr, "RTG Tracer: Error getting hsa_amd_pointer_info src_info\n");
+        const char *status_string;
+        gs_OrigCoreApiTable.hsa_status_string_fn(status, &status_string);
+        fprintf(stderr, "RTG Tracer: Error getting hsa_amd_pointer_info src_info: %s\n", status_string);
         DestroySignal(signal);
         return false;
     }
     status = gs_OrigExtApiTable.hsa_amd_pointer_info_fn(dst, &dst_info, NULL, NULL, NULL);
     if (HSA_STATUS_SUCCESS != status) {
-        fprintf(stderr, "RTG Tracer: Error getting hsa_amd_pointer_info dst_info\n");
+        const char *status_string;
+        gs_OrigCoreApiTable.hsa_status_string_fn(status, &status_string);
+        fprintf(stderr, "RTG Tracer: Error getting hsa_amd_pointer_info dst_info: %s\n", status_string);
         DestroySignal(signal);
         return false;
     }
     status = gs_OrigExtApiTable.hsa_amd_memory_async_copy_fn(dst, dst_info.agentOwner, src, src_info.agentOwner, GUARD_SIZE, 0, NULL, signal);
     if (HSA_STATUS_SUCCESS != status) {
-        fprintf(stderr, "RTG Tracer: Error hsa_amd_memory_async_copy failed\n");
+        const char *status_string;
+        gs_OrigCoreApiTable.hsa_status_string_fn(status, &status_string);
+        fprintf(stderr, "RTG Tracer: Error hsa_amd_memory_async_copy failed: %s\n", status_string);
         DestroySignal(signal);
         return false;
     }
@@ -426,6 +431,10 @@ static bool my_hsa_copy(void *dst, const void *src, size_t size)
 
 static void print_all_queues_last_kernel()
 {
+    fprintf(stderr, "RTG Tracer: print_all_queues_last_kernel; dispatches %u barriers %u signals %u\n",
+        RTG::gs_cb_count_dispatches.load(),
+        RTG::gs_cb_count_barriers.load(),
+        RTG::gs_cb_count_signals.load());
     for (auto &agent : AgentInfo::s_gpu_agents) {
         fprintf(stderr, "RTG Tracer: agent %d\n", agent->index);
         for (auto &queue : agent->completed_kernel) {
@@ -434,7 +443,7 @@ static void print_all_queues_last_kernel()
     }
 }
 
-static void guard_check(void *ptr)
+static void alloc_gstl_guard_int_buffer_once()
 {
     if (gstl_guard_int_buffer == NULL) {
         auto status = gs_OrigExtApiTable.hsa_amd_memory_pool_allocate_fn(AgentInfo::s_cpu_agents[0]->fine_grain_pool, GUARD_SIZE, 0, (void**)&gstl_guard_int_buffer);
@@ -453,34 +462,31 @@ static void guard_check(void *ptr)
         }
         if (RTG_VERBOSE) fprintf(stderr, "RTG Tracer: allocated gstl_guard_int_buffer %p\n", gstl_guard_int_buffer);
     }
+}
+
+static void guard_check(void *ptr)
+{
+    alloc_gstl_guard_int_buffer_once();
+
+    // no lock needed -- called by lock holder
 
     size_t size = 0;
-    {
-        std::lock_guard<mutex_t> lck(gs_allocations_mutex_);
-        std::unordered_map<void*, size_t>::iterator loc = gs_allocations.find(ptr);
-        if (loc == gs_allocations.end()) {
-            fprintf(stderr, "RTG Tracer: allocation lookup error\n");
-            return;
-            //exit(EXIT_FAILURE);
-        }
-        else {
-            size = loc->second;
-        }
+    std::unordered_map<void*, size_t>::iterator loc = gs_allocations.find(ptr);
+    if (loc == gs_allocations.end()) {
+        fprintf(stderr, "RTG Tracer: allocation lookup error\n");
+        return;
+    }
+    else {
+        size = loc->second;
     }
     char *cptr = (char*)ptr + size;
     if (my_hsa_copy(gstl_guard_int_buffer, cptr, GUARD_SIZE)) {
-        bool okay = true;
         for (size_t i=0; i<GUARD_INT_COUNT; ++i) {
             if (gstl_guard_int_buffer[i] != GUARD_INT) {
-                okay = false;
-                fprintf(stderr, "RTG Tracer: dst[%zu]=%d != %d=GUARD_INT\n", i, gstl_guard_int_buffer[i], GUARD_INT);
+                fprintf(stderr, "RTG Tracer: guard_check(%p) guard error\n", ptr);
+                print_all_queues_last_kernel();
                 break;
             }
-        }
-        if (!okay) {
-            fprintf(stderr, "RTG Tracer: guard_check(%p) guard error\n", ptr);
-            print_all_queues_last_kernel();
-            //exit(EXIT_FAILURE);
         }
     }
     else {
@@ -490,47 +496,36 @@ static void guard_check(void *ptr)
 
 static void guard_check_all()
 {
-    if (gstl_guard_int_buffer == NULL) {
-        auto status = gs_OrigExtApiTable.hsa_amd_memory_pool_allocate_fn(AgentInfo::s_cpu_agents[0]->fine_grain_pool, GUARD_SIZE, 0, (void**)&gstl_guard_int_buffer);
-        if (status != HSA_STATUS_SUCCESS) {
-            fprintf(stderr, "RTG Tracer: gstl_guard_int_buffer failed to allocate\n");
-            exit(EXIT_FAILURE);
-        }
-        std::vector<hsa_agent_t> agents;
-        for (size_t i=0; i<AgentInfo::s_gpu_agents.size(); ++i) {
-            agents.push_back(AgentInfo::s_gpu_agents[i]->agent);
-        }
-        status = gs_OrigExtApiTable.hsa_amd_agents_allow_access_fn(agents.size(), &agents[0], NULL, gstl_guard_int_buffer);
-        if (status != HSA_STATUS_SUCCESS) {
-            fprintf(stderr, "RTG Tracer: gstl_guard_int_buffer failed to allow access to GPUs\n");
-            exit(EXIT_FAILURE);
-        }
-        if (RTG_VERBOSE) fprintf(stderr, "RTG Tracer: allocated gstl_guard_int_buffer %p\n", gstl_guard_int_buffer);
-    }
+    alloc_gstl_guard_int_buffer_once();
 
     std::lock_guard<mutex_t> lck(gs_allocations_mutex_);
+    bool okay = true;
     for (auto& it: gs_allocations) {
         auto ptr = it.first;
         auto size = it.second;
         char *cptr = (char*)ptr + size;
         if (my_hsa_copy(gstl_guard_int_buffer, cptr, GUARD_SIZE)) {
-            bool okay = true;
             for (size_t i=0; i<GUARD_INT_COUNT; ++i) {
                 if (gstl_guard_int_buffer[i] != GUARD_INT) {
                     okay = false;
-                    fprintf(stderr, "RTG Tracer: dst[%zu]=%d != %d=GUARD_INT\n", i, gstl_guard_int_buffer[i], GUARD_INT);
+                    fprintf(stderr, "RTG Tracer: guard_check_all() guard error in %p\n", ptr);
+                    // reset guard page and keep going
+                    if (my_hsa_copy(cptr, AgentInfo::s_cpu_agents[0]->guard_page, GUARD_SIZE)) {
+                        // guard is ready
+                    }
+                    else {
+                        fprintf(stderr, "RTG Tracer: guard_check_all() guard page reset failed for %p\n", ptr);
+                    }
                     break;
                 }
-            }
-            if (!okay) {
-                fprintf(stderr, "RTG Tracer: guard_check_all() guard error in %p\n", ptr);
-                print_all_queues_last_kernel();
-                //exit(EXIT_FAILURE);
             }
         }
         else {
             fprintf(stderr, "RTG Tracer: guard_check_all() of %p did not complete copy\n", ptr);
         }
+    }
+    if (!okay) {
+        print_all_queues_last_kernel();
     }
 }
 
@@ -1893,7 +1888,6 @@ hsa_status_t hsa_amd_memory_pool_allocate(hsa_amd_memory_pool_t memory_pool, siz
         else {
             fprintf(stderr, "RTG Tracer: hsa_amd_memory_pool_allocate %p failed to copy guard\n", *ptr);
         }
-        //guard_check(*ptr);
     }
     else if (info->coarse_grain_pool.handle == memory_pool.handle) {
         {
@@ -1912,13 +1906,21 @@ hsa_status_t hsa_amd_memory_pool_allocate(hsa_amd_memory_pool_t memory_pool, siz
         else {
             fprintf(stderr, "RTG Tracer: hsa_amd_memory_pool_allocate %p failed to copy guard\n", *ptr);
         }
-        //guard_check(*ptr);
     }
     return status;
 }
 
 // Mirrors Amd Extension Apis
 hsa_status_t hsa_amd_memory_pool_free(void* ptr) {
+
+    std::lock_guard<mutex_t> lck(gs_allocations_mutex_);
+
+    auto loc = gs_allocations.find(ptr);
+    if (loc == gs_allocations.end()) {
+        fprintf(stderr, "RTG Tracer: allocation lookup error\n");
+        return gs_OrigExtApiTable.hsa_amd_memory_pool_free_fn(ptr);
+    }
+
     if (RTG::gs_host_count_dispatches != RTG::gs_cb_count_dispatches || RTG::gs_host_count_barriers != RTG::gs_cb_count_barriers) {
         fprintf(stderr, "RTG Tracer: hsa_amd_memory_pool_free %p not all callbacks completed; dispatches %u vs %u barriers %u vs %u signals %u vs %u\n",
                 ptr,
@@ -1941,17 +1943,9 @@ hsa_status_t hsa_amd_memory_pool_free(void* ptr) {
 
     guard_check(ptr);
 
-    {
-        std::lock_guard<mutex_t> lck(gs_allocations_mutex_);
-        auto loc = gs_allocations.find(ptr);
-        if (loc == gs_allocations.end()) {
-            fprintf(stderr, "RTG Tracer: allocation lookup error\n");
-            //exit(EXIT_FAILURE);
-        }
-        else {
-            gs_allocations.erase(loc);
-        }
-    }
+    // safe to remove now that guard_check is done with it too
+    gs_allocations.erase(loc);
+
     return gs_OrigExtApiTable.hsa_amd_memory_pool_free_fn(ptr);
 }
 #else
@@ -3174,6 +3168,20 @@ extern "C" bool OnLoad(void *pTable,
     RTG::gs_NullSignal.handle = 0;
 
     Flag::init_all();
+
+    // guard page size
+    if (!RTG_GUARD_PAGES.empty()) {
+        std::string val = RTG_GUARD_PAGES;
+        int multiple = atol(val.c_str());
+        if (multiple < 1) {
+            fprintf(stderr, "RTG Tracer: ignoring bad RTG_GUARD_PAGES %s\n", val.c_str());
+        }
+        else {
+            RTG::GUARD_SIZE *= multiple;
+            RTG::GUARD_INT_COUNT = RTG::GUARD_SIZE / RTG::GUARD_INT;
+            fprintf(stderr, "RTG Tracer: new GUARD_SIZE %s * 2MB (%zu)\n", val.c_str(), RTG::GUARD_SIZE);
+        }
+    }
 
     std::string outname = RTG_FILENAME;
 #ifdef RPD_TRACER

@@ -60,6 +60,7 @@ FLAG_CHAR(RTG_HSA_API_FILTER_OUT, "", "Do not trace specific HSA calls. Simple s
 FLAG_BOOL(RTG_HSA_HOST_DISPATCH, false, "Trace when kernel dispatch is enqueued on the host");
 FLAG_BOOL(RTG_DEMANGLE, true, "Demangle kernel names");
 FLAG_BOOL(RTG_LEGACY_PRINTF, false, "use the old printf logger (will have periodic stalls due to logging)");
+FLAG_CHAR(RTG_GUARD_PAGES, "", "multiple of 2MB to use as guard pages");
 // Not RTG exactly, but still parsed by RTG.
 FLAG_CHAR(HIP_VISIBLE_DEVICES, "", "Devices ordinals visible to HIP");
 FLAG_CHAR(CUDA_VISIBLE_DEVICES, "", "Devices ordinals visible to HIP, but using the CUDA version of the env var");
