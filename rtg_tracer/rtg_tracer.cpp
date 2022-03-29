@@ -398,6 +398,21 @@ static bool my_hsa_copy(void *dst, const void *src, size_t size)
     hsa_amd_pointer_info_t src_info;
     hsa_amd_pointer_info_t dst_info;
 
+    src_info.size = sizeof(hsa_amd_pointer_info_t);
+    dst_info.size = sizeof(hsa_amd_pointer_info_t);
+
+    if (NULL == dst) {
+        fprintf(stderr, "RTG Tracer: my_hsa_copy: dst was NULL\n");
+        DestroySignal(signal);
+        return false;
+    }
+
+    if (NULL == src) {
+        fprintf(stderr, "RTG Tracer: my_hsa_copy: src was NULL\n");
+        DestroySignal(signal);
+        return false;
+    }
+
     status = gs_OrigExtApiTable.hsa_amd_pointer_info_fn(src, &src_info, NULL, NULL, NULL);
     if (HSA_STATUS_SUCCESS != status) {
         const char *status_string;
@@ -436,9 +451,15 @@ static void print_all_queues_last_kernel()
         RTG::gs_cb_count_barriers.load(),
         RTG::gs_cb_count_signals.load());
     for (auto &agent : AgentInfo::s_gpu_agents) {
-        fprintf(stderr, "RTG Tracer: agent %d\n", agent->index);
-        for (auto &queue : agent->completed_kernel) {
-            fprintf(stderr, "RTG Tracer:   queue %lu : last kernel %s\n", queue.first, queue.second.c_str());
+        if (agent->completed_kernel.empty()) {
+            // too noisy
+            //fprintf(stderr, "RTG Tracer: agent %d not used\n", agent->index);
+        }
+        else {
+            fprintf(stderr, "RTG Tracer: agent %d\n", agent->index);
+            for (auto &queue : agent->completed_kernel) {
+                fprintf(stderr, "RTG Tracer:     queue %lu : last kernel %s\n", queue.first, queue.second.c_str());
+            }
         }
     }
 }
