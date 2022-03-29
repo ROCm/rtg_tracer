@@ -1879,6 +1879,15 @@ hsa_status_t hsa_amd_memory_pool_allocate(hsa_amd_memory_pool_t memory_pool, siz
 // Mirrors Amd Extension Apis
 hsa_status_t hsa_amd_memory_pool_free(void* ptr) {
     guard_check(ptr);
+    {
+        std::lock_guard<mutex_t> lck(gs_allocations_mutex_);
+        auto loc = gs_allocations.find(ptr);
+        if (loc == gs_allocations.end()) {
+            fprintf(stderr, "RTG Tracer: allocation lookup error\n");
+            //exit(EXIT_FAILURE);
+        }
+        gs_allocations.erase(loc);
+    }
     return gs_OrigExtApiTable.hsa_amd_memory_pool_free_fn(ptr);
 }
 #else
