@@ -392,7 +392,7 @@ uint64_t inline tick() {
     }                                          \
 } while (false)
 
-static void my_hsa_copy(void *dst, const void *src, size_t size)
+static bool my_hsa_copy(void *dst, const void *src, size_t size)
 {
     hsa_signal_t signal = CreateSignal();
     hsa_status_t status;
@@ -400,14 +400,28 @@ static void my_hsa_copy(void *dst, const void *src, size_t size)
     hsa_amd_pointer_info_t dst_info;
 
     status = gs_OrigExtApiTable.hsa_amd_pointer_info_fn(src, &src_info, NULL, NULL, NULL);
-    RTG_HSA_CHECK_STATUS("Error getting hsa_amd_pointer_info src_info\n", status);
+    if (HSA_STATUS_SUCCESS != status) {
+        fprintf(stderr, "RTG Tracer: Error getting hsa_amd_pointer_info src_info\n");
+        DestroySignal(signal);
+        return false;
+    }
     status = gs_OrigExtApiTable.hsa_amd_pointer_info_fn(dst, &dst_info, NULL, NULL, NULL);
-    RTG_HSA_CHECK_STATUS("Error getting hsa_amd_pointer_info dst_info\n", status);
+    if (HSA_STATUS_SUCCESS != status) {
+        fprintf(stderr, "RTG Tracer: Error getting hsa_amd_pointer_info dst_info\n");
+        DestroySignal(signal);
+        return false;
+    }
     status = gs_OrigExtApiTable.hsa_amd_memory_async_copy_fn(dst, dst_info.agentOwner, src, src_info.agentOwner, GUARD_SIZE, 0, NULL, signal);
-    RTG_HSA_CHECK_STATUS("Error hsa_amd_memory_async_copy failed\n", status);
+    if (HSA_STATUS_SUCCESS != status) {
+        fprintf(stderr, "RTG Tracer: Error hsa_amd_memory_async_copy failed\n");
+        DestroySignal(signal);
+        return false;
+    }
     gs_OrigCoreApiTable.hsa_signal_wait_relaxed_fn(signal, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
 
     DestroySignal(signal);
+
+    return true;
 }
 
 static void print_all_queues_last_kernel()
@@ -440,30 +454,37 @@ static void guard_check(void *ptr)
         if (RTG_VERBOSE) fprintf(stderr, "RTG Tracer: allocated gstl_guard_int_buffer %p\n", gstl_guard_int_buffer);
     }
 
-
-    std::unordered_map<void*, size_t>::iterator loc;
+    size_t size = 0;
     {
         std::lock_guard<mutex_t> lck(gs_allocations_mutex_);
-        loc = gs_allocations.find(ptr);
+        std::unordered_map<void*, size_t>::iterator loc = gs_allocations.find(ptr);
         if (loc == gs_allocations.end()) {
             fprintf(stderr, "RTG Tracer: allocation lookup error\n");
+            return;
+            //exit(EXIT_FAILURE);
+        }
+        else {
+            size = loc->second;
+        }
+    }
+    char *cptr = (char*)ptr + size;
+    if (my_hsa_copy(gstl_guard_int_buffer, cptr, GUARD_SIZE)) {
+        bool okay = true;
+        for (size_t i=0; i<GUARD_INT_COUNT; ++i) {
+            if (gstl_guard_int_buffer[i] != GUARD_INT) {
+                okay = false;
+                fprintf(stderr, "RTG Tracer: dst[%zu]=%d != %d=GUARD_INT\n", i, gstl_guard_int_buffer[i], GUARD_INT);
+                break;
+            }
+        }
+        if (!okay) {
+            fprintf(stderr, "RTG Tracer: guard_check(%p) guard error\n", ptr);
+            print_all_queues_last_kernel();
             //exit(EXIT_FAILURE);
         }
     }
-    char *cptr = (char*)ptr + loc->second; // + size
-    my_hsa_copy(gstl_guard_int_buffer, cptr, GUARD_SIZE);
-    bool okay = true;
-    for (size_t i=0; i<GUARD_INT_COUNT; ++i) {
-        if (gstl_guard_int_buffer[i] != GUARD_INT) {
-            okay = false;
-            fprintf(stderr, "RTG Tracer: dst[%zu]=%d != %d=GUARD_INT\n", i, gstl_guard_int_buffer[i], GUARD_INT);
-            break;
-        }
-    }
-    if (!okay) {
-        fprintf(stderr, "RTG Tracer: guard error\n");
-        print_all_queues_last_kernel();
-        exit(EXIT_FAILURE);
+    else {
+        fprintf(stderr, "RTG Tracer: guard_check(%p) did not complete copy\n", ptr);
     }
 }
 
@@ -492,19 +513,23 @@ static void guard_check_all()
         auto ptr = it.first;
         auto size = it.second;
         char *cptr = (char*)ptr + size;
-        my_hsa_copy(gstl_guard_int_buffer, cptr, GUARD_SIZE);
-        bool okay = true;
-        for (size_t i=0; i<GUARD_INT_COUNT; ++i) {
-            if (gstl_guard_int_buffer[i] != GUARD_INT) {
-                okay = false;
-                fprintf(stderr, "RTG Tracer: dst[%zu]=%d != %d=GUARD_INT\n", i, gstl_guard_int_buffer[i], GUARD_INT);
-                break;
+        if (my_hsa_copy(gstl_guard_int_buffer, cptr, GUARD_SIZE)) {
+            bool okay = true;
+            for (size_t i=0; i<GUARD_INT_COUNT; ++i) {
+                if (gstl_guard_int_buffer[i] != GUARD_INT) {
+                    okay = false;
+                    fprintf(stderr, "RTG Tracer: dst[%zu]=%d != %d=GUARD_INT\n", i, gstl_guard_int_buffer[i], GUARD_INT);
+                    break;
+                }
+            }
+            if (!okay) {
+                fprintf(stderr, "RTG Tracer: guard_check_all() guard error in %p\n", ptr);
+                print_all_queues_last_kernel();
+                //exit(EXIT_FAILURE);
             }
         }
-        if (!okay) {
-            fprintf(stderr, "RTG Tracer: guard error\n");
-            print_all_queues_last_kernel();
-            exit(EXIT_FAILURE);
+        else {
+            fprintf(stderr, "RTG Tracer: guard_check_all() of %p did not complete copy\n", ptr);
         }
     }
 }
@@ -1855,22 +1880,38 @@ hsa_status_t hsa_amd_memory_pool_allocate(hsa_amd_memory_pool_t memory_pool, siz
         {
             std::lock_guard<mutex_t> lck(gs_allocations_mutex_);
             if (RTG_VERBOSE) fprintf(stderr, "RTG Tracer: gs_allocations insert fine ptr=%p size=%zu\n", *ptr, size);
+            if (gs_allocations.find(*ptr) != gs_allocations.end()) {
+                fprintf(stderr, "RTG Tracer: hsa_amd_memory_pool_allocate collision %p\n", *ptr);
+            }
             gs_allocations[*ptr] = size;
         }
         char *cptr = (char*)*ptr + size;
         if (RTG_VERBOSE) fprintf(stderr, "RTG Tracer: gs_allocations gptr=%p size=%zu\n", cptr, GUARD_SIZE);
-        my_hsa_copy(cptr, AgentInfo::s_cpu_agents[0]->guard_page, GUARD_SIZE);
+        if (my_hsa_copy(cptr, AgentInfo::s_cpu_agents[0]->guard_page, GUARD_SIZE)) {
+            // guard is ready
+        }
+        else {
+            fprintf(stderr, "RTG Tracer: hsa_amd_memory_pool_allocate %p failed to copy guard\n", *ptr);
+        }
         //guard_check(*ptr);
     }
     else if (info->coarse_grain_pool.handle == memory_pool.handle) {
         {
             std::lock_guard<mutex_t> lck(gs_allocations_mutex_);
             if (RTG_VERBOSE) fprintf(stderr, "RTG Tracer: gs_allocations insert coarse ptr=%p size=%zu\n", *ptr, size);
+            if (gs_allocations.find(*ptr) != gs_allocations.end()) {
+                fprintf(stderr, "RTG Tracer: hsa_amd_memory_pool_allocate collision %p\n", *ptr);
+            }
             gs_allocations[*ptr] = size;
         }
         char *cptr = (char*)*ptr + size;
         if (RTG_VERBOSE) fprintf(stderr, "RTG Tracer: gs_allocations gptr=%p size=%zu\n", cptr, GUARD_SIZE);
-        my_hsa_copy(cptr, AgentInfo::s_cpu_agents[0]->guard_page, GUARD_SIZE);
+        if (my_hsa_copy(cptr, AgentInfo::s_cpu_agents[0]->guard_page, GUARD_SIZE)) {
+            // guard is ready
+        }
+        else {
+            fprintf(stderr, "RTG Tracer: hsa_amd_memory_pool_allocate %p failed to copy guard\n", *ptr);
+        }
         //guard_check(*ptr);
     }
     return status;
@@ -1878,7 +1919,28 @@ hsa_status_t hsa_amd_memory_pool_allocate(hsa_amd_memory_pool_t memory_pool, siz
 
 // Mirrors Amd Extension Apis
 hsa_status_t hsa_amd_memory_pool_free(void* ptr) {
+    if (RTG::gs_host_count_dispatches != RTG::gs_cb_count_dispatches || RTG::gs_host_count_barriers != RTG::gs_cb_count_barriers) {
+        fprintf(stderr, "RTG Tracer: hsa_amd_memory_pool_free %p not all callbacks completed; dispatches %u vs %u barriers %u vs %u signals %u vs %u\n",
+                ptr,
+                RTG::gs_host_count_dispatches.load(),
+                RTG::gs_cb_count_dispatches.load(),
+                RTG::gs_host_count_barriers.load(),
+                RTG::gs_cb_count_barriers.load(),
+                RTG::gs_host_count_signals.load(),
+                RTG::gs_cb_count_signals.load()
+        );
+    }
+    else {
+        fprintf(stderr, "RTG Tracer: hsa_amd_memory_pool_free %p all callbacks completed; dispatches %u barriers %u signals %u\n",
+                ptr,
+                RTG::gs_cb_count_dispatches.load(),
+                RTG::gs_cb_count_barriers.load(),
+                RTG::gs_cb_count_signals.load()
+        );
+    }
+
     guard_check(ptr);
+
     {
         std::lock_guard<mutex_t> lck(gs_allocations_mutex_);
         auto loc = gs_allocations.find(ptr);
@@ -1886,7 +1948,9 @@ hsa_status_t hsa_amd_memory_pool_free(void* ptr) {
             fprintf(stderr, "RTG Tracer: allocation lookup error\n");
             //exit(EXIT_FAILURE);
         }
-        gs_allocations.erase(loc);
+        else {
+            gs_allocations.erase(loc);
+        }
     }
     return gs_OrigExtApiTable.hsa_amd_memory_pool_free_fn(ptr);
 }
