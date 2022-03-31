@@ -10,6 +10,12 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <hip/hip_runtime_api.h>
+#include <hip/amd_detail/hip_runtime_prof.h>
+#include "missing_ostream_definitions.h"
+#define HIP_PROF_HIP_API_STRING 1 // to enable hipApiString in hip_prof_str.h
+#include <hip/amd_detail/hip_prof_str.h>
+
 #include "rtg_out_printf.h"
 
 constexpr std::size_t BUF_SIZE = 4096;
@@ -93,6 +99,11 @@ void RtgOutPrintf::open(const string& filename)
 {
     pid = getpid();
     stream = fopen(filename.c_str(), "w");
+
+    hip_api_names.reserve(HIP_API_ID_NUMBER);
+    for (int i=0; i<HIP_API_ID_NUMBER; ++i) {
+        hip_api_names[i] = hip_api_name(i);
+    }
 }
 
 void RtgOutPrintf::hsa_api(const string& func, const string& args, lu tick, lu ticks, int localStatus)
@@ -155,6 +166,22 @@ void RtgOutPrintf::hsa_dispatch_copy(hsa_agent_t agent, hsa_signal_t signal, lu 
     char *buf = new char[BUF_SIZE];
     check(snprintf(buf, BUF_SIZE, "HSA: pid:%d tid:%s copy agent:%lu signal:%lu start:%lu stop:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu\n",
             pid, tid(), agent.handle, signal.handle, start, stop, dep[0], dep[1], dep[2], dep[3], dep[4]));
+    TlsData::Get(stream)->push(buf);
+}
+
+void RtgOutPrintf::hip_api(uint32_t cid, struct hip_api_data_s *data, int status, lu tick, lu ticks, bool args)
+{
+    char *buf = new char[BUF_SIZE];
+    if (args) {
+        // hipApiString returns strdup, need to free, but signature returns const
+        const char* args = hipApiString((hip_api_id_t)cid, data);
+        std::string func = args;
+        free((char*)args);
+        check(snprintf(buf, BUF_SIZE, "HIP: pid:%d tid:%s %s ret=%d @%lu +%lu\n", pid, tid(), func.c_str(), status, tick, ticks));
+    }
+    else {
+        check(snprintf(buf, BUF_SIZE, "HIP: pid:%d tid:%s %s ret=%d @%lu +%lu\n", pid, tid(), hip_api_names[cid].c_str(), status, tick, ticks));
+    }
     TlsData::Get(stream)->push(buf);
 }
 

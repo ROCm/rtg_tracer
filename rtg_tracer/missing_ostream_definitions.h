@@ -1,48 +1,51 @@
 #include <iostream>
 #include <sstream>
 
-#define DUMMY(T)  \
+#include <hip/hip_runtime_api.h>
+
+#define DUMMY_DECL(T)  \
+std::ostream& operator<<(std::ostream& out, const T obj);
+
+#define DUMMY_IMPL(T)  \
 std::ostream& operator<<(std::ostream& out, const T obj) { \
     return out << #T; \
 }
 
-DUMMY(HIP_MEMCPY3D)
-DUMMY(hip_Memcpy2D)
-DUMMY(hipPitchedPtr)
-DUMMY(hipExtent)
-DUMMY(hipArray)
-DUMMY(hipLaunchParams)
-DUMMY(hipChannelFormatDesc)
-DUMMY(HIP_ARRAY_DESCRIPTOR)
-DUMMY(hipDeviceProp_t)
-DUMMY(hipIpcEventHandle_t)
-DUMMY(hipIpcMemHandle_t)
-DUMMY(hipMemcpy3DParms)
-DUMMY(HIP_ARRAY3D_DESCRIPTOR)
-DUMMY(hipFuncAttributes)
-DUMMY(hipPointerAttribute_t)
+DUMMY_DECL(HIP_MEMCPY3D)
+DUMMY_DECL(hip_Memcpy2D)
+DUMMY_DECL(hipPitchedPtr)
+DUMMY_DECL(hipExtent)
+DUMMY_DECL(hipArray)
+DUMMY_DECL(hipLaunchParams)
+DUMMY_DECL(hipChannelFormatDesc)
+DUMMY_DECL(HIP_ARRAY_DESCRIPTOR)
+DUMMY_DECL(hipDeviceProp_t)
+DUMMY_DECL(hipIpcEventHandle_t)
+DUMMY_DECL(hipIpcMemHandle_t)
+DUMMY_DECL(hipMemcpy3DParms)
+DUMMY_DECL(HIP_ARRAY3D_DESCRIPTOR)
+DUMMY_DECL(hipFuncAttributes)
+DUMMY_DECL(hipPointerAttribute_t)
 
-std::ostream& operator<<(std::ostream& out, const dim3 obj) {
-    return out << "{" << obj.x << "," << obj.y << "," << obj.z << "}";
-}
+std::ostream& operator<<(std::ostream& out, const dim3 obj);
 
 #if (HIP_VERSION_MAJOR == 4 && HIP_VERSION_MINOR >= 3) || HIP_VERSION_MAJOR > 4
-DUMMY(hipExternalMemoryHandleDesc)
-DUMMY(hipExternalMemoryBufferDesc)
+DUMMY_DECL(hipExternalMemoryHandleDesc)
+DUMMY_DECL(hipExternalMemoryBufferDesc)
 #endif
 
 #if (HIP_VERSION_MAJOR == 4 && HIP_VERSION_MINOR >= 4) || HIP_VERSION_MAJOR > 4
-DUMMY(hipResourceDesc)
-DUMMY(hipKernelNodeParams)
-DUMMY(hipExternalSemaphoreWaitParams)
-DUMMY(hipMemsetParams)
-DUMMY(hipExternalSemaphoreHandleDesc)
-DUMMY(hipExternalSemaphoreSignalParams)
-DUMMY(textureReference)
-DUMMY(hipMipmappedArray)
+DUMMY_DECL(hipResourceDesc)
+DUMMY_DECL(hipKernelNodeParams)
+DUMMY_DECL(hipExternalSemaphoreWaitParams)
+DUMMY_DECL(hipMemsetParams)
+DUMMY_DECL(hipExternalSemaphoreHandleDesc)
+DUMMY_DECL(hipExternalSemaphoreSignalParams)
+DUMMY_DECL(textureReference)
+DUMMY_DECL(hipMipmappedArray)
 #define HIP_API_ID_NUMBER HIP_API_ID_LAST
 #endif
 
 #if (HIP_VERSION_MAJOR == 5 && HIP_VERSION_MINOR >= 0) || HIP_VERSION_MAJOR > 5
-DUMMY(hipHostNodeParams)
+DUMMY_DECL(hipHostNodeParams)
 #endif

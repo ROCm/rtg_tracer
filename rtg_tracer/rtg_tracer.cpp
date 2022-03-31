@@ -26,8 +26,6 @@
 
 #include <hip/hip_runtime_api.h>
 #include <hip/amd_detail/hip_runtime_prof.h>
-#include "missing_ostream_definitions.h"
-#define HIP_PROF_HIP_API_STRING 1 // to enable hipApiString in hip_prof_str.h
 #include <hip/amd_detail/hip_prof_str.h>
 
 #include <roctracer/roctracer.h>
@@ -156,7 +154,6 @@ static FILE *gs_stream{NULL}; // output only used for HCC_PROFILE mode
 // Need to allocate hip_api_data_t, but cannot use new operator due to incomplete default constructors.
 static thread_local std::vector<char[sizeof(hip_api_data_t)]> gstl_hip_api_data(HIP_API_ID_NUMBER);
 static thread_local std::vector<uint64_t> gstl_hip_api_tick(HIP_API_ID_NUMBER);
-static std::vector<std::string> gs_hip_api_names(HIP_API_ID_NUMBER); // shared cache of HIP API names
 
 static thread_local std::vector<roctx_data_t> gstl_roctx_stack; // for roctx range push pop
 static thread_local std::unordered_map<int,roctx_data_t> gstl_roctx_range; // for roctx range start stop
@@ -361,7 +358,6 @@ uint64_t inline tick() {
 #define LOG_COPY
 
 #define LOG_HIP
-#define LOG_HIP_KERNEL
 
 #define LOG_ROCTX
 #define LOG_ROCTX_MARK
@@ -448,7 +444,6 @@ uint64_t inline tick() {
 #define LOG_COPY          gs_out->hsa_dispatch_copy
 
 #define LOG_HIP           gs_out->hip_api
-#define LOG_HIP_KERNEL    gs_out->hip_api_kernel
 
 #define LOG_ROCTX         gs_out->roctx
 #define LOG_ROCTX_MARK    gs_out->roctx_mark
@@ -2590,66 +2585,12 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
         }
     }
     else {
-        std::string kernname_str;
-        const char *kernname = NULL;
         uint64_t tick_ = gstl_hip_api_tick[cid];
         uint64_t ticks = tick() - tick_;
-        int localStatus = 0;
+        int localStatus = hipPeekAtLastError();
 
-        switch (cid) {
-            case HIP_API_ID_hipLaunchCooperativeKernel:
-                kernname = hipKernelNameRefByPtr(
-                        data->args.hipLaunchCooperativeKernel.f,
-                        data->args.hipLaunchCooperativeKernel.stream);
-                break;
-            case HIP_API_ID_hipLaunchKernel:
-                kernname = hipKernelNameRefByPtr(
-                        data->args.hipLaunchKernel.function_address,
-                        data->args.hipLaunchKernel.stream);
-                break;
-            case HIP_API_ID_hipHccModuleLaunchKernel:
-                kernname = hipKernelNameRef(data->args.hipHccModuleLaunchKernel.f);
-                break;
-            case HIP_API_ID_hipExtModuleLaunchKernel:
-                kernname = hipKernelNameRef(data->args.hipExtModuleLaunchKernel.f);
-                break;
-            case HIP_API_ID_hipModuleLaunchKernel:
-                kernname = hipKernelNameRef(data->args.hipModuleLaunchKernel.f);
-                break;
-            case HIP_API_ID_hipExtLaunchKernel:
-                kernname = hipKernelNameRefByPtr(
-                        data->args.hipExtLaunchKernel.function_address,
-                        data->args.hipExtLaunchKernel.stream);
-                break;
-        }
+        LOG_HIP(cid, data, localStatus, tick_, ticks, RTG_HIP_API_ARGS);
 
-        // if this is a kernel op, kernname is set
-        if (kernname) {
-            // demangle kernname
-            kernname_str = cpp_demangle(kernname);
-        }
-
-        if (RTG_HIP_API_ARGS) {
-            // hipApiString returns strdup, need to free, but signature returns const
-            const char* args = hipApiString((hip_api_id_t)cid, data);
-            std::string func = args;
-            free((char*)args);
-            if (kernname) {
-                LOG_HIP_KERNEL(func, kernname_str, localStatus, tick_, ticks, data->correlation_id);
-            }
-            else {
-                LOG_HIP(func, localStatus, tick_, ticks, data->correlation_id);
-            }
-        }
-        else {
-            std::string &func = gs_hip_api_names[cid];
-            if (kernname) {
-                LOG_HIP_KERNEL(func, kernname_str, localStatus, tick_, ticks, data->correlation_id);
-            }
-            else {
-                LOG_HIP(func, localStatus, tick_, ticks, data->correlation_id);
-            }
-        }
         // Now that we're done with the api data, zero it for the next time.
         // Otherwise, phase is always wrong because HIP doesn't set the phase to 0 during API start.
         memset(data, 0, sizeof(hip_api_data_t));
@@ -2811,10 +2752,14 @@ extern "C" bool OnLoad(void *pTable,
         // Register HIP APIs
         std::vector<std::string> tokens_keep = RTG::split(RTG_HIP_API_FILTER, ',');
         std::vector<std::string> tokens_prune = RTG::split(RTG_HIP_API_FILTER_OUT, ',');
+        std::vector<std::string> tokens_prune_always;
+        tokens_prune_always.push_back("hipPeekAtLastError"); // because we need to call it ourselves for return codes
+        tokens_prune_always.push_back("hipGetDevice");
+        tokens_prune_always.push_back("hipSetDevice");
+
         for (int i=0; i<HIP_API_ID_NUMBER; ++i) {
             bool keep = false;
             std::string name = hip_api_name(i);
-            RTG::gs_hip_api_names[i] = name;
             for (auto tok : tokens_keep) {
                 if (tok == "all" || name.find(tok) != std::string::npos) {
                     keep = true;
@@ -2827,6 +2772,13 @@ extern "C" bool OnLoad(void *pTable,
                     break;
                 }
             }
+            for (auto tok : tokens_prune_always) {
+                if (name.find(tok) != std::string::npos) {
+                    keep = false;
+                    break;
+                }
+            }
+
             if (keep) {
                 hipRegisterActivityCallback(i, (void*)RTG::hip_activity_callback, NULL);
                 hipRegisterApiCallback(i, (void*)RTG::hip_api_callback, NULL);

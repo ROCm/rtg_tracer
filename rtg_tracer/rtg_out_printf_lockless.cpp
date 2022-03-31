@@ -11,6 +11,12 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <hip/hip_runtime_api.h>
+#include <hip/amd_detail/hip_runtime_prof.h>
+#include "missing_ostream_definitions.h"
+#define HIP_PROF_HIP_API_STRING 1 // to enable hipApiString in hip_prof_str.h
+#include <hip/amd_detail/hip_prof_str.h>
+
 #include "rtg_out_printf_lockless.h"
 
 static inline std::string get_tid_string() {
@@ -31,6 +37,7 @@ struct TlsData {
     string tid_string;
     const char *tid;
     FILE *stream;
+    std::vector<std::string> hip_api_names;
 
     static std::mutex the_class_mutex;
     static std::unordered_map<std::thread::id, TlsData*> the_map;
@@ -47,6 +54,11 @@ struct TlsData {
 
         std::string filename_with_tid = filename + "." + tid_string;
         stream = fopen(filename_with_tid.c_str(), "w");
+
+        hip_api_names.reserve(HIP_API_ID_NUMBER);
+        for (int i=0; i<HIP_API_ID_NUMBER; ++i) {
+            hip_api_names[i] = hip_api_name(i);
+        }
 
         std::lock_guard<std::mutex> lock(the_class_mutex);
         the_map[std::this_thread::get_id()] = this;
@@ -80,6 +92,7 @@ struct TlsData {
     void hsa_dispatch_kernel (hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, const string& name, uint64_t correlation_id);
     void hsa_dispatch_barrier(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, lu dep[5]);
     void hsa_dispatch_copy   (hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu dep[5]);
+    void hip_api(uint32_t cid, struct hip_api_data_s *data, int status, lu tick, lu ticks, bool args);
     void hip_api(const string& func_andor_args, int status, lu tick, lu ticks, uint64_t correlation_id);
     void hip_api_kernel(const string& func_andor_args, const string& kernname, int status, lu tick, lu ticks, uint64_t correlation_id);
     void roctx(uint64_t correlation_id, const string& message, lu tick, lu ticks);
@@ -144,6 +157,20 @@ void TlsData::hsa_dispatch_copy(hsa_agent_t agent, hsa_signal_t signal, lu start
     fprintf(stream, "HSA: pid:%d tid:%s copy agent:%lu signal:%lu start:%lu stop:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu\n",
             pid, tid, agent.handle, signal.handle, start, stop, dep[0], dep[1], dep[2], dep[3], dep[4]);
     flush();
+}
+
+void TlsData::hip_api(uint32_t cid, struct hip_api_data_s *data, int status, lu tick, lu ticks, bool args)
+{
+    if (args) {
+        // hipApiString returns strdup, need to free, but signature returns const
+        const char* args = hipApiString((hip_api_id_t)cid, data);
+        std::string func = args;
+        free((char*)args);
+        fprintf(stream, "HIP: pid:%d tid:%s %s ret=%d @%lu +%lu\n", pid, tid, func.c_str(), status, tick, ticks);
+    }
+    else {
+        fprintf(stream, "HIP: pid:%d tid:%s %s ret=%d @%lu +%lu\n", pid, tid, hip_api_names[cid].c_str(), status, tick, ticks);
+    }
 }
 
 void TlsData::hip_api(const string& func_andor_args, int status, lu tick, lu ticks, uint64_t correlation_id)
@@ -217,6 +244,11 @@ void RtgOutPrintfLockless::hsa_dispatch_barrier(hsa_queue_t *queue, hsa_agent_t 
 void RtgOutPrintfLockless::hsa_dispatch_copy(hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu dep[5])
 {
     TlsData::Get(filename)->hsa_dispatch_copy(agent, signal, start, stop, dep);
+}
+
+void RtgOutPrintfLockless::hip_api(uint32_t cid, struct hip_api_data_s *data, int status, lu tick, lu ticks, bool args)
+{
+    TlsData::Get(filename)->hip_api(cid, data, status, tick, ticks, args);
 }
 
 void RtgOutPrintfLockless::hip_api(const string& func_andor_args, int status, lu tick, lu ticks, uint64_t correlation_id)
