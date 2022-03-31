@@ -1,3 +1,7 @@
+/**************************************************************************
+ * Copyright (c) 2022 Advanced Micro Devices, Inc.
+ **************************************************************************/
+
 // Helper functions to convert function arguments into strings.
 // Handles POD data types as well as enumerations.
 // The implementation uses C++11 variadic templates and template specialization.

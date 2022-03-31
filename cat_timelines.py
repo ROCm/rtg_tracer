@@ -1,4 +1,8 @@
 #!/usr/bin/env python
+"""
+Copyright (c) 2022 Advanced Micro Devices, Inc.
+
+"""
 
 # concatenate all given files, skipping first 2 lines and last 2 lines
 # adding comma between files

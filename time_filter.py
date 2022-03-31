@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 """
+Copyright (c) 2022 Advanced Micro Devices, Inc.
 
 Parse chrome://tracing JSON file, report first and last timestamps, and ask user to filter out events based on time.
 
