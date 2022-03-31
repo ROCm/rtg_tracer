@@ -5,6 +5,8 @@
 class MetadataTable;
 class StringTable;
 class OpTable;
+class KernelApiTable;
+class CopyApiTable;
 class ApiTable;
 class ApiIdList;
 
@@ -33,11 +35,16 @@ virtual void roctx_mark(uint64_t correlation_id, const string& message, lu tick)
 
 virtual void close() override;
 
+void rpdstart();
+void rpdstop();
+
 int pid;
 // Table Recorders
 MetadataTable *s_metadataTable = NULL;
 StringTable *s_stringTable = NULL;
 OpTable *s_opTable = NULL;
+KernelApiTable *s_kernelApiTable = NULL;
+CopyApiTable *s_copyApiTable = NULL;
 ApiTable *s_apiTable = NULL;
 // API list
 ApiIdList *s_apiList = NULL;

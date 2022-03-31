@@ -1830,11 +1830,13 @@ hsa_status_t hsa_amd_svm_prefetch_async(void* ptr, size_t size, hsa_agent_t agen
     return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_svm_prefetch_async_fn(ptr, size, agent, num_dep_signals, dep_signals, completion_signal));
 }
 
+#if (HIP_VERSION_MAJOR == 4 && HIP_VERSION_MINOR >= 4) || HIP_VERSION_MAJOR > 4
 // Mirrors Amd Extension Apis
 hsa_status_t HSA_API hsa_amd_queue_cu_get_mask(const hsa_queue_t* queue, uint32_t num_cu_mask_count, uint32_t* cu_mask) {
     TRACE(queue, num_cu_mask_count, cu_mask);
     return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_queue_cu_get_mask_fn(queue, num_cu_mask_count, cu_mask));
 }
+#endif
 
 // Mirrors Amd Extension Apis
 hsa_status_t hsa_amd_memory_unlock(void* host_ptr) {
@@ -2004,7 +2006,9 @@ static void InitAmdExtTable(AmdExtTable* table) {
     table->hsa_amd_svm_attributes_set_fn = RTG::hsa_amd_svm_attributes_set;
     table->hsa_amd_svm_attributes_get_fn = RTG::hsa_amd_svm_attributes_get;
     table->hsa_amd_svm_prefetch_async_fn = RTG::hsa_amd_svm_prefetch_async;
+#if (HIP_VERSION_MAJOR == 4 && HIP_VERSION_MINOR >= 4) || HIP_VERSION_MAJOR > 4
     table->hsa_amd_queue_cu_get_mask_fn = RTG::hsa_amd_queue_cu_get_mask;
+#endif
 }
 
 static std::vector<std::string> split(const std::string& s, char delimiter)
@@ -2276,7 +2280,9 @@ static void InitEnabledTableExtApi(bool value) {
     gs_hsa_enabled_map["hsa_amd_svm_attributes_set"] = value;
     gs_hsa_enabled_map["hsa_amd_svm_attributes_get"] = value;
     gs_hsa_enabled_map["hsa_amd_svm_prefetch_async"] = value;
+#if (HIP_VERSION_MAJOR == 4 && HIP_VERSION_MINOR >= 4) || HIP_VERSION_MAJOR > 4
     gs_hsa_enabled_map["hsa_amd_queue_cu_get_mask"] = value;
+#endif
 }
 
 #define RTG_HSA_CHECK_STATUS(msg, status) do { \

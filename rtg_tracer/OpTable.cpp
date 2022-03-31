@@ -1,3 +1,6 @@
+/**************************************************************************
+ * Copyright (c) 2022 Advanced Micro Devices, Inc.
+ **************************************************************************/
 #include "Table.h"
 #include <map>
 #include <thread>
@@ -52,7 +55,7 @@ OpTable::OpTable(const char *basefile)
     ret = sqlite3_prepare_v2(m_connection, "insert into temp_rocpd_op(id, gpuId, queueId, sequenceId, completionSignal, start, end, description_id, opType_id) values (?,?,?,?,?,?,?,?,?)", -1, &d->opInsert, NULL);
     ret = sqlite3_prepare_v2(m_connection, "insert into temp_rocpd_api_ops(api_id, op_id) values (?,?)", -1, &d->apiOpInsert, NULL);
     
-    d->head = 0;	// last produced by insert()
+    d->head = 0;    // last produced by insert()
     d->tail = 0;    // last consumed by 
 
     d->worker = NULL;
@@ -113,7 +116,7 @@ void OpTablePrivate::writeRows()
 {
     int i = 1;
 
-    std::unique_lock<std::mutex> guard(p->m_mutex);
+    std::unique_lock<std::mutex> lock(p->m_mutex);
 
     if (head == tail)
         return;
@@ -124,14 +127,16 @@ void OpTablePrivate::writeRows()
     int start = tail + 1;
     int end = tail + BATCHSIZE;
     end = (end > head) ? head : end;
+    lock.unlock();
 
-    //while (i < BATCHSIZE && (head > tail + i)) {	// FIXME: refactor like ApiTable?
     for (i = start; i <= end; ++i) {
         // insert rocpd_op
         int index = 1;
-        OpTable::row &r = rows[(tail + i) % BUFFERSIZE];
+        OpTable::row &r = rows[i % BUFFERSIZE];
+        sqlite3_int64 primaryKey = i + p->m_idOffset;
 
         // check for description override
+#if 1
         {
             std::lock_guard<std::mutex> guard(m_descriptionLock);
             auto it = descriptions.find(r.api_id);
@@ -140,8 +145,8 @@ void OpTablePrivate::writeRows()
                 descriptions.erase(it);
             }
         }
-
-        sqlite3_bind_int64(opInsert, index++, (tail + i) + p->m_idOffset);
+#endif
+        sqlite3_bind_int64(opInsert, index++, primaryKey);
         sqlite3_bind_int(opInsert, index++, r.gpuId);
         sqlite3_bind_int(opInsert, index++, r.queueId);
         sqlite3_bind_int(opInsert, index++, r.sequenceId);
@@ -157,18 +162,18 @@ void OpTablePrivate::writeRows()
         //sqlite_int64 rowId = sqlite3_last_insert_rowid(p->m_connection);
         index = 1;
         sqlite3_bind_int64(apiOpInsert, index++, sqlite3_int64(r.api_id) + p->m_idOffset);
-        sqlite3_bind_int64(apiOpInsert, index++, sqlite3_int64(tail + i) + p->m_idOffset);
+        sqlite3_bind_int64(apiOpInsert, index++, sqlite3_int64(i) + p->m_idOffset);
         ret = sqlite3_step(apiOpInsert);
         sqlite3_reset(apiOpInsert);
-        //++i;
     }
-    tail = tail + i;
-
-    guard.unlock();
+    lock.lock();
+    tail = end;
+    lock.unlock();
 
     const timestamp_t cb_mid_time = util::HsaTimer::clocktime_ns(util::HsaTimer::TIME_ID_CLOCK_MONOTONIC);
     sqlite3_exec(p->m_connection, "END TRANSACTION", NULL, NULL, NULL);
     const timestamp_t cb_end_time = util::HsaTimer::clocktime_ns(util::HsaTimer::TIME_ID_CLOCK_MONOTONIC);
+    // FIXME: write the overhead record
 }
 
 

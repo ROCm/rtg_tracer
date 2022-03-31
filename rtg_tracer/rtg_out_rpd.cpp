@@ -48,12 +48,39 @@ static inline const char* cxx_demangle(const char* symbol) {
 
 const sqlite_int64 EMPTY_STRING_ID = 1;
 
+static int activeCount = 0;
+static std::mutex activeMutex;
+
+void RtgOutRpd::rpdstart()
+{
+    std::unique_lock<std::mutex> lock(activeMutex);
+    if (activeCount == 0) {
+        //fprintf(stderr, "rpd_tracer: START\n");
+        s_apiTable->resumeRoctx(util::HsaTimer::clocktime_ns(util::HsaTimer::TIME_ID_CLOCK_MONOTONIC));
+        //start_tracing();
+    }
+    ++activeCount;
+}
+
+void RtgOutRpd::rpdstop()
+{
+    std::unique_lock<std::mutex> lock(activeMutex);
+    if (activeCount == 1) {
+        //fprintf(stderr, "rpd_tracer: STOP\n");
+        //stop_tracing();
+        s_apiTable->suspendRoctx(util::HsaTimer::clocktime_ns(util::HsaTimer::TIME_ID_CLOCK_MONOTONIC));
+    }
+    --activeCount;
+}
+
 void RtgOutRpd::open(const string& filename)
 {
     pid = getpid();
 
     s_metadataTable = new MetadataTable(filename.c_str());
     s_stringTable = new StringTable(filename.c_str());
+    s_kernelApiTable = new KernelApiTable(filename.c_str());
+    s_copyApiTable = new CopyApiTable(filename.c_str());
     s_opTable = new OpTable(filename.c_str());
     s_apiTable = new ApiTable(filename.c_str());
 
@@ -61,6 +88,8 @@ void RtgOutRpd::open(const string& filename)
     sqlite3_int64 offset = s_metadataTable->sessionId() * (sqlite3_int64(1) << 32);
     s_metadataTable->setIdOffset(offset);
     s_stringTable->setIdOffset(offset);
+    s_kernelApiTable->setIdOffset(offset);
+    s_copyApiTable->setIdOffset(offset);
     s_opTable->setIdOffset(offset);
     s_apiTable->setIdOffset(offset);
 

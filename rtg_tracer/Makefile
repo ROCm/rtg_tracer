@@ -30,6 +30,8 @@ RPD_SRCS += ApiTable.cpp
 RPD_SRCS += StringTable.cpp
 RPD_SRCS += MetadataTable.cpp
 RPD_SRCS += ApiIdList.cpp
+RPD_SRCS += CopyApiTable.cpp
+RPD_SRCS += KernelApiTable.cpp
 
 RPD_OBJS = $(RPD_SRCS:.cpp=.o)
 RPD_OBJS += rpd_tracer.o
