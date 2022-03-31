@@ -381,63 +381,42 @@ uint64_t inline tick() {
 }
 
 #define TRACE(...) \
-    static bool is_enabled = gs_hsa_enabled_map[__func__]; \
-    std::string func; \
-    std::string args; \
-    uint64_t tick_; \
-    if (is_enabled) { \
-        func = __func__; \
-        args = "(" + ToString(__VA_ARGS__) + ")"; \
-        tick_ = tick(); \
-    }
+    std::string func = __func__; \
+    std::string args = "(" + ToString(__VA_ARGS__) + ")"; \
+    uint64_t tick_ = tick();
 
 #define LOG_STATUS(status)                                                               \
     ({                                                                                   \
         hsa_status_t localStatus = status; /*local copy so status only evaluated once*/  \
-        if (is_enabled) {                                                                \
-            uint64_t ticks = tick() - tick_;                                             \
-            gs_out->hsa_api(func, args, tick_, ticks, localStatus);                      \
-        }                                                                                \
+        gs_out->hsa_api(func, args, tick_, tick() - tick_, localStatus);                 \
         localStatus;                                                                     \
     })
 
 #define LOG_SIGNAL(status)                                                                     \
     ({                                                                                         \
         hsa_signal_value_t localStatus = status; /*local copy so status only evaluated once*/  \
-        if (is_enabled) {                                                                      \
-            uint64_t ticks = tick() - tick_;                                                   \
-            gs_out->hsa_api(func, args, tick_, ticks, static_cast<int>(localStatus));          \
-        }                                                                                      \
+        gs_out->hsa_api(func, args, tick_, tick() - tick_, static_cast<int>(localStatus));     \
         localStatus;                                                                           \
     })
 
 #define LOG_UINT64(status)                                                           \
     ({                                                                               \
         uint64_t localStatus = status; /*local copy so status only evaluated once*/  \
-        if (is_enabled) {                                                            \
-            uint64_t ticks = tick() - tick_;                                         \
-            gs_out->hsa_api(func, args, tick_, ticks, localStatus);                  \
-        }                                                                            \
+        gs_out->hsa_api(func, args, tick_, tick() - tick_, localStatus);             \
         localStatus;                                                                 \
     })
 
-#define LOG_UINT32(status)                                                                 \
-    ({                                                                                     \
-        uint32_t localStatus = status; /*local copy so status only evaluated once*/        \
-        if (is_enabled) {                                                                  \
-            uint64_t ticks = tick() - tick_;                                               \
-            gs_out->hsa_api(func, args, tick_, ticks, static_cast<uint64_t>(localStatus)); \
-        }                                                                                  \
-        localStatus;                                                                       \
+#define LOG_UINT32(status)                                                                      \
+    ({                                                                                          \
+        uint32_t localStatus = status; /*local copy so status only evaluated once*/             \
+        gs_out->hsa_api(func, args, tick_, tick() - tick_, static_cast<uint64_t>(localStatus)); \
+        localStatus;                                                                            \
     })
 
-#define LOG_VOID(status)                               \
-    ({                                                 \
-        status;                                        \
-        if (is_enabled) {                              \
-            uint64_t ticks = tick() - tick_;           \
-            gs_out->hsa_api(func, args, tick_, ticks); \
-        }                                              \
+#define LOG_VOID(status)                                    \
+    ({                                                      \
+        status;                                             \
+        gs_out->hsa_api(func, args, tick_, tick() - tick_); \
     })
 
 #define LOG_DISPATCH_HOST gs_out->hsa_host_dispatch_kernel
@@ -1420,172 +1399,178 @@ hsa_status_t hsa_status_string(hsa_status_t status, const char **status_string) 
     return LOG_STATUS(gs_OrigCoreApiTable.hsa_status_string_fn(status, status_string));
 }
 
+#define FN_NAME(name) name ## _fn
+#define MINE_OR_THEIRS(name) table->FN_NAME(name) = gs_hsa_enabled_map[ #name ] ? RTG::name : gs_OrigCoreApiTable.FN_NAME(name)
+
 static void InitCoreApiTable(CoreApiTable* table) {
     // Initialize function pointers for Hsa Core Runtime Api's
-    table->hsa_init_fn = RTG::hsa_init;
+    MINE_OR_THEIRS(hsa_init);
     //table->hsa_shut_down_fn = RTG::hsa_shut_down;
-    table->hsa_system_get_info_fn = RTG::hsa_system_get_info;
-    table->hsa_system_extension_supported_fn = RTG::hsa_system_extension_supported;
-    table->hsa_system_get_extension_table_fn = RTG::hsa_system_get_extension_table;
-    table->hsa_iterate_agents_fn = RTG::hsa_iterate_agents;
-    table->hsa_agent_get_info_fn = RTG::hsa_agent_get_info;
-    table->hsa_agent_get_exception_policies_fn = RTG::hsa_agent_get_exception_policies;
-    table->hsa_agent_extension_supported_fn = RTG::hsa_agent_extension_supported;
-    table->hsa_queue_create_fn = RTG::hsa_queue_create;
-    table->hsa_soft_queue_create_fn = RTG::hsa_soft_queue_create;
-    table->hsa_queue_destroy_fn = RTG::hsa_queue_destroy;
-    table->hsa_queue_inactivate_fn = RTG::hsa_queue_inactivate;
-    table->hsa_queue_load_read_index_scacquire_fn = RTG::hsa_queue_load_read_index_scacquire;
-    table->hsa_queue_load_read_index_relaxed_fn = RTG::hsa_queue_load_read_index_relaxed;
-    table->hsa_queue_load_write_index_scacquire_fn = RTG::hsa_queue_load_write_index_scacquire;
-    table->hsa_queue_load_write_index_relaxed_fn = RTG::hsa_queue_load_write_index_relaxed;
-    table->hsa_queue_store_write_index_relaxed_fn = RTG::hsa_queue_store_write_index_relaxed;
-    table->hsa_queue_store_write_index_screlease_fn = RTG::hsa_queue_store_write_index_screlease;
-    table->hsa_queue_cas_write_index_scacq_screl_fn = RTG::hsa_queue_cas_write_index_scacq_screl;
-    table->hsa_queue_cas_write_index_scacquire_fn = RTG::hsa_queue_cas_write_index_scacquire;
-    table->hsa_queue_cas_write_index_relaxed_fn = RTG::hsa_queue_cas_write_index_relaxed;
-    table->hsa_queue_cas_write_index_screlease_fn = RTG::hsa_queue_cas_write_index_screlease;
-    table->hsa_queue_add_write_index_scacq_screl_fn = RTG::hsa_queue_add_write_index_scacq_screl;
-    table->hsa_queue_add_write_index_scacquire_fn = RTG::hsa_queue_add_write_index_scacquire;
-    table->hsa_queue_add_write_index_relaxed_fn = RTG::hsa_queue_add_write_index_relaxed;
-    table->hsa_queue_add_write_index_screlease_fn = RTG::hsa_queue_add_write_index_screlease;
-    table->hsa_queue_store_read_index_relaxed_fn = RTG::hsa_queue_store_read_index_relaxed;
-    table->hsa_queue_store_read_index_screlease_fn = RTG::hsa_queue_store_read_index_screlease;
-    table->hsa_agent_iterate_regions_fn = RTG::hsa_agent_iterate_regions;
-    table->hsa_region_get_info_fn = RTG::hsa_region_get_info;
-    table->hsa_memory_register_fn = RTG::hsa_memory_register;
-    table->hsa_memory_deregister_fn = RTG::hsa_memory_deregister;
-    table->hsa_memory_allocate_fn = RTG::hsa_memory_allocate;
-    table->hsa_memory_free_fn = RTG::hsa_memory_free;
-    table->hsa_memory_copy_fn = RTG::hsa_memory_copy;
-    table->hsa_memory_assign_agent_fn = RTG::hsa_memory_assign_agent;
-    table->hsa_signal_create_fn = RTG::hsa_signal_create;
-    table->hsa_signal_destroy_fn = RTG::hsa_signal_destroy;
-    table->hsa_signal_load_relaxed_fn = RTG::hsa_signal_load_relaxed;
-    table->hsa_signal_load_scacquire_fn = RTG::hsa_signal_load_scacquire;
-    table->hsa_signal_store_relaxed_fn = RTG::hsa_signal_store_relaxed;
-    table->hsa_signal_store_screlease_fn = RTG::hsa_signal_store_screlease;
-    table->hsa_signal_wait_relaxed_fn = RTG::hsa_signal_wait_relaxed;
-    table->hsa_signal_wait_scacquire_fn = RTG::hsa_signal_wait_scacquire;
-    table->hsa_signal_and_relaxed_fn = RTG::hsa_signal_and_relaxed;
-    table->hsa_signal_and_scacquire_fn = RTG::hsa_signal_and_scacquire;
-    table->hsa_signal_and_screlease_fn = RTG::hsa_signal_and_screlease;
-    table->hsa_signal_and_scacq_screl_fn = RTG::hsa_signal_and_scacq_screl;
-    table->hsa_signal_or_relaxed_fn = RTG::hsa_signal_or_relaxed;
-    table->hsa_signal_or_scacquire_fn = RTG::hsa_signal_or_scacquire;
-    table->hsa_signal_or_screlease_fn = RTG::hsa_signal_or_screlease;
-    table->hsa_signal_or_scacq_screl_fn = RTG::hsa_signal_or_scacq_screl;
-    table->hsa_signal_xor_relaxed_fn = RTG::hsa_signal_xor_relaxed;
-    table->hsa_signal_xor_scacquire_fn = RTG::hsa_signal_xor_scacquire;
-    table->hsa_signal_xor_screlease_fn = RTG::hsa_signal_xor_screlease;
-    table->hsa_signal_xor_scacq_screl_fn = RTG::hsa_signal_xor_scacq_screl;
-    table->hsa_signal_exchange_relaxed_fn = RTG::hsa_signal_exchange_relaxed;
-    table->hsa_signal_exchange_scacquire_fn = RTG::hsa_signal_exchange_scacquire;
-    table->hsa_signal_exchange_screlease_fn = RTG::hsa_signal_exchange_screlease;
-    table->hsa_signal_exchange_scacq_screl_fn = RTG::hsa_signal_exchange_scacq_screl;
-    table->hsa_signal_add_relaxed_fn = RTG::hsa_signal_add_relaxed;
-    table->hsa_signal_add_scacquire_fn = RTG::hsa_signal_add_scacquire;
-    table->hsa_signal_add_screlease_fn = RTG::hsa_signal_add_screlease;
-    table->hsa_signal_add_scacq_screl_fn = RTG::hsa_signal_add_scacq_screl;
-    table->hsa_signal_subtract_relaxed_fn = RTG::hsa_signal_subtract_relaxed;
-    table->hsa_signal_subtract_scacquire_fn = RTG::hsa_signal_subtract_scacquire;
-    table->hsa_signal_subtract_screlease_fn = RTG::hsa_signal_subtract_screlease;
-    table->hsa_signal_subtract_scacq_screl_fn = RTG::hsa_signal_subtract_scacq_screl;
-    table->hsa_signal_cas_relaxed_fn = RTG::hsa_signal_cas_relaxed;
-    table->hsa_signal_cas_scacquire_fn = RTG::hsa_signal_cas_scacquire;
-    table->hsa_signal_cas_screlease_fn = RTG::hsa_signal_cas_screlease;
-    table->hsa_signal_cas_scacq_screl_fn = RTG::hsa_signal_cas_scacq_screl;
+    MINE_OR_THEIRS(hsa_system_get_info);
+    MINE_OR_THEIRS(hsa_system_extension_supported);
+    MINE_OR_THEIRS(hsa_system_get_extension_table);
+    MINE_OR_THEIRS(hsa_iterate_agents);
+    MINE_OR_THEIRS(hsa_agent_get_info);
+    MINE_OR_THEIRS(hsa_agent_get_exception_policies);
+    MINE_OR_THEIRS(hsa_agent_extension_supported);
+    table->FN_NAME(hsa_queue_create) = RTG::hsa_queue_create; // always mine, needed for profiling
+    MINE_OR_THEIRS(hsa_soft_queue_create);
+    MINE_OR_THEIRS(hsa_queue_destroy);
+    MINE_OR_THEIRS(hsa_queue_inactivate);
+    MINE_OR_THEIRS(hsa_queue_load_read_index_scacquire);
+    MINE_OR_THEIRS(hsa_queue_load_read_index_relaxed);
+    MINE_OR_THEIRS(hsa_queue_load_write_index_scacquire);
+    MINE_OR_THEIRS(hsa_queue_load_write_index_relaxed);
+    MINE_OR_THEIRS(hsa_queue_store_write_index_relaxed);
+    MINE_OR_THEIRS(hsa_queue_store_write_index_screlease);
+    MINE_OR_THEIRS(hsa_queue_cas_write_index_scacq_screl);
+    MINE_OR_THEIRS(hsa_queue_cas_write_index_scacquire);
+    MINE_OR_THEIRS(hsa_queue_cas_write_index_relaxed);
+    MINE_OR_THEIRS(hsa_queue_cas_write_index_screlease);
+    MINE_OR_THEIRS(hsa_queue_add_write_index_scacq_screl);
+    MINE_OR_THEIRS(hsa_queue_add_write_index_scacquire);
+    MINE_OR_THEIRS(hsa_queue_add_write_index_relaxed);
+    MINE_OR_THEIRS(hsa_queue_add_write_index_screlease);
+    MINE_OR_THEIRS(hsa_queue_store_read_index_relaxed);
+    MINE_OR_THEIRS(hsa_queue_store_read_index_screlease);
+    MINE_OR_THEIRS(hsa_agent_iterate_regions);
+    MINE_OR_THEIRS(hsa_region_get_info);
+    MINE_OR_THEIRS(hsa_memory_register);
+    MINE_OR_THEIRS(hsa_memory_deregister);
+    MINE_OR_THEIRS(hsa_memory_allocate);
+    MINE_OR_THEIRS(hsa_memory_free);
+    MINE_OR_THEIRS(hsa_memory_copy);
+    MINE_OR_THEIRS(hsa_memory_assign_agent);
+    MINE_OR_THEIRS(hsa_signal_create);
+    MINE_OR_THEIRS(hsa_signal_destroy);
+    MINE_OR_THEIRS(hsa_signal_load_relaxed);
+    MINE_OR_THEIRS(hsa_signal_load_scacquire);
+    MINE_OR_THEIRS(hsa_signal_store_relaxed);
+    MINE_OR_THEIRS(hsa_signal_store_screlease);
+    MINE_OR_THEIRS(hsa_signal_wait_relaxed);
+    MINE_OR_THEIRS(hsa_signal_wait_scacquire);
+    MINE_OR_THEIRS(hsa_signal_and_relaxed);
+    MINE_OR_THEIRS(hsa_signal_and_scacquire);
+    MINE_OR_THEIRS(hsa_signal_and_screlease);
+    MINE_OR_THEIRS(hsa_signal_and_scacq_screl);
+    MINE_OR_THEIRS(hsa_signal_or_relaxed);
+    MINE_OR_THEIRS(hsa_signal_or_scacquire);
+    MINE_OR_THEIRS(hsa_signal_or_screlease);
+    MINE_OR_THEIRS(hsa_signal_or_scacq_screl);
+    MINE_OR_THEIRS(hsa_signal_xor_relaxed);
+    MINE_OR_THEIRS(hsa_signal_xor_scacquire);
+    MINE_OR_THEIRS(hsa_signal_xor_screlease);
+    MINE_OR_THEIRS(hsa_signal_xor_scacq_screl);
+    MINE_OR_THEIRS(hsa_signal_exchange_relaxed);
+    MINE_OR_THEIRS(hsa_signal_exchange_scacquire);
+    MINE_OR_THEIRS(hsa_signal_exchange_screlease);
+    MINE_OR_THEIRS(hsa_signal_exchange_scacq_screl);
+    MINE_OR_THEIRS(hsa_signal_add_relaxed);
+    MINE_OR_THEIRS(hsa_signal_add_scacquire);
+    MINE_OR_THEIRS(hsa_signal_add_screlease);
+    MINE_OR_THEIRS(hsa_signal_add_scacq_screl);
+    MINE_OR_THEIRS(hsa_signal_subtract_relaxed);
+    MINE_OR_THEIRS(hsa_signal_subtract_scacquire);
+    MINE_OR_THEIRS(hsa_signal_subtract_screlease);
+    MINE_OR_THEIRS(hsa_signal_subtract_scacq_screl);
+    MINE_OR_THEIRS(hsa_signal_cas_relaxed);
+    MINE_OR_THEIRS(hsa_signal_cas_scacquire);
+    MINE_OR_THEIRS(hsa_signal_cas_screlease);
+    MINE_OR_THEIRS(hsa_signal_cas_scacq_screl);
 
     //===--- Instruction Set Architecture -----------------------------------===//
 
-    table->hsa_isa_from_name_fn = RTG::hsa_isa_from_name;
+    MINE_OR_THEIRS(hsa_isa_from_name);
     // Deprecated since v1.1.
-    table->hsa_isa_get_info_fn = RTG::hsa_isa_get_info;
+    MINE_OR_THEIRS(hsa_isa_get_info);
     // Deprecated since v1.1.
-    table->hsa_isa_compatible_fn = RTG::hsa_isa_compatible;
+    MINE_OR_THEIRS(hsa_isa_compatible);
 
     //===--- Code Objects (deprecated) --------------------------------------===//
 
     // Deprecated since v1.1.
-    table->hsa_code_object_serialize_fn = RTG::hsa_code_object_serialize;
+    MINE_OR_THEIRS(hsa_code_object_serialize);
     // Deprecated since v1.1.
-    table->hsa_code_object_deserialize_fn = RTG::hsa_code_object_deserialize;
+    MINE_OR_THEIRS(hsa_code_object_deserialize);
     // Deprecated since v1.1.
-    table->hsa_code_object_destroy_fn = RTG::hsa_code_object_destroy;
+    MINE_OR_THEIRS(hsa_code_object_destroy);
     // Deprecated since v1.1.
-    table->hsa_code_object_get_info_fn = RTG::hsa_code_object_get_info;
+    MINE_OR_THEIRS(hsa_code_object_get_info);
     // Deprecated since v1.1.
-    table->hsa_code_object_get_symbol_fn = RTG::hsa_code_object_get_symbol;
+    MINE_OR_THEIRS(hsa_code_object_get_symbol);
     // Deprecated since v1.1.
-    table->hsa_code_symbol_get_info_fn = RTG::hsa_code_symbol_get_info;
+    MINE_OR_THEIRS(hsa_code_symbol_get_info);
     // Deprecated since v1.1.
-    table->hsa_code_object_iterate_symbols_fn = RTG::hsa_code_object_iterate_symbols;
+    MINE_OR_THEIRS(hsa_code_object_iterate_symbols);
 
     //===--- Executable -----------------------------------------------------===//
 
     // Deprecated since v1.1.
-    table->hsa_executable_create_fn = RTG::hsa_executable_create;
-    table->hsa_executable_destroy_fn = RTG::hsa_executable_destroy;
+    MINE_OR_THEIRS(hsa_executable_create);
+    MINE_OR_THEIRS(hsa_executable_destroy);
     // Deprecated since v1.1.
-    table->hsa_executable_load_code_object_fn = RTG::hsa_executable_load_code_object;
-    table->hsa_executable_freeze_fn = RTG::hsa_executable_freeze;
-    table->hsa_executable_get_info_fn = RTG::hsa_executable_get_info;
-    table->hsa_executable_global_variable_define_fn = RTG::hsa_executable_global_variable_define;
-    table->hsa_executable_agent_global_variable_define_fn = RTG::hsa_executable_agent_global_variable_define;
-    table->hsa_executable_readonly_variable_define_fn = RTG::hsa_executable_readonly_variable_define;
-    table->hsa_executable_validate_fn = RTG::hsa_executable_validate;
+    MINE_OR_THEIRS(hsa_executable_load_code_object);
+    MINE_OR_THEIRS(hsa_executable_freeze);
+    MINE_OR_THEIRS(hsa_executable_get_info);
+    MINE_OR_THEIRS(hsa_executable_global_variable_define);
+    MINE_OR_THEIRS(hsa_executable_agent_global_variable_define);
+    MINE_OR_THEIRS(hsa_executable_readonly_variable_define);
+    MINE_OR_THEIRS(hsa_executable_validate);
     // Deprecated since v1.1.
-    table->hsa_executable_get_symbol_fn = RTG::hsa_executable_get_symbol;
-    table->hsa_executable_symbol_get_info_fn = RTG::hsa_executable_symbol_get_info;
+    MINE_OR_THEIRS(hsa_executable_get_symbol);
+    MINE_OR_THEIRS(hsa_executable_symbol_get_info);
     // Deprecated since v1.1.
-    table->hsa_executable_iterate_symbols_fn = RTG::hsa_executable_iterate_symbols;
+    MINE_OR_THEIRS(hsa_executable_iterate_symbols);
 
     //===--- Runtime Notifications ------------------------------------------===//
 
-    table->hsa_status_string_fn = RTG::hsa_status_string;
+    MINE_OR_THEIRS(hsa_status_string);
 
     // Start HSA v1.1 additions
-    table->hsa_extension_get_name_fn = RTG::hsa_extension_get_name;
-    table->hsa_system_major_extension_supported_fn = RTG::hsa_system_major_extension_supported;
-    table->hsa_system_get_major_extension_table_fn = RTG::hsa_system_get_major_extension_table;
-    table->hsa_agent_major_extension_supported_fn = RTG::hsa_agent_major_extension_supported;
-    table->hsa_cache_get_info_fn = RTG::hsa_cache_get_info;
-    table->hsa_agent_iterate_caches_fn = RTG::hsa_agent_iterate_caches;
+    MINE_OR_THEIRS(hsa_extension_get_name);
+    MINE_OR_THEIRS(hsa_system_major_extension_supported);
+    MINE_OR_THEIRS(hsa_system_get_major_extension_table);
+    MINE_OR_THEIRS(hsa_agent_major_extension_supported);
+    MINE_OR_THEIRS(hsa_cache_get_info);
+    MINE_OR_THEIRS(hsa_agent_iterate_caches);
     // Silent store optimization is present in all signal ops when no agents are sleeping.
-    table->hsa_signal_silent_store_relaxed_fn = RTG::hsa_signal_store_relaxed;
-    table->hsa_signal_silent_store_screlease_fn = RTG::hsa_signal_store_screlease;
-    table->hsa_signal_group_create_fn = RTG::hsa_signal_group_create;
-    table->hsa_signal_group_destroy_fn = RTG::hsa_signal_group_destroy;
-    table->hsa_signal_group_wait_any_scacquire_fn = RTG::hsa_signal_group_wait_any_scacquire;
-    table->hsa_signal_group_wait_any_relaxed_fn = RTG::hsa_signal_group_wait_any_relaxed;
+    MINE_OR_THEIRS(hsa_signal_silent_store_relaxed);
+    MINE_OR_THEIRS(hsa_signal_silent_store_screlease);
+    MINE_OR_THEIRS(hsa_signal_group_create);
+    MINE_OR_THEIRS(hsa_signal_group_destroy);
+    MINE_OR_THEIRS(hsa_signal_group_wait_any_scacquire);
+    MINE_OR_THEIRS(hsa_signal_group_wait_any_relaxed);
 
     //===--- Instruction Set Architecture - HSA v1.1 additions --------------===//
 
-    table->hsa_agent_iterate_isas_fn = RTG::hsa_agent_iterate_isas;
-    table->hsa_isa_get_info_alt_fn = RTG::hsa_isa_get_info_alt;
-    table->hsa_isa_get_exception_policies_fn = RTG::hsa_isa_get_exception_policies;
-    table->hsa_isa_get_round_method_fn = RTG::hsa_isa_get_round_method;
-    table->hsa_wavefront_get_info_fn = RTG::hsa_wavefront_get_info;
-    table->hsa_isa_iterate_wavefronts_fn = RTG::hsa_isa_iterate_wavefronts;
+    MINE_OR_THEIRS(hsa_agent_iterate_isas);
+    MINE_OR_THEIRS(hsa_isa_get_info_alt);
+    MINE_OR_THEIRS(hsa_isa_get_exception_policies);
+    MINE_OR_THEIRS(hsa_isa_get_round_method);
+    MINE_OR_THEIRS(hsa_wavefront_get_info);
+    MINE_OR_THEIRS(hsa_isa_iterate_wavefronts);
 
     //===--- Code Objects (deprecated) - HSA v1.1 additions -----------------===//
 
     // Deprecated since v1.1.
-    table->hsa_code_object_get_symbol_from_name_fn = RTG::hsa_code_object_get_symbol_from_name;
+    MINE_OR_THEIRS(hsa_code_object_get_symbol_from_name);
 
     //===--- Executable - HSA v1.1 additions --------------------------------===//
 
-    table->hsa_code_object_reader_create_from_file_fn = RTG::hsa_code_object_reader_create_from_file;
-    table->hsa_code_object_reader_create_from_memory_fn = RTG::hsa_code_object_reader_create_from_memory;
-    table->hsa_code_object_reader_destroy_fn = RTG::hsa_code_object_reader_destroy;
-    table->hsa_executable_create_alt_fn = RTG::hsa_executable_create_alt;
-    table->hsa_executable_load_program_code_object_fn = RTG::hsa_executable_load_program_code_object;
-    table->hsa_executable_load_agent_code_object_fn = RTG::hsa_executable_load_agent_code_object;
-    table->hsa_executable_validate_alt_fn = RTG::hsa_executable_validate_alt;
-    table->hsa_executable_get_symbol_by_name_fn = RTG::hsa_executable_get_symbol_by_name;
-    table->hsa_executable_iterate_agent_symbols_fn = RTG::hsa_executable_iterate_agent_symbols;
-    table->hsa_executable_iterate_program_symbols_fn = RTG::hsa_executable_iterate_program_symbols;
+    MINE_OR_THEIRS(hsa_code_object_reader_create_from_file);
+    MINE_OR_THEIRS(hsa_code_object_reader_create_from_memory);
+    MINE_OR_THEIRS(hsa_code_object_reader_destroy);
+    MINE_OR_THEIRS(hsa_executable_create_alt);
+    MINE_OR_THEIRS(hsa_executable_load_program_code_object);
+    MINE_OR_THEIRS(hsa_executable_load_agent_code_object);
+    MINE_OR_THEIRS(hsa_executable_validate_alt);
+    MINE_OR_THEIRS(hsa_executable_get_symbol_by_name);
+    MINE_OR_THEIRS(hsa_executable_iterate_agent_symbols);
+    MINE_OR_THEIRS(hsa_executable_iterate_program_symbols);
 }
+
+#undef FN_NAME
+#undef MINE_OR_THEIRS
 
 /*
  * Following set of functions are bundled as AMD Extension Apis
@@ -1951,61 +1936,64 @@ hsa_status_t hsa_amd_queue_set_priority(hsa_queue_t* queue, hsa_amd_queue_priori
     return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_queue_set_priority_fn(queue, priority));
 }
 
+#define FN_NAME(name) name ## _fn
+#define MINE_OR_THEIRS(name) table->FN_NAME(name) = gs_hsa_enabled_map[ #name ] ? RTG::name : gs_OrigExtApiTable.FN_NAME(name)
+
 static void InitAmdExtTable(AmdExtTable* table) {
     // Initialize function pointers for Amd Extension Api's
-    table->hsa_amd_coherency_get_type_fn = RTG::hsa_amd_coherency_get_type;
-    table->hsa_amd_coherency_set_type_fn = RTG::hsa_amd_coherency_set_type;
-    table->hsa_amd_profiling_set_profiler_enabled_fn = RTG::hsa_amd_profiling_set_profiler_enabled;
-    table->hsa_amd_profiling_async_copy_enable_fn = RTG::hsa_amd_profiling_async_copy_enable;
-    table->hsa_amd_profiling_get_dispatch_time_fn = RTG::hsa_amd_profiling_get_dispatch_time;
-    table->hsa_amd_profiling_get_async_copy_time_fn = RTG::hsa_amd_profiling_get_async_copy_time;
-    table->hsa_amd_profiling_convert_tick_to_system_domain_fn = RTG::hsa_amd_profiling_convert_tick_to_system_domain;
-    table->hsa_amd_signal_async_handler_fn = RTG::hsa_amd_signal_async_handler;
-    table->hsa_amd_async_function_fn = RTG::hsa_amd_async_function;
-    table->hsa_amd_signal_wait_any_fn = RTG::hsa_amd_signal_wait_any;
-    table->hsa_amd_queue_cu_set_mask_fn = RTG::hsa_amd_queue_cu_set_mask;
-    table->hsa_amd_memory_pool_get_info_fn = RTG::hsa_amd_memory_pool_get_info;
-    table->hsa_amd_agent_iterate_memory_pools_fn = RTG::hsa_amd_agent_iterate_memory_pools;
-    table->hsa_amd_memory_pool_allocate_fn = RTG::hsa_amd_memory_pool_allocate;
-    table->hsa_amd_memory_pool_free_fn = RTG::hsa_amd_memory_pool_free;
-    table->hsa_amd_memory_async_copy_fn = RTG::hsa_amd_memory_async_copy;
-    table->hsa_amd_agent_memory_pool_get_info_fn = RTG::hsa_amd_agent_memory_pool_get_info;
-    table->hsa_amd_agents_allow_access_fn = RTG::hsa_amd_agents_allow_access;
-    table->hsa_amd_memory_pool_can_migrate_fn = RTG::hsa_amd_memory_pool_can_migrate;
-    table->hsa_amd_memory_migrate_fn = RTG::hsa_amd_memory_migrate;
-    table->hsa_amd_memory_lock_fn = RTG::hsa_amd_memory_lock;
-    table->hsa_amd_memory_unlock_fn = RTG::hsa_amd_memory_unlock;
-    table->hsa_amd_memory_fill_fn = RTG::hsa_amd_memory_fill;
-    table->hsa_amd_interop_map_buffer_fn = RTG::hsa_amd_interop_map_buffer;
-    table->hsa_amd_interop_unmap_buffer_fn = RTG::hsa_amd_interop_unmap_buffer;
-    table->hsa_amd_image_create_fn = RTG::hsa_amd_image_create;
-    table->hsa_amd_pointer_info_fn = RTG::hsa_amd_pointer_info;
-    table->hsa_amd_pointer_info_set_userdata_fn = RTG::hsa_amd_pointer_info_set_userdata;
-    table->hsa_amd_ipc_memory_create_fn = RTG::hsa_amd_ipc_memory_create;
-    table->hsa_amd_ipc_memory_attach_fn = RTG::hsa_amd_ipc_memory_attach;
-    table->hsa_amd_ipc_memory_detach_fn = RTG::hsa_amd_ipc_memory_detach;
-    table->hsa_amd_signal_create_fn = RTG::hsa_amd_signal_create;
-    table->hsa_amd_ipc_signal_create_fn = RTG::hsa_amd_ipc_signal_create;
-    table->hsa_amd_ipc_signal_attach_fn = RTG::hsa_amd_ipc_signal_attach;
-    table->hsa_amd_register_system_event_handler_fn = RTG::hsa_amd_register_system_event_handler;
-    table->hsa_amd_queue_intercept_create_fn = RTG::hsa_amd_queue_intercept_create;
-    table->hsa_amd_queue_intercept_register_fn = RTG::hsa_amd_queue_intercept_register;
-    table->hsa_amd_queue_set_priority_fn = RTG::hsa_amd_queue_set_priority;
-    table->hsa_amd_memory_async_copy_rect_fn = RTG::hsa_amd_memory_async_copy_rect;
+    MINE_OR_THEIRS(hsa_amd_coherency_get_type);
+    MINE_OR_THEIRS(hsa_amd_coherency_set_type);
+    MINE_OR_THEIRS(hsa_amd_profiling_set_profiler_enabled);
+    MINE_OR_THEIRS(hsa_amd_profiling_async_copy_enable);
+    MINE_OR_THEIRS(hsa_amd_profiling_get_dispatch_time);
+    MINE_OR_THEIRS(hsa_amd_profiling_get_async_copy_time);
+    MINE_OR_THEIRS(hsa_amd_profiling_convert_tick_to_system_domain);
+    MINE_OR_THEIRS(hsa_amd_signal_async_handler);
+    MINE_OR_THEIRS(hsa_amd_async_function);
+    MINE_OR_THEIRS(hsa_amd_signal_wait_any);
+    MINE_OR_THEIRS(hsa_amd_queue_cu_set_mask);
+    MINE_OR_THEIRS(hsa_amd_memory_pool_get_info);
+    MINE_OR_THEIRS(hsa_amd_agent_iterate_memory_pools);
+    MINE_OR_THEIRS(hsa_amd_memory_pool_allocate);
+    MINE_OR_THEIRS(hsa_amd_memory_pool_free);
+    MINE_OR_THEIRS(hsa_amd_memory_async_copy);
+    MINE_OR_THEIRS(hsa_amd_agent_memory_pool_get_info);
+    MINE_OR_THEIRS(hsa_amd_agents_allow_access);
+    MINE_OR_THEIRS(hsa_amd_memory_pool_can_migrate);
+    MINE_OR_THEIRS(hsa_amd_memory_migrate);
+    MINE_OR_THEIRS(hsa_amd_memory_lock);
+    MINE_OR_THEIRS(hsa_amd_memory_unlock);
+    MINE_OR_THEIRS(hsa_amd_memory_fill);
+    MINE_OR_THEIRS(hsa_amd_interop_map_buffer);
+    MINE_OR_THEIRS(hsa_amd_interop_unmap_buffer);
+    MINE_OR_THEIRS(hsa_amd_image_create);
+    MINE_OR_THEIRS(hsa_amd_pointer_info);
+    MINE_OR_THEIRS(hsa_amd_pointer_info_set_userdata);
+    MINE_OR_THEIRS(hsa_amd_ipc_memory_create);
+    MINE_OR_THEIRS(hsa_amd_ipc_memory_attach);
+    MINE_OR_THEIRS(hsa_amd_ipc_memory_detach);
+    MINE_OR_THEIRS(hsa_amd_signal_create);
+    MINE_OR_THEIRS(hsa_amd_ipc_signal_create);
+    MINE_OR_THEIRS(hsa_amd_ipc_signal_attach);
+    MINE_OR_THEIRS(hsa_amd_register_system_event_handler);
+    MINE_OR_THEIRS(hsa_amd_queue_intercept_create);
+    MINE_OR_THEIRS(hsa_amd_queue_intercept_register);
+    MINE_OR_THEIRS(hsa_amd_queue_set_priority);
+    MINE_OR_THEIRS(hsa_amd_memory_async_copy_rect);
 #if RTG_ENABLE_HSA_AMD_RUNTIME_QUEUE_CREATE_REGISTER
-    table->hsa_amd_runtime_queue_create_register_fn = RTG::hsa_amd_runtime_queue_create_register;
+    MINE_OR_THEIRS(hsa_amd_runtime_queue_create_register);
 #endif
 #if RTG_ENABLE_HSA_AMD_MEMORY_LOCK_TO_POOL
-    table->hsa_amd_memory_lock_to_pool_fn = RTG::hsa_amd_memory_lock_to_pool;
+    MINE_OR_THEIRS(hsa_amd_memory_lock_to_pool);
 #endif
-    table->hsa_amd_register_deallocation_callback_fn = RTG::hsa_amd_register_deallocation_callback;
-    table->hsa_amd_deregister_deallocation_callback_fn = RTG::hsa_amd_deregister_deallocation_callback;
-    table->hsa_amd_signal_value_pointer_fn = RTG::hsa_amd_signal_value_pointer;
-    table->hsa_amd_svm_attributes_set_fn = RTG::hsa_amd_svm_attributes_set;
-    table->hsa_amd_svm_attributes_get_fn = RTG::hsa_amd_svm_attributes_get;
-    table->hsa_amd_svm_prefetch_async_fn = RTG::hsa_amd_svm_prefetch_async;
+    MINE_OR_THEIRS(hsa_amd_register_deallocation_callback);
+    MINE_OR_THEIRS(hsa_amd_deregister_deallocation_callback);
+    MINE_OR_THEIRS(hsa_amd_signal_value_pointer);
+    MINE_OR_THEIRS(hsa_amd_svm_attributes_set);
+    MINE_OR_THEIRS(hsa_amd_svm_attributes_get);
+    MINE_OR_THEIRS(hsa_amd_svm_prefetch_async);
 #if (HIP_VERSION_MAJOR == 4 && HIP_VERSION_MINOR >= 4) || HIP_VERSION_MAJOR > 4
-    table->hsa_amd_queue_cu_get_mask_fn = RTG::hsa_amd_queue_cu_get_mask;
+    MINE_OR_THEIRS(hsa_amd_queue_cu_get_mask);
 #endif
 }
 
@@ -2024,6 +2012,11 @@ static void InitEnabledTable(std::string what_to_trace, std::string what_not_to_
     // init all keys to false initially
     InitEnabledTableCore(false);
     InitEnabledTableExtApi(false);
+
+    if (HCC_PROFILE) {
+        // all HSA function traces are disabled
+        return;
+    }
 
     // tokens given by user
     std::vector<std::string> tokens = split(what_to_trace, ',');
@@ -2750,8 +2743,6 @@ extern "C" bool OnLoad(void *pTable,
         }
         RTG::gs_out->open(outname);
 
-        RTG::InitEnabledTable(RTG_HSA_API_FILTER, RTG_HSA_API_FILTER_OUT);
-
         // Register HIP APIs
         std::vector<std::string> tokens_keep = RTG::split(RTG_HIP_API_FILTER, ',');
         std::vector<std::string> tokens_prune = RTG::split(RTG_HIP_API_FILTER_OUT, ',');
@@ -2797,6 +2788,9 @@ extern "C" bool OnLoad(void *pTable,
         }
     }
 
+    // set which HSA functions we should replace
+    RTG::InitEnabledTable(RTG_HSA_API_FILTER, RTG_HSA_API_FILTER_OUT);
+    // replace them
     if (!RTG::InitHsaTable(reinterpret_cast<HsaApiTable*>(pTable))) {
         return false;
     }
