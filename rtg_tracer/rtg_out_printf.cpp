@@ -105,7 +105,7 @@ void RtgOutPrintf::open(const string& filename)
 
     hip_api_names.reserve(HIP_API_ID_NUMBER);
     for (int i=0; i<HIP_API_ID_NUMBER; ++i) {
-        hip_api_names[i] = hip_api_name(i);
+        hip_api_names.push_back(hip_api_name(i));
     }
 }
 

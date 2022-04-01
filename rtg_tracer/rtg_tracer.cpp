@@ -31,6 +31,8 @@
 #include <hip/amd_detail/hip_runtime_prof.h>
 #include <hip/amd_detail/hip_prof_str.h>
 
+#include "missing_ostream_definitions.h"
+
 #include <roctracer/roctracer.h>
 #include <roctracer/roctracer_roctx.h>
 
@@ -1510,7 +1512,7 @@ static void InitCoreApiTable(CoreApiTable* table) {
     MINE_OR_THEIRS(hsa_executable_destroy);
     // Deprecated since v1.1.
     MINE_OR_THEIRS(hsa_executable_load_code_object);
-    MINE_OR_THEIRS(hsa_executable_freeze);
+    table->FN_NAME(hsa_executable_freeze) = RTG::hsa_executable_freeze; // always mine, needed for profiling
     MINE_OR_THEIRS(hsa_executable_get_info);
     MINE_OR_THEIRS(hsa_executable_global_variable_define);
     MINE_OR_THEIRS(hsa_executable_agent_global_variable_define);
