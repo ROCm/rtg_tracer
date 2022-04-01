@@ -120,6 +120,8 @@ public:
     hsa_amd_memory_pool_t kern_arg_pool;
     int *guard_page;
     std::unordered_map<uint64_t, std::string> completed_kernel;
+    std::unordered_map<uint64_t, std::string> last_queued_kernel;
+    std::unordered_map<uint64_t, std::string> next_queued_kernel;
     static std::unordered_map<uint64_t, AgentInfo*> s_agent_map;
     static std::unordered_map<uint64_t, AgentInfo*> s_pool_to_agent_map;
     static std::vector<AgentInfo*> s_cpu_agents;
@@ -239,6 +241,8 @@ AgentInfo::AgentInfo(hsa_agent_t agent)
     , kern_arg_pool{0}
     , guard_page{NULL}
     , completed_kernel{}
+    , last_queued_kernel{}
+    , next_queued_kernel{}
 {
     s_agent_map[agent.handle] = this;
 }
@@ -458,7 +462,13 @@ static void print_all_queues_last_kernel()
         else {
             fprintf(stderr, "RTG Tracer: agent %d\n", agent->index);
             for (auto &queue : agent->completed_kernel) {
-                fprintf(stderr, "RTG Tracer:     queue %lu : last kernel %s\n", queue.first, queue.second.c_str());
+                fprintf(stderr, "RTG Tracer:     queue %lu : last completed kernel : %s\n", queue.first, queue.second.c_str());
+            }
+            for (auto &queue : agent->last_queued_kernel) {
+                fprintf(stderr, "RTG Tracer:     queue %lu :    last queued kernel : %s\n", queue.first, queue.second.c_str());
+            }
+            for (auto &queue : agent->next_queued_kernel) {
+                fprintf(stderr, "RTG Tracer:     queue %lu :    last queued kernel : %s\n", queue.first, queue.second.c_str());
             }
         }
     }
@@ -491,16 +501,13 @@ static void guard_check(void *ptr)
 
     // no lock needed -- called by lock holder
 
-    size_t size = 0;
     std::unordered_map<void*, size_t>::iterator loc = gs_allocations.find(ptr);
     if (loc == gs_allocations.end()) {
         fprintf(stderr, "RTG Tracer: allocation lookup error\n");
         return;
     }
-    else {
-        size = loc->second;
-    }
-    char *cptr = (char*)ptr + size;
+
+    char *cptr = (char*)ptr + loc->second; // + size
     if (my_hsa_copy(gstl_guard_int_buffer, cptr, GUARD_SIZE)) {
         for (size_t i=0; i<GUARD_INT_COUNT; ++i) {
             if (gstl_guard_int_buffer[i] != GUARD_INT) {
@@ -880,7 +887,7 @@ static void SignalWaiter(int id, SignalCallbackData *data)
         fprintf(stderr, "SOMETHING IS NOT OKAY\n");
     }
 
-    guard_check_all();
+    //guard_check_all();
 
     // decrement signal again to unblock the queue
     gs_OrigCoreApiTable.hsa_signal_subtract_relaxed_fn(data->signal, 1);
@@ -2870,6 +2877,9 @@ static void hsa_amd_queue_intercept_cb(
             const uint64_t kernel_symbol = kernel_code->runtime_loader_kernel_symbol;
             std::string kernel_name = QueryKernelName(kernel_object, kernel_code);
 
+            AgentInfo::Get(agent)->last_queued_kernel[queue->id] = AgentInfo::Get(agent)->next_queued_kernel[queue->id];
+            AgentInfo::Get(agent)->next_queued_kernel[queue->id] = kernel_name;
+
             // find kernel launch from HIP to get correlation id
             // HCC output does not need correlation_id
             //uint64_t correlation_id = HCC_PROFILE ? 0 : AgentInfo::Get(agent)->find_op(kernel_name);
@@ -2912,6 +2922,8 @@ static void hsa_amd_queue_intercept_cb(
             fprintf(stderr, "RTG Tracer: unrecognized packet type %d\n", type);
             exit(EXIT_FAILURE);
         }
+
+        guard_check_all();
 
         // Submitting the original packets as if profiling was not enabled
         writer(packet, 1);
