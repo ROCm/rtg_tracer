@@ -55,7 +55,7 @@ struct TlsData {
         tid_string = get_tid_string();
         tid = tid_string.c_str();
 
-        std::string filename_with_tid = filename + "." + tid_string;
+        std::string filename_with_tid = filename + "." + tid_string + ".txt";
         stream = fopen(filename_with_tid.c_str(), "w");
 
         hip_api_names.reserve(HIP_API_ID_NUMBER);

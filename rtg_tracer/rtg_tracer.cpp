@@ -817,9 +817,14 @@ hsa_status_t hsa_queue_create(hsa_agent_t agent, uint32_t size, hsa_queue_type32
         InterceptCallbackData *data = new InterceptCallbackData(*queue, agent, signal_queue);
         status = gs_OrigExtApiTable.hsa_amd_queue_intercept_register_fn(
                 *queue, hsa_amd_queue_intercept_cb, data);
-        // print as usual
-        TRACE(agent, size, type, callback, data, private_segment_size, group_segment_size, queue);
-        return LOG_STATUS(status);
+        if (HCC_PROFILE) {
+            return status;
+        }
+        else {
+            // print as usual
+            TRACE(agent, size, type, callback, data, private_segment_size, group_segment_size, queue);
+            return LOG_STATUS(status);
+        }
     }
     else {
         // print as usual
@@ -1323,11 +1328,17 @@ hsa_status_t hsa_executable_load_agent_code_object(hsa_executable_t executable, 
 }
 
 hsa_status_t hsa_executable_freeze(hsa_executable_t executable, const char *options) {
-    TRACE(executable, options);
     if (RTG_PROFILE) {
-        return LOG_STATUS(hsa_executable_freeze_interceptor(executable, options));
+        if (HCC_PROFILE) {
+            return hsa_executable_freeze_interceptor(executable, options);
+        }
+        else {
+            TRACE(executable, options);
+            return LOG_STATUS(hsa_executable_freeze_interceptor(executable, options));
+        }
     }
     else {
+        TRACE(executable, options);
         return LOG_STATUS(gs_OrigCoreApiTable.hsa_executable_freeze_fn(executable, options));
     }
 }
@@ -2014,11 +2025,6 @@ static void InitEnabledTable(std::string what_to_trace, std::string what_not_to_
     // init all keys to false initially
     InitEnabledTableCore(false);
     InitEnabledTableExtApi(false);
-
-    if (HCC_PROFILE) {
-        // all HSA function traces are disabled
-        return;
-    }
 
     // tokens given by user
     std::vector<std::string> tokens = split(what_to_trace, ',');
@@ -2707,22 +2713,26 @@ extern "C" bool OnLoad(void *pTable,
 
     Flag::init_all();
 
-    std::string outname = RTG_FILENAME;
+    std::string outname = RTG_FILE_PREFIX;
+    auto pid_pos = outname.find("%p");
+    if (pid_pos != std::string::npos) {
+        outname = outname.substr(0, pid_pos) + RTG::pidstr() + outname.substr(pid_pos+2);
+    }
+
 #ifdef RPD_TRACER
     if (RTG_RPD) {
-        auto pos = outname.find(".txt");
-        if (pos != std::string::npos) {
-            outname = outname.substr(0, pos) + std::string(".rpd");
-        }
+        outname += std::string(".rpd");
+        fprintf(stderr, "RTG Tracer: Filename %s\n", outname.c_str());
     }
     else
 #endif
-    {
-        // PID is needed to avoid clashses in multi-process use cases
-        outname += ".";
-        outname += RTG::pidstr();
+    if (RTG_LEGACY_PRINTF) {
+        outname += std::string(".txt");
+        fprintf(stderr, "RTG Tracer: Filename %s\n", outname.c_str());
     }
-    fprintf(stderr, "RTG Tracer: Filename %s\n", outname.c_str());
+    else {
+        fprintf(stderr, "RTG Tracer: Output directory %s\n", outname.c_str());
+    }
 
     if (HCC_PROFILE) {
         fprintf(stderr, "RTG Tracer: HCC_PROFILE=2 mode\n");

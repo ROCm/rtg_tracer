@@ -5,8 +5,11 @@ HIP_PATH = /opt/rocm/hip
 
 HIPCC=$(HIP_PATH)/bin/hipcc
 
+ifeq ($(DEBUG), 1)
+CXXFLAGS = -g -O0
+else
 CXXFLAGS = -O3
-#CXXFLAGS = -g -O0
+endif
 
 ROC_LIBS = -lroctx64 -lroctracer64 -lamdhip64 -lhsa-runtime64 -lsqlite3 -lfmt
 ROC_INCLUDE = -I/opt/rocm/include -I/opt/rocm/hip/include -I/opt/rocm/roctracer/include -I/opt/rocm/hsa/include/hsa
@@ -66,6 +69,8 @@ MetadataTable.o: hsa_rsrc_factory.h Table.h
 KernelApiTable.o: hsa_rsrc_factory.h Table.h
 CopyApiTable.o: hsa_rsrc_factory.h Table.h
 ApiIdList.o: ApiIdList.h
+rtg_tracer.o: flags.h
+rpd_tracer.o: flags.h
 
 clean:
 	rm -f *.o *.so
