@@ -193,7 +193,7 @@ void RtgOutRpd::hsa_dispatch_copy(hsa_agent_t agent, hsa_signal_t signal, lu sta
     //exit(EXIT_FAILURE);
 }
 
-void RtgOutRpd::hip_api(uint32_t cid, struct hip_api_data_s *data, int status, lu tick, lu ticks, bool args)
+void RtgOutRpd::hip_api(uint32_t cid, struct hip_api_data_s *data, int status, lu tick, lu ticks, const std::string &kernname, bool args)
 {
     ApiTable::row row;
     row.pid = pid;
@@ -770,44 +770,6 @@ case HIP_API_ID_hipMemcpyHtoDAsync:
     }
     row.phase = 1;
     s_apiTable->insert(row);
-}
-
-void RtgOutRpd::hip_api(const string& func_andor_args, int status, lu tick, lu ticks, uint64_t correlation_id)
-{
-    string func;
-    string args;
-    auto pos = func_andor_args.find("(");
-    bool has_args = (pos != string::npos);
-    if (has_args) {
-        func = func_andor_args.substr(0, pos);
-        args = func_andor_args.substr(pos+1);
-        args = args.substr(0, args.size()-1); // remove trailing ')'
-    }
-    else {
-        func = func_andor_args;
-    }
-
-    ApiTable::row row;
-    row.pid = pid;
-    row.tid = tid();
-    row.start = tick;
-    row.end = tick+ticks;
-    row.apiName_id = s_stringTable->getOrCreate(func.c_str());
-    row.args_id = EMPTY_STRING_ID;
-    row.phase = 0;
-    if (has_args) {
-        row.args_id = s_stringTable->getOrCreate(args.c_str());
-    }
-    row.api_id = correlation_id;
-    // ApiTable expects two inserts, one for each phase
-    s_apiTable->insert(row);
-    row.phase = 1;
-    s_apiTable->insert(row);
-}
-
-void RtgOutRpd::hip_api_kernel(const string& func_andor_args, const string& kernname, int status, lu tick, lu ticks, uint64_t correlation_id)
-{
-    hip_api(func_andor_args, status, tick, ticks, correlation_id);
 }
 
 void RtgOutRpd::roctx(uint64_t correlation_id, const string& message, lu tick, lu ticks)

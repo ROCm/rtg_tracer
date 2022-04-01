@@ -789,8 +789,9 @@ hsa_status_t hsa_agent_major_extension_supported(uint16_t extension, hsa_agent_t
 }
 
 hsa_status_t hsa_queue_create(hsa_agent_t agent, uint32_t size, hsa_queue_type32_t type, void (*callback)(hsa_status_t status, hsa_queue_t* source, void* data), void* data, uint32_t private_segment_size, uint32_t group_segment_size, hsa_queue_t** queue) {
+    TRACE(agent, size, type, callback, data, private_segment_size, group_segment_size, queue);
+    hsa_status_t status;
     if (RTG_PROFILE) {
-        hsa_status_t status;
         hsa_queue_t *signal_queue;
         // create a regular queue; this is for our fake signaling queue
         status = gs_OrigCoreApiTable.hsa_queue_create_fn(agent, size, type, nullptr, nullptr, private_segment_size, group_segment_size, &signal_queue);
@@ -817,20 +818,14 @@ hsa_status_t hsa_queue_create(hsa_agent_t agent, uint32_t size, hsa_queue_type32
         InterceptCallbackData *data = new InterceptCallbackData(*queue, agent, signal_queue);
         status = gs_OrigExtApiTable.hsa_amd_queue_intercept_register_fn(
                 *queue, hsa_amd_queue_intercept_cb, data);
-        if (HCC_PROFILE) {
-            return status;
-        }
-        else {
-            // print as usual
-            TRACE(agent, size, type, callback, data, private_segment_size, group_segment_size, queue);
-            return LOG_STATUS(status);
-        }
     }
     else {
-        // print as usual
-        TRACE(agent, size, type, callback, data, private_segment_size, group_segment_size, queue);
-        return LOG_STATUS(gs_OrigCoreApiTable.hsa_queue_create_fn(agent, size, type, callback, data, private_segment_size, group_segment_size, queue));
+        status = gs_OrigCoreApiTable.hsa_queue_create_fn(agent, size, type, callback, data, private_segment_size, group_segment_size, queue);
     }
+    if (gs_hsa_enabled_map["hsa_queue_create"]) {
+        return LOG_STATUS(status);
+    }
+    return status;
 }
 
 hsa_status_t hsa_soft_queue_create(hsa_region_t region, uint32_t size, hsa_queue_type32_t type, uint32_t features, hsa_signal_t completion_signal, hsa_queue_t** queue) {
@@ -1328,19 +1323,19 @@ hsa_status_t hsa_executable_load_agent_code_object(hsa_executable_t executable, 
 }
 
 hsa_status_t hsa_executable_freeze(hsa_executable_t executable, const char *options) {
+    // this function is always intercepted, but we might not want to trace it; TRACE only sets some vars and is safe to always call
+    TRACE(executable, options);
+    hsa_status_t status;
     if (RTG_PROFILE) {
-        if (HCC_PROFILE) {
-            return hsa_executable_freeze_interceptor(executable, options);
-        }
-        else {
-            TRACE(executable, options);
-            return LOG_STATUS(hsa_executable_freeze_interceptor(executable, options));
-        }
+        status = hsa_executable_freeze_interceptor(executable, options);
     }
     else {
-        TRACE(executable, options);
-        return LOG_STATUS(gs_OrigCoreApiTable.hsa_executable_freeze_fn(executable, options));
+        status = gs_OrigCoreApiTable.hsa_executable_freeze_fn(executable, options);
     }
+    if (gs_hsa_enabled_map["hsa_executable_freeze"]) {
+        return LOG_STATUS(status);
+    }
+    return status;
 }
 
 hsa_status_t hsa_executable_get_info(hsa_executable_t executable, hsa_executable_info_t attribute, void *value) {
@@ -2540,45 +2535,50 @@ static void* hip_activity_callback(uint32_t cid, activity_record_t* record, cons
 static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, void* arg)
 {
     hip_api_data_t *data = (hip_api_data_t*)data_;
+
+    std::string kernname_str;
+    const char *kernname = NULL;
+    hipStream_t stream;
+
+    switch (cid) {
+        case HIP_API_ID_hipLaunchCooperativeKernel:
+            stream = data->args.hipLaunchCooperativeKernel.stream;
+            kernname = hipKernelNameRefByPtr(data->args.hipLaunchCooperativeKernel.f, stream);
+            break;
+        case HIP_API_ID_hipLaunchKernel:
+            stream = data->args.hipLaunchKernel.stream;
+            kernname = hipKernelNameRefByPtr(data->args.hipLaunchKernel.function_address, stream);
+            break;
+        case HIP_API_ID_hipHccModuleLaunchKernel:
+            stream = data->args.hipHccModuleLaunchKernel.hStream;
+            kernname = hipKernelNameRef(data->args.hipHccModuleLaunchKernel.f);
+            break;
+        case HIP_API_ID_hipExtModuleLaunchKernel:
+            stream = data->args.hipExtModuleLaunchKernel.hStream;
+            kernname = hipKernelNameRef(data->args.hipExtModuleLaunchKernel.f);
+            break;
+        case HIP_API_ID_hipModuleLaunchKernel:
+            stream = data->args.hipModuleLaunchKernel.stream;
+            kernname = hipKernelNameRef(data->args.hipModuleLaunchKernel.f);
+            break;
+        case HIP_API_ID_hipExtLaunchKernel:
+            stream = data->args.hipExtLaunchKernel.stream;
+            kernname = hipKernelNameRefByPtr(data->args.hipExtLaunchKernel.function_address, stream);
+            break;
+    }
+
+    // if this is a kernel op, kernname is set
+    if (kernname) {
+        // demangle kernname
+        kernname_str = cpp_demangle(kernname);
+    }
+
     if (data->phase == 0) {
-        std::string kernname_str;
-        const char *kernname = NULL;
-        hipStream_t stream;
-
-        switch (cid) {
-            case HIP_API_ID_hipLaunchCooperativeKernel:
-                stream = data->args.hipLaunchCooperativeKernel.stream;
-                kernname = hipKernelNameRefByPtr(data->args.hipLaunchCooperativeKernel.f, stream);
-                break;
-            case HIP_API_ID_hipLaunchKernel:
-                stream = data->args.hipLaunchKernel.stream;
-                kernname = hipKernelNameRefByPtr(data->args.hipLaunchKernel.function_address, stream);
-                break;
-            case HIP_API_ID_hipHccModuleLaunchKernel:
-                stream = data->args.hipHccModuleLaunchKernel.hStream;
-                kernname = hipKernelNameRef(data->args.hipHccModuleLaunchKernel.f);
-                break;
-            case HIP_API_ID_hipExtModuleLaunchKernel:
-                stream = data->args.hipExtModuleLaunchKernel.hStream;
-                kernname = hipKernelNameRef(data->args.hipExtModuleLaunchKernel.f);
-                break;
-            case HIP_API_ID_hipModuleLaunchKernel:
-                stream = data->args.hipModuleLaunchKernel.stream;
-                kernname = hipKernelNameRef(data->args.hipModuleLaunchKernel.f);
-                break;
-            case HIP_API_ID_hipExtLaunchKernel:
-                stream = data->args.hipExtLaunchKernel.stream;
-                kernname = hipKernelNameRefByPtr(data->args.hipExtLaunchKernel.function_address, stream);
-                break;
-        }
-
         data->correlation_id = gs_correlation_id_counter++;
         gstl_hip_api_tick[cid] = tick();
 
         // if this is a kernel op, kernname is set
         if (kernname) {
-            // demangle kernname
-            kernname_str = cpp_demangle(kernname);
             int ord = hipGetStreamDeviceId(stream);
             if (HCC_PROFILE) {
                 // HCC output does not need correlation id
@@ -2593,7 +2593,7 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
         uint64_t ticks = tick() - tick_;
         int localStatus = hipPeekAtLastError();
 
-        LOG_HIP(cid, data, localStatus, tick_, ticks, RTG_HIP_API_ARGS);
+        LOG_HIP(cid, data, localStatus, tick_, ticks, kernname_str, RTG_HIP_API_ARGS);
 
         // Now that we're done with the api data, zero it for the next time.
         // Otherwise, phase is always wrong because HIP doesn't set the phase to 0 during API start.

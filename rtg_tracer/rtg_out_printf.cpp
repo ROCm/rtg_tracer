@@ -172,33 +172,28 @@ void RtgOutPrintf::hsa_dispatch_copy(hsa_agent_t agent, hsa_signal_t signal, lu 
     TlsData::Get(stream)->push(buf);
 }
 
-void RtgOutPrintf::hip_api(uint32_t cid, struct hip_api_data_s *data, int status, lu tick, lu ticks, bool args)
+void RtgOutPrintf::hip_api(uint32_t cid, struct hip_api_data_s *data, int status, lu tick, lu ticks, const std::string &kernname, bool args)
 {
     char *buf = new char[BUF_SIZE];
+    std::string msg;
+
     if (args) {
         // hipApiString returns strdup, need to free, but signature returns const
         const char* args = hipApiString((hip_api_id_t)cid, data);
-        std::string func = args;
+        msg = args;
         free((char*)args);
-        check(snprintf(buf, BUF_SIZE, "HIP: pid:%d tid:%s %s ret=%d @%lu +%lu\n", pid, tid(), func.c_str(), status, tick, ticks));
     }
     else {
-        check(snprintf(buf, BUF_SIZE, "HIP: pid:%d tid:%s %s ret=%d @%lu +%lu\n", pid, tid(), hip_api_names[cid].c_str(), status, tick, ticks));
+        msg = hip_api_names[cid];
     }
-    TlsData::Get(stream)->push(buf);
-}
 
-void RtgOutPrintf::hip_api(const string& func_andor_args, int status, lu tick, lu ticks, uint64_t correlation_id)
-{
-    char *buf = new char[BUF_SIZE];
-    check(snprintf(buf, BUF_SIZE, "HIP: pid:%d tid:%s %s ret=%d @%lu +%lu\n", pid, tid(), func_andor_args.c_str(), status, tick, ticks));
-    TlsData::Get(stream)->push(buf);
-}
+    if (kernname.empty()) {
+        check(snprintf(buf, BUF_SIZE, "HIP: pid:%d tid:%s %s ret=%d @%lu +%lu\n", pid, tid(), msg.c_str(), status, tick, ticks));
+    }
+    else {
+        check(snprintf(buf, BUF_SIZE, "HIP: pid:%d tid:%s %s [%s] ret=%d @%lu +%lu\n", pid, tid(), msg.c_str(), kernname.c_str(), status, tick, ticks));
+    }
 
-void RtgOutPrintf::hip_api_kernel(const string& func_andor_args, const string& kernname, int status, lu tick, lu ticks, uint64_t correlation_id)
-{
-    char *buf = new char[BUF_SIZE];
-    check(snprintf(buf, BUF_SIZE, "HIP: pid:%d tid:%s %s [%s] ret=%d @%lu +%lu\n", pid, tid(), func_andor_args.c_str(), kernname.c_str(), status, tick, ticks));
     TlsData::Get(stream)->push(buf);
 }
 

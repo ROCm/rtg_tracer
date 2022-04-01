@@ -95,9 +95,7 @@ struct TlsData {
     void hsa_dispatch_kernel (hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, const string& name, uint64_t correlation_id);
     void hsa_dispatch_barrier(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, lu dep[5]);
     void hsa_dispatch_copy   (hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu dep[5]);
-    void hip_api(uint32_t cid, struct hip_api_data_s *data, int status, lu tick, lu ticks, bool args);
-    void hip_api(const string& func_andor_args, int status, lu tick, lu ticks, uint64_t correlation_id);
-    void hip_api_kernel(const string& func_andor_args, const string& kernname, int status, lu tick, lu ticks, uint64_t correlation_id);
+    void hip_api(uint32_t cid, struct hip_api_data_s *data, int status, lu tick, lu ticks, const std::string &kernname, bool args);
     void roctx(uint64_t correlation_id, const string& message, lu tick, lu ticks);
     void roctx_mark(uint64_t correlation_id, const string& message, lu tick);
 };
@@ -162,30 +160,26 @@ void TlsData::hsa_dispatch_copy(hsa_agent_t agent, hsa_signal_t signal, lu start
     flush();
 }
 
-void TlsData::hip_api(uint32_t cid, struct hip_api_data_s *data, int status, lu tick, lu ticks, bool args)
+void TlsData::hip_api(uint32_t cid, struct hip_api_data_s *data, int status, lu tick, lu ticks, const std::string &kernname, bool args)
 {
+    std::string msg;
+
     if (args) {
         // hipApiString returns strdup, need to free, but signature returns const
         const char* args = hipApiString((hip_api_id_t)cid, data);
-        std::string func = args;
+        msg = args;
         free((char*)args);
-        fprintf(stream, "HIP: pid:%d tid:%s %s ret=%d @%lu +%lu\n", pid, tid, func.c_str(), status, tick, ticks);
     }
     else {
-        fprintf(stream, "HIP: pid:%d tid:%s %s ret=%d @%lu +%lu\n", pid, tid, hip_api_names[cid].c_str(), status, tick, ticks);
+        msg = hip_api_names[cid];
     }
-}
 
-void TlsData::hip_api(const string& func_andor_args, int status, lu tick, lu ticks, uint64_t correlation_id)
-{
-    fprintf(stream, "HIP: pid:%d tid:%s %s ret=%d @%lu +%lu\n", pid, tid, func_andor_args.c_str(), status, tick, ticks);
-    flush();
-}
-
-void TlsData::hip_api_kernel(const string& func_andor_args, const string& kernname, int status, lu tick, lu ticks, uint64_t correlation_id)
-{
-    fprintf(stream, "HIP: pid:%d tid:%s %s [%s] ret=%d @%lu +%lu\n", pid, tid, func_andor_args.c_str(), kernname.c_str(), status, tick, ticks);
-    flush();
+    if (kernname.empty()) {
+        fprintf(stream, "HIP: pid:%d tid:%s %s ret=%d @%lu +%lu\n", pid, tid, msg.c_str(), status, tick, ticks);
+    }
+    else {
+        fprintf(stream, "HIP: pid:%d tid:%s %s [%s] ret=%d @%lu +%lu\n", pid, tid, msg.c_str(), kernname.c_str(), status, tick, ticks);
+    }
 }
 
 void TlsData::roctx(uint64_t correlation_id, const string& message, lu tick, lu ticks)
@@ -249,19 +243,9 @@ void RtgOutPrintfLockless::hsa_dispatch_copy(hsa_agent_t agent, hsa_signal_t sig
     TlsData::Get(filename)->hsa_dispatch_copy(agent, signal, start, stop, dep);
 }
 
-void RtgOutPrintfLockless::hip_api(uint32_t cid, struct hip_api_data_s *data, int status, lu tick, lu ticks, bool args)
+void RtgOutPrintfLockless::hip_api(uint32_t cid, struct hip_api_data_s *data, int status, lu tick, lu ticks, const std::string &kernname, bool args)
 {
-    TlsData::Get(filename)->hip_api(cid, data, status, tick, ticks, args);
-}
-
-void RtgOutPrintfLockless::hip_api(const string& func_andor_args, int status, lu tick, lu ticks, uint64_t correlation_id)
-{
-    TlsData::Get(filename)->hip_api(func_andor_args, status, tick, ticks, correlation_id);
-}
-
-void RtgOutPrintfLockless::hip_api_kernel(const string& func_andor_args, const string& kernname, int status, lu tick, lu ticks, uint64_t correlation_id)
-{
-    TlsData::Get(filename)->hip_api_kernel(func_andor_args, kernname, status, tick, ticks, correlation_id);
+    TlsData::Get(filename)->hip_api(cid, data, status, tick, ticks, kernname, args);
 }
 
 void RtgOutPrintfLockless::roctx(uint64_t correlation_id, const string& message, lu tick, lu ticks)
