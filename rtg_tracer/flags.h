@@ -60,7 +60,11 @@ FLAG_BOOL(RTG_RPD, 1, "write output in rpd format");
 #endif
 
 FLAG_BOOL(RTG_VERBOSE, 0, "Verbose logging from RTG");
+#ifdef RPD_TRACER
+FLAG_CHAR(RTG_FILE_PREFIX, "trace", "Output filename prefix, default will append .rpd 'trace.rpd'");
+#else
 FLAG_CHAR(RTG_FILE_PREFIX, "rtg_trace_%p", "Output filename prefix, default rtg_trace_%p -- if %p is used, substitue pid");
+#endif
 FLAG_BOOL(RTG_HIP_API_ARGS, false, "Capture HIP API name and function arguments, otherwise just the name");
 FLAG_CHAR(RTG_HIP_API_FILTER, "all", "Trace specific HIP calls. Special case 'all', otherwise simple string matching. Separate tokens with ','");
 FLAG_CHAR(RTG_HIP_API_FILTER_OUT, "", "Do not trace specific HIP calls. Simple string matching. Separate tokens with ','");

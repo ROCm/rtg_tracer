@@ -798,7 +798,10 @@ void RtgOutRpd::close()
 {
     // Flush recorders
     const timestamp_t begin_time = util::HsaTimer::clocktime_ns(util::HsaTimer::TIME_ID_CLOCK_MONOTONIC);
+    s_metadataTable->finalize();
     s_stringTable->finalize();
+    s_kernelApiTable->finalize();
+    s_copyApiTable->finalize();
     s_opTable->finalize();
     s_apiTable->finalize();
     const timestamp_t end_time = util::HsaTimer::clocktime_ns(util::HsaTimer::TIME_ID_CLOCK_MONOTONIC);
