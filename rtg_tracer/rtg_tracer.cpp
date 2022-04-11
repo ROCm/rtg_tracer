@@ -2811,6 +2811,19 @@ extern "C" bool OnLoad(void *pTable,
 
     RTG::AgentInfo::Init(RTG::gs_gpu_agents);
 
+#if 0
+    // optimization - prealloc lots of signals to force the HSA signal pool to grow
+    constexpr size_t RTG_SIGNAL_PREALLOC = 10000;
+    hsa_signal_t *dontuse = new hsa_signal_t[RTG_SIGNAL_PREALLOC];
+    for (size_t i=0; i<RTG_SIGNAL_PREALLOC; ++i) {
+        dontuse[i] = RTG::CreateSignal();
+    }
+    for (size_t i=0; i<RTG_SIGNAL_PREALLOC; ++i) {
+        RTG::DestroySignal(dontuse[i]);
+    }
+    delete [] dontuse;
+#endif
+
     std::atexit(RTG::finalize);
 
     return true;
