@@ -2597,7 +2597,8 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
 
         // Now that we're done with the api data, zero it for the next time.
         // Otherwise, phase is always wrong because HIP doesn't set the phase to 0 during API start.
-        memset(data, 0, sizeof(hip_api_data_t));
+        //memset(data, 0, sizeof(hip_api_data_t));
+        data->phase = 0;
     }
 
     return NULL;
