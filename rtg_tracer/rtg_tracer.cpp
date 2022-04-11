@@ -68,7 +68,7 @@ typedef uint64_t timestamp_t;
 typedef std::atomic<unsigned int> counter_t;
 //typedef std::recursive_mutex mutex_t;
 typedef std::mutex mutex_t;
-typedef std::unordered_map<uint64_t, const char*> symbols_map_t;
+typedef std::unordered_map<uint64_t, std::string> symbols_map_t;
 
 //////////////////////////////////////////////////////////////////////////////
 // structs and classes ///////////////////////////////////////////////////////
@@ -186,7 +186,7 @@ static void InitEnabledTableCore(bool value);
 static void InitEnabledTableExtApi(bool value);
 
 // HSA executable tracking, for looking up kernel names.
-static const char* GetKernelNameRef(uint64_t addr);
+static std::string GetKernelNameRef(uint64_t addr);
 static hsa_status_t hsa_executable_freeze_interceptor(hsa_executable_t executable, const char *options);
 static hsa_status_t hsa_executable_symbols_cb(hsa_executable_t exec, hsa_executable_symbol_t symbol, void *data);
 
@@ -640,7 +640,7 @@ static void SignalWaiter(int id, SignalCallbackData *data)
                 ++gs_cb_count_copies;
             }
             else {
-                LOG_DISPATCH(data->queue, data->agent, data->signal, data->start, data->stop, data->id_, data->name, data->cid);
+                LOG_DISPATCH(data->queue, data->agent, data->signal, data->start, data->stop, data->id_, data->name, data->cid, RTG_DEMANGLE);
                 ++gs_cb_count_dispatches;
             }
         }
@@ -2291,19 +2291,27 @@ static hsa_status_t hsa_executable_symbols_cb(hsa_executable_t exec, hsa_executa
     hsa_status_t status = gs_OrigCoreApiTable.hsa_executable_symbol_get_info_fn(symbol, HSA_EXECUTABLE_SYMBOL_INFO_TYPE, &value);
     RTG_HSA_CHECK_STATUS("Error in getting symbol info", status);
     if (value == HSA_SYMBOL_KIND_KERNEL) {
+        constexpr uint32_t RTG_SYM_NAME_MAX = 2048;
+        char NAME[RTG_SYM_NAME_MAX];
         uint64_t addr = 0;
         uint32_t len = 0;
         status = gs_OrigCoreApiTable.hsa_executable_symbol_get_info_fn(symbol, HSA_EXECUTABLE_SYMBOL_INFO_KERNEL_OBJECT, &addr);
         RTG_HSA_CHECK_STATUS("Error in getting kernel object", status);
         status = gs_OrigCoreApiTable.hsa_executable_symbol_get_info_fn(symbol, HSA_EXECUTABLE_SYMBOL_INFO_NAME_LENGTH, &len);
         RTG_HSA_CHECK_STATUS("Error in getting name len", status);
-        char *name = new char[len + 1];
-        status = gs_OrigCoreApiTable.hsa_executable_symbol_get_info_fn(symbol, HSA_EXECUTABLE_SYMBOL_INFO_NAME, name);
+        if (len >= RTG_SYM_NAME_MAX) {
+            fprintf(stderr, "RTG Tracer: kernel name too long\n");
+            abort();
+        }
+        status = gs_OrigCoreApiTable.hsa_executable_symbol_get_info_fn(symbol, HSA_EXECUTABLE_SYMBOL_INFO_NAME, NAME);
         RTG_HSA_CHECK_STATUS("Error in getting kernel name", status);
-        name[len] = 0;
+        bool chop_off = (NAME[len-3] == '.' && NAME[len-2] == 'k' && NAME[len-1] == 'd');
+        auto name = std::string(NAME, chop_off ? len-3 : len);
         auto ret = gs_symbols_map_->emplace(addr, name);
         if (ret.second == false) {
-            delete[] ret.first->second;
+            fprintf(stderr, "RTG Tracer: kernel object already mapped at addr=0x%lx\n", addr);
+            fprintf(stderr, "RTG Tracer: old name=%s\n", ret.first->second.c_str());
+            fprintf(stderr, "RTG Tracer: new name=%s\n", name.c_str());
             ret.first->second = name;
         }
     }
@@ -2354,7 +2362,7 @@ static inline const amd_kernel_code_t* GetKernelCode(uint64_t kernel_object) {
     return kernel_code;
 }
 
-static inline const char* GetKernelNameRef(uint64_t addr) {
+static inline std::string GetKernelNameRef(uint64_t addr) {
     std::lock_guard<mutex_t> lck(gs_kernel_name_mutex_);
     const auto it = gs_symbols_map_->find(addr);
     if (it == gs_symbols_map_->end()) {
@@ -2364,54 +2372,9 @@ static inline const char* GetKernelNameRef(uint64_t addr) {
     return it->second;
 }
 
-// Demangle C++ symbol name
-static std::string cpp_demangle(const char* symname) {
-    std::string retval;
-    std::size_t pos;
-
-    if (RTG_DEMANGLE) {
-        size_t size = 0;
-        int status = 0;
-        char* result = abi::__cxa_demangle(symname, NULL, &size, &status);
-        if (result) {
-            // caller of __cxa_demangle must free returned buffer
-            retval = result;
-            free(result);
-        }
-        else {
-            // demangle failed?
-            retval = symname;
-        }
-    }
-    else {
-        retval = symname;
-    }
-
-    // for some reason ' [clone .kd]' appears at the end of some kernels; remove it
-    pos = retval.find(" [clone .kd]");
-    if (pos != std::string::npos) {
-        retval = retval.substr(0, pos);
-    }
-
-    // for some reason '.kd' appears at the end of some kernels; remove it
-    pos = retval.find(".kd");
-    if (pos != std::string::npos) {
-        retval = retval.substr(0, pos);
-    }
-
-    return retval;
+static inline std::string QueryKernelName(uint64_t kernel_object, const amd_kernel_code_t* kernel_code) {
+    return GetKernelNameRef(kernel_object);
 }
-
-static std::string QueryKernelName(uint64_t kernel_object, const amd_kernel_code_t* kernel_code) {
-    const char* kernel_symname = GetKernelNameRef(kernel_object);
-    if (HCC_PROFILE) {
-        return std::string(kernel_symname);
-    }
-    else {
-        return cpp_demangle(kernel_symname);
-    }
-}
-
 
 static void hsa_amd_queue_intercept_cb(
         const void* in_packets, uint64_t count,
@@ -2536,7 +2499,6 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
 {
     hip_api_data_t *data = (hip_api_data_t*)data_;
 
-    std::string kernname_str;
     const char *kernname = NULL;
     hipStream_t stream;
 
@@ -2567,12 +2529,6 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
             break;
     }
 
-    // if this is a kernel op, kernname is set
-    if (kernname) {
-        // demangle kernname
-        kernname_str = cpp_demangle(kernname);
-    }
-
     if (data->phase == 0) {
         data->correlation_id = gs_correlation_id_counter++;
         gstl_hip_api_tick[cid] = tick();
@@ -2584,7 +2540,7 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
                 // HCC output does not need correlation id
             }
             else {
-                AgentInfo::Get(ord)->insert_op({kernname_str,data->correlation_id});
+                AgentInfo::Get(ord)->insert_op({kernname,data->correlation_id});
             }
         }
     }
@@ -2593,7 +2549,7 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
         uint64_t ticks = tick() - tick_;
         int localStatus = hipPeekAtLastError();
 
-        LOG_HIP(cid, data, localStatus, tick_, ticks, kernname_str, RTG_HIP_API_ARGS);
+        LOG_HIP(cid, data, localStatus, tick_, ticks, kernname, RTG_HIP_API_ARGS, RTG_DEMANGLE);
 
         // Now that we're done with the api data, zero it for the next time.
         // Otherwise, phase is always wrong because HIP doesn't set the phase to 0 during API start.

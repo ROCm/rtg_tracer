@@ -145,7 +145,7 @@ void RtgOutRpd::hsa_host_dispatch_barrier(hsa_queue_t *queue, hsa_agent_t agent,
 
 static std::atomic<int> counter;
 
-void RtgOutRpd::hsa_dispatch_kernel(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, const string& name, uint64_t correlation_id)
+void RtgOutRpd::hsa_dispatch_kernel(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, const string& name, uint64_t correlation_id, bool demangle)
 {
     OpTable::row row;
     row.gpuId = agent.handle; // TODO
@@ -156,7 +156,7 @@ void RtgOutRpd::hsa_dispatch_kernel(hsa_queue_t *queue, hsa_agent_t agent, hsa_s
     row.start = start;
     row.end = stop;
     //row.description_id = EMPTY_STRING_ID;
-    row.description_id = s_stringTable->getOrCreate(name.c_str());
+    row.description_id = s_stringTable->getOrCreate(cxx_demangle(name.c_str()));
     row.opType_id = s_stringTable->getOrCreate("KernelExecution");
     row.api_id = correlation_id;
     s_opTable->insert(row);
@@ -193,7 +193,7 @@ void RtgOutRpd::hsa_dispatch_copy(hsa_agent_t agent, hsa_signal_t signal, lu sta
     //exit(EXIT_FAILURE);
 }
 
-void RtgOutRpd::hip_api(uint32_t cid, struct hip_api_data_s *data, int status, lu tick, lu ticks, const std::string &kernname, bool args)
+void RtgOutRpd::hip_api(uint32_t cid, struct hip_api_data_s *data, int status, lu tick, lu ticks, const char *kernname, bool args, bool demangle)
 {
     ApiTable::row row;
     row.pid = pid;
