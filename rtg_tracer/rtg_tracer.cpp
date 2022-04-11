@@ -2535,11 +2535,11 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
 
         // if this is a kernel op, kernname is set
         if (kernname) {
-            int ord = hipGetStreamDeviceId(stream);
             if (HCC_PROFILE) {
                 // HCC output does not need correlation id
             }
             else {
+                int ord = hipGetStreamDeviceId(stream);
                 AgentInfo::Get(ord)->insert_op({kernname,data->correlation_id});
             }
         }
@@ -2547,7 +2547,8 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
     else {
         uint64_t tick_ = gstl_hip_api_tick[cid];
         uint64_t ticks = tick() - tick_;
-        int localStatus = hipPeekAtLastError();
+        //int localStatus = hipPeekAtLastError();
+        int localStatus = 0;
 
         LOG_HIP(cid, data, localStatus, tick_, ticks, kernname, RTG_HIP_API_ARGS, RTG_DEMANGLE);
 
@@ -2717,8 +2718,17 @@ extern "C" bool OnLoad(void *pTable,
         std::vector<std::string> tokens_prune = RTG::split(RTG_HIP_API_FILTER_OUT, ',');
         std::vector<std::string> tokens_prune_always;
         tokens_prune_always.push_back("hipPeekAtLastError"); // because we need to call it ourselves for return codes
+        tokens_prune_always.push_back("hipGetLastError");
         tokens_prune_always.push_back("hipGetDevice");
         tokens_prune_always.push_back("hipSetDevice");
+        tokens_prune_always.push_back("__hipPushCallConfiguration");
+        tokens_prune_always.push_back("__hipPopCallConfiguration");
+        tokens_prune_always.push_back("hipCtxSetCurrent");
+        tokens_prune_always.push_back("hipEventRecord");
+        tokens_prune_always.push_back("hipEventQuery");
+        tokens_prune_always.push_back("hipGetDeviceProperties");
+        tokens_prune_always.push_back("hipModuleGetFunction");
+        tokens_prune_always.push_back("hipEventCreateWithFlags");
 
         for (int i=0; i<HIP_API_ID_NUMBER; ++i) {
             bool keep = false;
@@ -2810,19 +2820,6 @@ extern "C" bool OnLoad(void *pTable,
     }
 
     RTG::AgentInfo::Init(RTG::gs_gpu_agents);
-
-#if 0
-    // optimization - prealloc lots of signals to force the HSA signal pool to grow
-    constexpr size_t RTG_SIGNAL_PREALLOC = 10000;
-    hsa_signal_t *dontuse = new hsa_signal_t[RTG_SIGNAL_PREALLOC];
-    for (size_t i=0; i<RTG_SIGNAL_PREALLOC; ++i) {
-        dontuse[i] = RTG::CreateSignal();
-    }
-    for (size_t i=0; i<RTG_SIGNAL_PREALLOC; ++i) {
-        RTG::DestroySignal(dontuse[i]);
-    }
-    delete [] dontuse;
-#endif
 
     std::atexit(RTG::finalize);
 
