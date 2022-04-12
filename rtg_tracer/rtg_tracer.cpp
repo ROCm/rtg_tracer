@@ -2505,6 +2505,25 @@ static void* hip_activity_callback(uint32_t cid, activity_record_t* record, cons
     return (hip_api_data_t*)gstl_hip_api_data[cid];
 }
 
+static inline bool _is_kernel(uint32_t cid) {
+    switch (cid) {
+        case HIP_API_ID_hipLaunchCooperativeKernel:
+            return true;
+        case HIP_API_ID_hipLaunchKernel:
+            return true;
+        case HIP_API_ID_hipHccModuleLaunchKernel:
+            return true;
+        case HIP_API_ID_hipExtModuleLaunchKernel:
+            return true;
+        case HIP_API_ID_hipModuleLaunchKernel:
+            return true;
+        case HIP_API_ID_hipExtLaunchKernel:
+            return true;
+        default:
+            return false;
+    }
+}
+
 static inline void _get_kernname_and_stream(uint32_t cid, hip_api_data_t *data, const char * &kernname, hipStream_t &stream) {
     switch (cid) {
         case HIP_API_ID_hipLaunchCooperativeKernel:
@@ -2545,17 +2564,19 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
         data->correlation_id = gs_correlation_id_counter++;
         gstl_hip_api_tick[cid] = tick();
 
-        if (HCC_PROFILE) {
-            // HCC output does not need correlation id
-        }
-        else if (!AMD_DIRECT_DISPATCH) {
-            _get_kernname_and_stream(cid, data, kernname, stream);
-            int ord = hipGetStreamDeviceId(stream);
-            AgentInfo::Get(ord)->insert_op({kernname,data->correlation_id});
-        }
-        else {
-            // direct dispatch means we can avoid complicated lookups
-            gstl_hip_api_correlation_id = data->correlation_id;
+        if (_is_kernel(cid)) {
+            if (HCC_PROFILE) {
+                // HCC output does not need correlation id
+            }
+            else if (!AMD_DIRECT_DISPATCH) {
+                _get_kernname_and_stream(cid, data, kernname, stream);
+                int ord = hipGetStreamDeviceId(stream);
+                AgentInfo::Get(ord)->insert_op({kernname,data->correlation_id});
+            }
+            else {
+                // direct dispatch means we can avoid complicated lookups
+                gstl_hip_api_correlation_id = data->correlation_id;
+            }
         }
     }
     else {
@@ -2564,7 +2585,9 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
         //int localStatus = hipPeekAtLastError();
         int localStatus = 0;
 
-        _get_kernname_and_stream(cid, data, kernname, stream);
+        if (_is_kernel(cid)) {
+            _get_kernname_and_stream(cid, data, kernname, stream);
+        }
 
         LOG_HIP(cid, data, localStatus, tick_, ticks, kernname, RTG_HIP_API_ARGS, RTG_DEMANGLE);
 
