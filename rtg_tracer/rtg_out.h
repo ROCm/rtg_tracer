@@ -23,7 +23,7 @@ virtual void hsa_api(const string& func, const string& args, lu tick, lu ticks, 
 virtual void hsa_api(const string& func, const string& args, lu tick, lu ticks, uint64_t localStatus) = 0;
 virtual void hsa_api(const string& func, const string& args, lu tick, lu ticks) = 0;
 
-virtual void hsa_host_dispatch_kernel (hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, const string& name, const hsa_kernel_dispatch_packet_t *packet) = 0;
+virtual void hsa_host_dispatch_kernel (hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, const string& name, const hsa_kernel_dispatch_packet_t *packet, bool demangle) = 0;
 virtual void hsa_host_dispatch_barrier(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, lu dep[5], const hsa_barrier_and_packet_t *packet) = 0;
 
 virtual void hsa_dispatch_kernel (hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, const string& name, uint64_t correlation_id, bool demangle) = 0;

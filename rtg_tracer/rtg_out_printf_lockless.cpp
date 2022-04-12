@@ -109,7 +109,7 @@ struct TlsData {
     void hsa_api(const string& func, const string& args, lu tick, lu ticks, int localStatus);
     void hsa_api(const string& func, const string& args, lu tick, lu ticks, uint64_t localStatus);
     void hsa_api(const string& func, const string& args, lu tick, lu ticks);
-    void hsa_host_dispatch_kernel (hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, const string& name, const hsa_kernel_dispatch_packet_t *packet);
+    void hsa_host_dispatch_kernel (hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, const string& name, const hsa_kernel_dispatch_packet_t *packet, bool demangle);
     void hsa_host_dispatch_barrier(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, lu dep[5], const hsa_barrier_and_packet_t *packet);
     void hsa_dispatch_kernel (hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, const string& name, uint64_t correlation_id, bool demangle);
     void hsa_dispatch_barrier(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, lu dep[5]);
@@ -142,10 +142,10 @@ void TlsData::hsa_api(const string& func, const string& args, lu tick, lu ticks)
     flush();
 }
 
-void TlsData::hsa_host_dispatch_kernel(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, const string& name, const hsa_kernel_dispatch_packet_t *packet)
+void TlsData::hsa_host_dispatch_kernel(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, const string& name, const hsa_kernel_dispatch_packet_t *packet, bool demangle)
 {
     fprintf(stream, "HSA: pid:%d tid:%s dispatch queue:%lu agent:%lu signal:%lu name:'%s' tick:%lu id:%lu workgroup:{%d,%d,%d} grid:{%d,%d,%d}\n",
-            pid, tid, queue->id, agent.handle, signal.handle, name.c_str(), tick, id,
+            pid, tid, queue->id, agent.handle, signal.handle, demangle ? cpp_demangle(name).c_str() : name.c_str(), tick, id,
             packet->workgroup_size_x, packet->workgroup_size_y, packet->workgroup_size_z,
             packet->grid_size_x, packet->grid_size_y, packet->grid_size_z);
     flush();
@@ -237,9 +237,9 @@ void RtgOutPrintfLockless::hsa_api(const string& func, const string& args, lu ti
     TlsData::Get(filename)->hsa_api(func, args, tick, ticks);
 }
 
-void RtgOutPrintfLockless::hsa_host_dispatch_kernel(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, const string& name, const hsa_kernel_dispatch_packet_t *packet)
+void RtgOutPrintfLockless::hsa_host_dispatch_kernel(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, const string& name, const hsa_kernel_dispatch_packet_t *packet, bool demangle)
 {
-    TlsData::Get(filename)->hsa_host_dispatch_kernel(queue, agent, signal, tick, id, name, packet);
+    TlsData::Get(filename)->hsa_host_dispatch_kernel(queue, agent, signal, tick, id, name, packet, demangle);
 }
 
 void RtgOutPrintfLockless::hsa_host_dispatch_barrier(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, lu dep[5], const hsa_barrier_and_packet_t *packet)

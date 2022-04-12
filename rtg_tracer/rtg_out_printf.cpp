@@ -149,11 +149,11 @@ void RtgOutPrintf::hsa_api(const string& func, const string& args, lu tick, lu t
     TlsData::Get(stream)->push(buf);
 }
 
-void RtgOutPrintf::hsa_host_dispatch_kernel(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, const string& name, const hsa_kernel_dispatch_packet_t *packet)
+void RtgOutPrintf::hsa_host_dispatch_kernel(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, const string& name, const hsa_kernel_dispatch_packet_t *packet, bool demangle)
 {
     char *buf = new char[BUF_SIZE];
     check(snprintf(buf, BUF_SIZE, "HSA: pid:%d tid:%s dispatch queue:%lu agent:%lu signal:%lu name:'%s' tick:%lu id:%lu workgroup:{%d,%d,%d} grid:{%d,%d,%d}\n",
-            pid, tid(), queue->id, agent.handle, signal.handle, name.c_str(), tick, id,
+            pid, tid(), queue->id, agent.handle, signal.handle, demangle ? cpp_demangle(name).c_str() : name.c_str(), tick, id,
             packet->workgroup_size_x, packet->workgroup_size_y, packet->workgroup_size_z,
             packet->grid_size_x, packet->grid_size_y, packet->grid_size_z));
     TlsData::Get(stream)->push(buf);

@@ -483,7 +483,7 @@ struct SignalCallbackData
             is_copy(false), is_barrier(false), dep{0,0,0,0,0}, id_(gs_did++), seq_num_(data->seq_index++), cid(cid)
     {
         if (RTG_HSA_HOST_DISPATCH) {
-            LOG_DISPATCH_HOST(queue, agent, signal, tick(), id_, name, packet);
+            LOG_DISPATCH_HOST(queue, agent, signal, tick(), id_, name, packet, RTG_DEMANGLE);
         }
     }
 

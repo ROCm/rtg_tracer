@@ -131,7 +131,7 @@ void RtgOutRpd::hsa_api(const string& func, const string& args, lu tick, lu tick
     exit(EXIT_FAILURE);
 }
 
-void RtgOutRpd::hsa_host_dispatch_kernel(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, const string& name, const hsa_kernel_dispatch_packet_t *packet)
+void RtgOutRpd::hsa_host_dispatch_kernel(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, const string& name, const hsa_kernel_dispatch_packet_t *packet, bool demangle)
 {
     fprintf(stderr, "RtgOutRpd::hsa_host_dispatch_kernel NOT IMPLEMENTED\n");
     exit(EXIT_FAILURE);
