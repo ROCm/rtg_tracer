@@ -159,6 +159,7 @@ static FILE *gs_stream{NULL}; // output only used for HCC_PROFILE mode
 // Need to allocate hip_api_data_t, but cannot use new operator due to incomplete default constructors.
 static thread_local std::vector<char[sizeof(hip_api_data_t)]> gstl_hip_api_data(HIP_API_ID_NUMBER);
 static thread_local std::vector<uint64_t> gstl_hip_api_tick(HIP_API_ID_NUMBER);
+static thread_local uint64_t gstl_hip_api_correlation_id;
 
 static thread_local std::vector<roctx_data_t> gstl_roctx_stack; // for roctx range push pop
 static thread_local std::unordered_map<int,roctx_data_t> gstl_roctx_range; // for roctx range start stop
@@ -2423,8 +2424,17 @@ static void hsa_amd_queue_intercept_cb(
             std::string kernel_name = QueryKernelName(kernel_object, kernel_code);
 
             // find kernel launch from HIP to get correlation id
-            // HCC output does not need correlation_id
-            uint64_t correlation_id = HCC_PROFILE ? 0 : AgentInfo::Get(agent)->find_op(kernel_name);
+            uint64_t correlation_id;
+            if (HCC_PROFILE) {
+                // HCC output does not need correlation_id
+            }
+            else if (!AMD_DIRECT_DISPATCH) {
+                correlation_id = AgentInfo::Get(agent)->find_op(kernel_name);
+            }
+            else {
+                // direct dispatch means we can avoid complicated lookups
+                correlation_id = gstl_hip_api_correlation_id;
+            }
 
             original_signal = dispatch_packet->completion_signal;
             if (!original_signal.handle) {
@@ -2495,13 +2505,7 @@ static void* hip_activity_callback(uint32_t cid, activity_record_t* record, cons
     return (hip_api_data_t*)gstl_hip_api_data[cid];
 }
 
-static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, void* arg)
-{
-    hip_api_data_t *data = (hip_api_data_t*)data_;
-
-    const char *kernname = NULL;
-    hipStream_t stream;
-
+static inline void _get_kernname_and_stream(uint32_t cid, hip_api_data_t *data, const char * &kernname, hipStream_t &stream) {
     switch (cid) {
         case HIP_API_ID_hipLaunchCooperativeKernel:
             stream = data->args.hipLaunchCooperativeKernel.stream;
@@ -2528,20 +2532,30 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
             kernname = hipKernelNameRefByPtr(data->args.hipExtLaunchKernel.function_address, stream);
             break;
     }
+}
+
+static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, void* arg)
+{
+    hip_api_data_t *data = (hip_api_data_t*)data_;
+
+    const char *kernname = NULL;
+    hipStream_t stream;
 
     if (data->phase == 0) {
         data->correlation_id = gs_correlation_id_counter++;
         gstl_hip_api_tick[cid] = tick();
 
-        // if this is a kernel op, kernname is set
-        if (kernname) {
-            if (HCC_PROFILE) {
-                // HCC output does not need correlation id
-            }
-            else {
-                int ord = hipGetStreamDeviceId(stream);
-                AgentInfo::Get(ord)->insert_op({kernname,data->correlation_id});
-            }
+        if (HCC_PROFILE) {
+            // HCC output does not need correlation id
+        }
+        else if (!AMD_DIRECT_DISPATCH) {
+            _get_kernname_and_stream(cid, data, kernname, stream);
+            int ord = hipGetStreamDeviceId(stream);
+            AgentInfo::Get(ord)->insert_op({kernname,data->correlation_id});
+        }
+        else {
+            // direct dispatch means we can avoid complicated lookups
+            gstl_hip_api_correlation_id = data->correlation_id;
         }
     }
     else {
@@ -2549,6 +2563,8 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
         uint64_t ticks = tick() - tick_;
         //int localStatus = hipPeekAtLastError();
         int localStatus = 0;
+
+        _get_kernname_and_stream(cid, data, kernname, stream);
 
         LOG_HIP(cid, data, localStatus, tick_, ticks, kernname, RTG_HIP_API_ARGS, RTG_DEMANGLE);
 
