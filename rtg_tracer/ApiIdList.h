@@ -1,3 +1,6 @@
+/**************************************************************************
+ * Copyright (c) 2022 Advanced Micro Devices, Inc.
+ **************************************************************************/
 #pragma once
 
 #include <string>
@@ -26,10 +29,7 @@ public:
   const std::unordered_map<uint32_t, uint32_t> &filterList() { return m_filter; }
 
 private:
-  std::map<std::string, uint32_t> m_ids;		// api string -> apiId
   std::unordered_map<uint32_t, uint32_t> m_filter;	// apiId -> "1"
   bool m_invert;
-
-  void loadApiNames();
 };
 

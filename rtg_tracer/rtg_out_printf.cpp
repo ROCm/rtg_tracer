@@ -1,3 +1,6 @@
+/**************************************************************************
+ * Copyright (c) 2022 Advanced Micro Devices, Inc.
+ **************************************************************************/
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -9,6 +12,12 @@
 #include <vector>
 #include <sys/types.h>
 #include <unistd.h>
+
+#include <hip/hip_runtime_api.h>
+#include <hip/amd_detail/hip_runtime_prof.h>
+#include "missing_ostream_definitions.h"
+#define HIP_PROF_HIP_API_STRING 1 // to enable hipApiString in hip_prof_str.h
+#include <hip/amd_detail/hip_prof_str.h>
 
 #include "rtg_out_printf.h"
 
@@ -25,6 +34,8 @@ static inline const char * tid() {
     thread_local std::string tid_ = get_tid_string();
     return tid_.c_str();
 }
+
+namespace {
 
 struct TlsData {
     std::vector<const char *> out;
@@ -77,6 +88,8 @@ struct TlsData {
 std::mutex TlsData::the_mutex;
 std::unordered_map<std::thread::id, TlsData*> TlsData::the_map;
 
+}
+
 static void check(int ret)
 {
     if (ret >= BUF_SIZE || ret < 0) {
@@ -89,6 +102,11 @@ void RtgOutPrintf::open(const string& filename)
 {
     pid = getpid();
     stream = fopen(filename.c_str(), "w");
+
+    hip_api_names.reserve(HIP_API_ID_NUMBER);
+    for (int i=0; i<HIP_API_ID_NUMBER; ++i) {
+        hip_api_names.push_back(hip_api_name(i));
+    }
 }
 
 void RtgOutPrintf::hsa_api(const string& func, const string& args, lu tick, lu ticks, int localStatus)
@@ -154,17 +172,28 @@ void RtgOutPrintf::hsa_dispatch_copy(hsa_agent_t agent, hsa_signal_t signal, lu 
     TlsData::Get(stream)->push(buf);
 }
 
-void RtgOutPrintf::hip_api(const string& func_andor_args, int status, lu tick, lu ticks, uint64_t correlation_id)
+void RtgOutPrintf::hip_api(uint32_t cid, struct hip_api_data_s *data, int status, lu tick, lu ticks, const std::string &kernname, bool args)
 {
     char *buf = new char[BUF_SIZE];
-    check(snprintf(buf, BUF_SIZE, "HIP: pid:%d tid:%s %s ret=%d @%lu +%lu\n", pid, tid(), func_andor_args.c_str(), status, tick, ticks));
-    TlsData::Get(stream)->push(buf);
-}
+    std::string msg;
 
-void RtgOutPrintf::hip_api_kernel(const string& func_andor_args, const string& kernname, int status, lu tick, lu ticks, uint64_t correlation_id)
-{
-    char *buf = new char[BUF_SIZE];
-    check(snprintf(buf, BUF_SIZE, "HIP: pid:%d tid:%s %s [%s] ret=%d @%lu +%lu\n", pid, tid(), func_andor_args.c_str(), kernname.c_str(), status, tick, ticks));
+    if (args) {
+        // hipApiString returns strdup, need to free, but signature returns const
+        const char* args = hipApiString((hip_api_id_t)cid, data);
+        msg = args;
+        free((char*)args);
+    }
+    else {
+        msg = hip_api_names[cid];
+    }
+
+    if (kernname.empty()) {
+        check(snprintf(buf, BUF_SIZE, "HIP: pid:%d tid:%s %s ret=%d @%lu +%lu\n", pid, tid(), msg.c_str(), status, tick, ticks));
+    }
+    else {
+        check(snprintf(buf, BUF_SIZE, "HIP: pid:%d tid:%s %s [%s] ret=%d @%lu +%lu\n", pid, tid(), msg.c_str(), kernname.c_str(), status, tick, ticks));
+    }
+
     TlsData::Get(stream)->push(buf);
 }
 

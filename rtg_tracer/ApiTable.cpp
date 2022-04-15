@@ -1,3 +1,6 @@
+/**************************************************************************
+ * Copyright (c) 2022 Advanced Micro Devices, Inc.
+ **************************************************************************/
 #include "Table.h"
 #include <thread>
 #include <deque>
@@ -20,6 +23,7 @@ public:
     std::array<ApiTable::row, BUFFERSIZE> rows; // Circular buffer
     int head;
     int tail;
+    int count;
 
     std::map<sqlite3_int64, ApiTable::row> inFlight;
     std::map<std::pair<sqlite3_int64, sqlite3_int64>, std::deque<ApiTable::row>> roctxStacks;
@@ -33,6 +37,8 @@ public:
     std::thread *worker;
     bool workerRunning;
     bool done;
+
+    sqlite3_int64 roctxResumeTime;
 
     ApiTable *p;
 };
@@ -56,14 +62,15 @@ ApiTable::ApiTable(const char *basefile)
     d->done = false;
     d->workerRunning = true;
 
+    d->roctxResumeTime = 0;
+
     d->worker = new std::thread(&ApiTablePrivate::work, d);
 }
 
 void ApiTable::insert(const ApiTable::row &row)
 {
     std::unique_lock<std::mutex> lock(m_mutex);
-#if 1
-	if (row.phase == 0) {
+    if (row.phase == 0) {
        d->inFlight.insert({row.api_id, row});
        return;
     }
@@ -85,16 +92,6 @@ void ApiTable::insert(const ApiTable::row &row)
             d->inFlight.erase(it);
         }
     }
-#else
-    if (d->head - d->tail >= ApiTablePrivate::BUFFERSIZE) {
-        // buffer is full; insert in-line or wait
-        printf("Trouble\n");
-        // FIXME: overhead record here
-        m_wait.notify_one();  // make sure working is running
-        m_wait.wait(lock);
-    }
-    d->rows[(++d->head) % ApiTablePrivate::BUFFERSIZE] = row;
-#endif
 
     if (d->workerRunning == false && (d->head - d->tail) >= ApiTablePrivate::BATCHSIZE)
         m_wait.notify_one();
@@ -133,14 +130,58 @@ void ApiTable::popRoctx(const ApiTable::row &row)
     }
     auto key = std::pair<sqlite3_int64, sqlite3_int64>(row.pid, row.tid);
     auto &stack = d->roctxStacks[key];
-    ApiTable::row &r = stack.front();
-    r.end = row.end;
-    r.api_id = ++roctx_id_hack;
-    d->rows[(++d->head) % ApiTablePrivate::BUFFERSIZE] = r;
-    stack.pop_front();
+    if (stack.empty() == false) {
+        ApiTable::row &r = stack.front();
+        r.end = row.end;
+        r.api_id = ++roctx_id_hack;
+        d->rows[(++d->head) % ApiTablePrivate::BUFFERSIZE] = r;
+        stack.pop_front();
+    }
+    else {  // Pop without a push.  This is due to suspend/resume.  Fudge the start.
+        ApiTable::row &r = const_cast<ApiTable::row&>(row);
+        r.start = d->roctxResumeTime;
+        r.api_id = ++roctx_id_hack;
+        d->rows[(++d->head) % ApiTablePrivate::BUFFERSIZE] = r;
+    }
 
     if (d->workerRunning == false && (d->head - d->tail) >= ApiTablePrivate::BATCHSIZE)
         m_wait.notify_one();
+}
+
+void ApiTable::suspendRoctx(sqlite3_int64 atTime)
+{
+    std::unique_lock<std::mutex> lock(m_mutex);
+    if (d->head - d->tail >= ApiTablePrivate::BUFFERSIZE) {
+        m_wait.notify_one();
+        m_wait.wait(lock);
+    }
+
+    // Profiling is suspended, we won't get pops for anything pushed.  So end them all now.
+    auto it = d->roctxStacks.begin();
+    while (it != d->roctxStacks.end()) {
+        auto &stack = it->second;
+        while (stack.empty() == false) {
+            // Make sure there is room
+            if (d->head - d->tail >= ApiTablePrivate::BUFFERSIZE) {
+                m_wait.notify_one();
+                m_wait.wait(lock);
+            }
+            ApiTable::row &r = stack.front();
+            r.end = atTime;
+            r.api_id = ++roctx_id_hack;
+            d->rows[(++d->head) % ApiTablePrivate::BUFFERSIZE] = r;
+            stack.pop_front();
+        }
+        ++it;
+    }
+
+    if (d->workerRunning == false && (d->head - d->tail) >= ApiTablePrivate::BATCHSIZE)
+        m_wait.notify_one();
+}
+
+void ApiTable::resumeRoctx(sqlite3_int64 atTime)
+{
+    d->roctxResumeTime = atTime;
 }
 
 void ApiTable::flush()
@@ -202,6 +243,7 @@ void ApiTablePrivate::writeRows()
     const timestamp_t cb_mid_time = util::HsaTimer::clocktime_ns(util::HsaTimer::TIME_ID_CLOCK_MONOTONIC);
     sqlite3_exec(p->m_connection, "END TRANSACTION", NULL, NULL, NULL);
     const timestamp_t cb_end_time = util::HsaTimer::clocktime_ns(util::HsaTimer::TIME_ID_CLOCK_MONOTONIC);
+    // FIXME: write the overhead record
 }
 
 

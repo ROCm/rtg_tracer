@@ -1,3 +1,7 @@
+/**************************************************************************
+ * Copyright (c) 2022 Advanced Micro Devices, Inc.
+ **************************************************************************/
+
 class Flag {
     const char *name_;
     const char *value_;
@@ -15,13 +19,17 @@ public:
         flags.push_back(this);
     }
 
-    void init() {
-        value_ = getenv(name_);
-        if (NULL == value_) value_ = default_;
+    void _reset_bool() {
         if (is_bool_) {
             value_bool_ = value_[0] == 'T' || value_[0] == 't' || value_[0] == 'Y' || value_[0] == 'y';
             value_bool_ |= (isdigit(value_[0]) && value_[0] != '0');
         }
+    }
+
+    void init() {
+        value_ = getenv(name_);
+        if (NULL == value_) value_ = default_;
+        _reset_bool();
     }
 
     void print() {
@@ -34,6 +42,10 @@ public:
     bool operator==(const std::string& that) { return std::string(value_) == that; }
     operator bool() { return value_bool_; }
     void operator=(bool value) { value_bool_ = value; }
+    void operator=(const char* value) {
+        value_ = value;
+        _reset_bool();
+    }
     bool empty() { return value_ == NULL ? true : strlen(value_) == 0; }
 
 };
@@ -48,7 +60,11 @@ FLAG_BOOL(RTG_RPD, 1, "write output in rpd format");
 #endif
 
 FLAG_BOOL(RTG_VERBOSE, 0, "Verbose logging from RTG");
-FLAG_CHAR(RTG_FILENAME, "rtg_trace.txt", "Output filename, default rtg_trace.txt -- pid always appended");
+#ifdef RPD_TRACER
+FLAG_CHAR(RTG_FILE_PREFIX, "trace", "Output filename prefix, default will append .rpd 'trace.rpd'");
+#else
+FLAG_CHAR(RTG_FILE_PREFIX, "rtg_trace_%p", "Output filename prefix, default rtg_trace_%p -- if %p is used, substitue pid");
+#endif
 FLAG_BOOL(RTG_HIP_API_ARGS, false, "Capture HIP API name and function arguments, otherwise just the name");
 FLAG_CHAR(RTG_HIP_API_FILTER, "all", "Trace specific HIP calls. Special case 'all', otherwise simple string matching. Separate tokens with ','");
 FLAG_CHAR(RTG_HIP_API_FILTER_OUT, "", "Do not trace specific HIP calls. Simple string matching. Separate tokens with ','");
@@ -59,6 +75,7 @@ FLAG_CHAR(RTG_HSA_API_FILTER, "", "Trace specific HSA calls. Special case 'all',
 FLAG_CHAR(RTG_HSA_API_FILTER_OUT, "", "Do not trace specific HSA calls. Simple string matching. Separate tokens with ','");
 FLAG_BOOL(RTG_HSA_HOST_DISPATCH, false, "Trace when kernel dispatch is enqueued on the host");
 FLAG_BOOL(RTG_DEMANGLE, true, "Demangle kernel names");
+FLAG_BOOL(RTG_LEGACY_PRINTF, false, "use the old printf logger (writes to one txt file, will have periodic stalls due to logging contention)");
 // Not RTG exactly, but still parsed by RTG.
 FLAG_CHAR(HIP_VISIBLE_DEVICES, "", "Devices ordinals visible to HIP");
 FLAG_CHAR(CUDA_VISIBLE_DEVICES, "", "Devices ordinals visible to HIP, but using the CUDA version of the env var");
@@ -76,6 +93,7 @@ void Flag::init_all() {
         RTG_PROFILE_COPY = true;
         RTG_HSA_API_FILTER = "";
         RTG_HSA_HOST_DISPATCH = false;
+        RTG_LEGACY_PRINTF = true;
     }
     else {
         if (RTG_HSA_API_FILTER.empty() && !RTG_HSA_API_FILTER_OUT.empty()) {
