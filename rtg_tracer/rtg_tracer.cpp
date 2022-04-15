@@ -160,6 +160,10 @@ static FILE *gs_stream{NULL}; // output only used for HCC_PROFILE mode
 static thread_local std::vector<char[sizeof(hip_api_data_t)]> gstl_hip_api_data(HIP_API_ID_NUMBER);
 static thread_local std::vector<uint64_t> gstl_hip_api_tick(HIP_API_ID_NUMBER);
 
+// For hipMalloc backtraces
+static std::unordered_map<void*, std::pair<size_t, std::string> > gs_malloc_backtrace;
+static mutex_t gs_malloc_backtrace_mutex_;
+
 static thread_local std::vector<roctx_data_t> gstl_roctx_stack; // for roctx range push pop
 static thread_local std::unordered_map<int,roctx_data_t> gstl_roctx_range; // for roctx range start stop
 
@@ -2534,8 +2538,10 @@ static void* hip_activity_callback(uint32_t cid, activity_record_t* record, cons
 
 #define UNW_LOCAL_ONLY
 #include <libunwind.h>
-static void backtrace()
+static std::string backtrace()
 {
+  std::ostringstream os;
+
   unw_cursor_t cursor;
   unw_context_t context;
 
@@ -2558,16 +2564,25 @@ static void backtrace()
         name = symbol;
     }
 
+#if 0
     fprintf(stderr, "#%-2d 0x%016" PRIxPTR " sp=0x%016" PRIxPTR " %s + 0x%" PRIxPTR "\n",
         ++n,
         static_cast<uintptr_t>(ip),
         static_cast<uintptr_t>(sp),
         name,
         static_cast<uintptr_t>(off));
+#else
+    os << "#" << std::left << std::setw(2) << ++n << " " << (void*)ip << " sp=" << (void*)sp << " " << name << " + " << (void*)off << std::endl;
+#endif
 
     if ( name != symbol )
       free(name);
+
+    // stop after 20 frames
+    if (n>20) break;
   }
+
+  return os.str();
 }
 
 static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, void* arg)
@@ -2633,9 +2648,14 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
 
         LOG_HIP(cid, data, localStatus, tick_, ticks, kernname_str, RTG_HIP_API_ARGS);
 
-        if (RTG_HIP_API_ARGS) {
-            if (cid == HIP_API_ID_hipMalloc) {
-                backtrace();
+        if (cid == HIP_API_ID_hipMalloc) {
+            std::lock_guard<mutex_t> lck(gs_malloc_backtrace_mutex_);
+            gs_malloc_backtrace.emplace(*(data->args.hipMalloc.ptr), std::make_pair(data->args.hipMalloc.size, backtrace()));
+        }
+        else if (cid == HIP_API_ID_hipFree) {
+            std::lock_guard<mutex_t> lck(gs_malloc_backtrace_mutex_);
+            if (1 != gs_malloc_backtrace.erase(data->args.hipFree.ptr)) {
+                fprintf(stderr, "RTG Tracer: invalid hipFree ptr\n");
             }
         }
 
@@ -2734,6 +2754,15 @@ static void finalize_once()
     }
     else {
         RTG::gs_out->close();
+    }
+
+    // mem leak check
+    if (gs_malloc_backtrace.size()) {
+        fprintf(stderr, "RTG Tracer: hipMalloc leak detected, count=%zu\n", gs_malloc_backtrace.size());
+        for (auto &it : gs_malloc_backtrace) {
+            fprintf(stderr, "=============================== size=%zu ptr=%p\n", it.second.first, it.first);
+            fprintf(stderr, "%s\n", it.second.second.c_str());
+        }
     }
 
     RTG::RestoreHsaTable(RTG::gs_OrigHsaTable);
