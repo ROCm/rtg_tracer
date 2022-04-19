@@ -160,9 +160,14 @@ static FILE *gs_stream{NULL}; // output only used for HCC_PROFILE mode
 static thread_local std::vector<char[sizeof(hip_api_data_t)]> gstl_hip_api_data(HIP_API_ID_NUMBER);
 static thread_local std::vector<uint64_t> gstl_hip_api_tick(HIP_API_ID_NUMBER);
 
-// For hipMalloc backtraces
-static std::unordered_map<void*, std::pair<size_t, std::string> > gs_malloc_backtrace;
-static mutex_t gs_malloc_backtrace_mutex_;
+// memory backtraces
+static std::string backtrace();
+// for HIP
+static std::unordered_map<void*, std::pair<size_t, std::string> > gs_hip_backtrace;
+static mutex_t gs_hip_backtrace_mutex_;
+// for HSA malloc
+static std::unordered_map<void*, std::pair<size_t, std::string> > gs_hsa_backtrace;
+static mutex_t gs_hsa_backtrace_mutex_;
 
 static thread_local std::vector<roctx_data_t> gstl_roctx_stack; // for roctx range push pop
 static thread_local std::unordered_map<int,roctx_data_t> gstl_roctx_range; // for roctx range start stop
@@ -949,12 +954,30 @@ hsa_status_t hsa_memory_deregister(void* address, size_t size) {
 
 hsa_status_t hsa_memory_allocate(hsa_region_t region, size_t size, void** ptr) {
     TRACE(region, size, ptr);
-    return LOG_STATUS(gs_OrigCoreApiTable.hsa_memory_allocate_fn(region, size, ptr));
+    if (RTG_HSA_MEMORY_BACKTRACE) {
+        auto status = LOG_STATUS(gs_OrigCoreApiTable.hsa_memory_allocate_fn(region, size, ptr));
+        std::lock_guard<mutex_t> lck(gs_hsa_backtrace_mutex_);
+        gs_hsa_backtrace.emplace(*ptr, std::make_pair(size, backtrace()));
+        return status;
+    }
+    else {
+        return LOG_STATUS(gs_OrigCoreApiTable.hsa_memory_allocate_fn(region, size, ptr));
+    }
 }
 
 hsa_status_t hsa_memory_free(void* ptr) {
     TRACE(ptr);
-    return LOG_STATUS(gs_OrigCoreApiTable.hsa_memory_free_fn(ptr));
+    if (RTG_HSA_MEMORY_BACKTRACE) {
+        auto status = LOG_STATUS(gs_OrigCoreApiTable.hsa_memory_free_fn(ptr));
+        std::lock_guard<mutex_t> lck(gs_hsa_backtrace_mutex_);
+        if (1 != gs_hsa_backtrace.erase(ptr)) {
+            fprintf(stderr, "RTG Tracer: invalid hsa_amd_memory_pool_free ptr\n");
+        }
+        return status;
+    }
+    else {
+        return LOG_STATUS(gs_OrigCoreApiTable.hsa_memory_free_fn(ptr));
+    }
 }
 
 hsa_status_t hsa_memory_copy(void* dst, const void* src, size_t size) {
@@ -1667,13 +1690,31 @@ hsa_status_t hsa_amd_agent_iterate_memory_pools(hsa_agent_t agent, hsa_status_t 
 // Mirrors Amd Extension Apis
 hsa_status_t hsa_amd_memory_pool_allocate(hsa_amd_memory_pool_t memory_pool, size_t size, uint32_t flags, void** ptr) {
     TRACE(memory_pool, size, flags, ptr);
-    return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_memory_pool_allocate_fn(memory_pool, size, flags, ptr));
+    if (RTG_HSA_MEMORY_BACKTRACE) {
+        auto status = LOG_STATUS(gs_OrigExtApiTable.hsa_amd_memory_pool_allocate_fn(memory_pool, size, flags, ptr));
+        std::lock_guard<mutex_t> lck(gs_hsa_backtrace_mutex_);
+        gs_hsa_backtrace.emplace(*ptr, std::make_pair(size, backtrace()));
+        return status;
+    }
+    else {
+        return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_memory_pool_allocate_fn(memory_pool, size, flags, ptr));
+    }
 }
 
 // Mirrors Amd Extension Apis
 hsa_status_t hsa_amd_memory_pool_free(void* ptr) {
     TRACE(ptr);
-    return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_memory_pool_free_fn(ptr));
+    if (RTG_HSA_MEMORY_BACKTRACE) {
+        auto status = LOG_STATUS(gs_OrigExtApiTable.hsa_amd_memory_pool_free_fn(ptr));
+        std::lock_guard<mutex_t> lck(gs_hsa_backtrace_mutex_);
+        if (1 != gs_hsa_backtrace.erase(ptr)) {
+            fprintf(stderr, "RTG Tracer: invalid hsa_amd_memory_pool_free ptr\n");
+        }
+        return status;
+    }
+    else {
+        return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_memory_pool_free_fn(ptr));
+    }
 }
 
 inline hsa_device_type_t agent_type(hsa_agent_t x)
@@ -2648,14 +2689,16 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
 
         LOG_HIP(cid, data, localStatus, tick_, ticks, kernname_str, RTG_HIP_API_ARGS);
 
-        if (cid == HIP_API_ID_hipMalloc) {
-            std::lock_guard<mutex_t> lck(gs_malloc_backtrace_mutex_);
-            gs_malloc_backtrace.emplace(*(data->args.hipMalloc.ptr), std::make_pair(data->args.hipMalloc.size, backtrace()));
-        }
-        else if (cid == HIP_API_ID_hipFree) {
-            std::lock_guard<mutex_t> lck(gs_malloc_backtrace_mutex_);
-            if (1 != gs_malloc_backtrace.erase(data->args.hipFree.ptr)) {
-                fprintf(stderr, "RTG Tracer: invalid hipFree ptr\n");
+        if (RTG_HIP_MEMORY_BACKTRACE) {
+            if (cid == HIP_API_ID_hipMalloc) {
+                std::lock_guard<mutex_t> lck(gs_hip_backtrace_mutex_);
+                gs_hip_backtrace.emplace(*(data->args.hipMalloc.ptr), std::make_pair(data->args.hipMalloc.size, backtrace()));
+            }
+            else if (cid == HIP_API_ID_hipFree) {
+                std::lock_guard<mutex_t> lck(gs_hip_backtrace_mutex_);
+                if (1 != gs_hip_backtrace.erase(data->args.hipFree.ptr)) {
+                    fprintf(stderr, "RTG Tracer: invalid hipFree ptr\n");
+                }
             }
         }
 
@@ -2757,9 +2800,17 @@ static void finalize_once()
     }
 
     // mem leak check
-    if (gs_malloc_backtrace.size()) {
-        fprintf(stderr, "RTG Tracer: hipMalloc leak detected, count=%zu\n", gs_malloc_backtrace.size());
-        for (auto &it : gs_malloc_backtrace) {
+    if (gs_hip_backtrace.size()) {
+        fprintf(stderr, "RTG Tracer: hipMalloc leak detected, count=%zu\n", gs_hip_backtrace.size());
+        for (auto &it : gs_hip_backtrace) {
+            fprintf(stderr, "=============================== size=%zu ptr=%p\n", it.second.first, it.first);
+            fprintf(stderr, "%s\n", it.second.second.c_str());
+        }
+    }
+
+    if (gs_hsa_backtrace.size()) {
+        fprintf(stderr, "RTG Tracer: HSA leak detected, count=%zu\n", gs_hsa_backtrace.size());
+        for (auto &it : gs_hsa_backtrace) {
             fprintf(stderr, "=============================== size=%zu ptr=%p\n", it.second.first, it.first);
             fprintf(stderr, "%s\n", it.second.second.c_str());
         }
@@ -2835,6 +2886,13 @@ extern "C" bool OnLoad(void *pTable,
         tokens_prune_always.push_back("hipPeekAtLastError"); // because we need to call it ourselves for return codes
         tokens_prune_always.push_back("hipGetDevice");
         tokens_prune_always.push_back("hipSetDevice");
+        std::vector<std::string> tokens_keep_always;
+        tokens_keep_always.push_back("hipLaunchCooperativeKernel");
+        tokens_keep_always.push_back("hipLaunchKernel");
+        tokens_keep_always.push_back("hipHccModuleLaunchKernel");
+        tokens_keep_always.push_back("hipExtModuleLaunchKernel");
+        tokens_keep_always.push_back("hipModuleLaunchKernel");
+        tokens_keep_always.push_back("hipExtLaunchKernel");
 
         for (int i=0; i<HIP_API_ID_NUMBER; ++i) {
             bool keep = false;
@@ -2854,6 +2912,12 @@ extern "C" bool OnLoad(void *pTable,
             for (auto tok : tokens_prune_always) {
                 if (name.find(tok) != std::string::npos) {
                     keep = false;
+                    break;
+                }
+            }
+            for (auto tok : tokens_keep_always) {
+                if (name.find(tok) != std::string::npos) {
+                    keep = true;
                     break;
                 }
             }
