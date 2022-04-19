@@ -11,7 +11,7 @@ else
 CXXFLAGS = -O3
 endif
 
-ROC_LIBS = -lroctx64 -lroctracer64 -lamdhip64 -lhsa-runtime64 -lsqlite3 -lfmt
+ROC_LIBS = -lroctx64 -lroctracer64 -lamdhip64 -lhsa-runtime64 -lsqlite3 -lfmt -lunwind
 ROC_INCLUDE = -I/opt/rocm/include -I/opt/rocm/hip/include -I/opt/rocm/roctracer/include -I/opt/rocm/hsa/include/hsa
 
 RTG_MAIN = rtg_tracer.so
