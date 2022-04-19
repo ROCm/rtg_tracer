@@ -12,6 +12,7 @@
 #include <vector>
 #include <sys/types.h>
 #include <unistd.h>
+#include <cxxabi.h>
 
 #include <hip/hip_runtime_api.h>
 #include <hip/amd_detail/hip_runtime_prof.h>
@@ -33,6 +34,24 @@ static inline std::string get_tid_string() {
 static inline const char * tid() {
     thread_local std::string tid_ = get_tid_string();
     return tid_.c_str();
+}
+
+static std::string cpp_demangle(const std::string &symname) {
+    std::string retval;
+    std::size_t pos;
+    size_t size = 0;
+    int status = 0;
+    char* result = abi::__cxa_demangle(symname.c_str(), NULL, &size, &status);
+    if (result) {
+        // caller of __cxa_demangle must free returned buffer
+        retval = result;
+        free(result);
+        return retval;
+    }
+    else {
+        // demangle failed?
+        return symname;
+    }
 }
 
 namespace {
@@ -130,11 +149,11 @@ void RtgOutPrintf::hsa_api(const string& func, const string& args, lu tick, lu t
     TlsData::Get(stream)->push(buf);
 }
 
-void RtgOutPrintf::hsa_host_dispatch_kernel(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, const string& name, const hsa_kernel_dispatch_packet_t *packet)
+void RtgOutPrintf::hsa_host_dispatch_kernel(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, const string& name, const hsa_kernel_dispatch_packet_t *packet, bool demangle)
 {
     char *buf = new char[BUF_SIZE];
     check(snprintf(buf, BUF_SIZE, "HSA: pid:%d tid:%s dispatch queue:%lu agent:%lu signal:%lu name:'%s' tick:%lu id:%lu workgroup:{%d,%d,%d} grid:{%d,%d,%d}\n",
-            pid, tid(), queue->id, agent.handle, signal.handle, name.c_str(), tick, id,
+            pid, tid(), queue->id, agent.handle, signal.handle, demangle ? cpp_demangle(name).c_str() : name.c_str(), tick, id,
             packet->workgroup_size_x, packet->workgroup_size_y, packet->workgroup_size_z,
             packet->grid_size_x, packet->grid_size_y, packet->grid_size_z));
     TlsData::Get(stream)->push(buf);
@@ -148,11 +167,11 @@ void RtgOutPrintf::hsa_host_dispatch_barrier(hsa_queue_t *queue, hsa_agent_t age
     TlsData::Get(stream)->push(buf);
 }
 
-void RtgOutPrintf::hsa_dispatch_kernel(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, const string& name, uint64_t correlation_id)
+void RtgOutPrintf::hsa_dispatch_kernel(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, const string& name, uint64_t correlation_id, bool demangle)
 {
     char *buf = new char[BUF_SIZE];
     check(snprintf(buf, BUF_SIZE, "HSA: pid:%d tid:%s dispatch queue:%lu agent:%lu signal:%lu name:'%s' start:%lu stop:%lu id:%lu\n",
-            pid, tid(), queue->id, agent.handle, signal.handle, name.c_str(), start, stop, id));
+            pid, tid(), queue->id, agent.handle, signal.handle, demangle ? cpp_demangle(name).c_str() : name.c_str(), start, stop, id));
     TlsData::Get(stream)->push(buf);
 }
 
@@ -172,7 +191,7 @@ void RtgOutPrintf::hsa_dispatch_copy(hsa_agent_t agent, hsa_signal_t signal, lu 
     TlsData::Get(stream)->push(buf);
 }
 
-void RtgOutPrintf::hip_api(uint32_t cid, struct hip_api_data_s *data, int status, lu tick, lu ticks, const std::string &kernname, bool args)
+void RtgOutPrintf::hip_api(uint32_t cid, struct hip_api_data_s *data, int status, lu tick, lu ticks, const char *kernname, bool args, bool demangle)
 {
     char *buf = new char[BUF_SIZE];
     std::string msg;
@@ -187,11 +206,11 @@ void RtgOutPrintf::hip_api(uint32_t cid, struct hip_api_data_s *data, int status
         msg = hip_api_names[cid];
     }
 
-    if (kernname.empty()) {
+    if (NULL == kernname) {
         check(snprintf(buf, BUF_SIZE, "HIP: pid:%d tid:%s %s ret=%d @%lu +%lu\n", pid, tid(), msg.c_str(), status, tick, ticks));
     }
     else {
-        check(snprintf(buf, BUF_SIZE, "HIP: pid:%d tid:%s %s [%s] ret=%d @%lu +%lu\n", pid, tid(), msg.c_str(), kernname.c_str(), status, tick, ticks));
+        check(snprintf(buf, BUF_SIZE, "HIP: pid:%d tid:%s %s [%s] ret=%d @%lu +%lu\n", pid, tid(), msg.c_str(), demangle ? cpp_demangle(kernname).c_str() : kernname, status, tick, ticks));
     }
 
     TlsData::Get(stream)->push(buf);

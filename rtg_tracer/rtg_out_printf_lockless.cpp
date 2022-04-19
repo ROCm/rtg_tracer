@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <cxxabi.h>
 
 #include <hip/hip_runtime_api.h>
 #include <hip/amd_detail/hip_runtime_prof.h>
@@ -31,6 +32,24 @@ static inline std::string get_tid_string() {
 static inline const char * tid() {
     thread_local std::string tid_ = get_tid_string();
     return tid_.c_str();
+}
+
+static std::string cpp_demangle(const std::string &symname) {
+    std::string retval;
+    std::size_t pos;
+    size_t size = 0;
+    int status = 0;
+    char* result = abi::__cxa_demangle(symname.c_str(), NULL, &size, &status);
+    if (result) {
+        // caller of __cxa_demangle must free returned buffer
+        retval = result;
+        free(result);
+        return retval;
+    }
+    else {
+        // demangle failed?
+        return symname;
+    }
 }
 
 namespace {
@@ -90,12 +109,12 @@ struct TlsData {
     void hsa_api(const string& func, const string& args, lu tick, lu ticks, int localStatus);
     void hsa_api(const string& func, const string& args, lu tick, lu ticks, uint64_t localStatus);
     void hsa_api(const string& func, const string& args, lu tick, lu ticks);
-    void hsa_host_dispatch_kernel (hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, const string& name, const hsa_kernel_dispatch_packet_t *packet);
+    void hsa_host_dispatch_kernel (hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, const string& name, const hsa_kernel_dispatch_packet_t *packet, bool demangle);
     void hsa_host_dispatch_barrier(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, lu dep[5], const hsa_barrier_and_packet_t *packet);
-    void hsa_dispatch_kernel (hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, const string& name, uint64_t correlation_id);
+    void hsa_dispatch_kernel (hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, const string& name, uint64_t correlation_id, bool demangle);
     void hsa_dispatch_barrier(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, lu dep[5]);
     void hsa_dispatch_copy   (hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu dep[5]);
-    void hip_api(uint32_t cid, struct hip_api_data_s *data, int status, lu tick, lu ticks, const std::string &kernname, bool args);
+    void hip_api(uint32_t cid, struct hip_api_data_s *data, int status, lu tick, lu ticks, const char *kernname, bool args, bool demangle);
     void roctx(uint64_t correlation_id, const string& message, lu tick, lu ticks);
     void roctx_mark(uint64_t correlation_id, const string& message, lu tick);
 };
@@ -123,10 +142,10 @@ void TlsData::hsa_api(const string& func, const string& args, lu tick, lu ticks)
     flush();
 }
 
-void TlsData::hsa_host_dispatch_kernel(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, const string& name, const hsa_kernel_dispatch_packet_t *packet)
+void TlsData::hsa_host_dispatch_kernel(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, const string& name, const hsa_kernel_dispatch_packet_t *packet, bool demangle)
 {
     fprintf(stream, "HSA: pid:%d tid:%s dispatch queue:%lu agent:%lu signal:%lu name:'%s' tick:%lu id:%lu workgroup:{%d,%d,%d} grid:{%d,%d,%d}\n",
-            pid, tid, queue->id, agent.handle, signal.handle, name.c_str(), tick, id,
+            pid, tid, queue->id, agent.handle, signal.handle, demangle ? cpp_demangle(name).c_str() : name.c_str(), tick, id,
             packet->workgroup_size_x, packet->workgroup_size_y, packet->workgroup_size_z,
             packet->grid_size_x, packet->grid_size_y, packet->grid_size_z);
     flush();
@@ -139,10 +158,10 @@ void TlsData::hsa_host_dispatch_barrier(hsa_queue_t *queue, hsa_agent_t agent, h
     flush();
 }
 
-void TlsData::hsa_dispatch_kernel(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, const string& name, uint64_t correlation_id)
+void TlsData::hsa_dispatch_kernel(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, const string& name, uint64_t correlation_id, bool demangle)
 {
     fprintf(stream, "HSA: pid:%d tid:%s dispatch queue:%lu agent:%lu signal:%lu name:'%s' start:%lu stop:%lu id:%lu\n",
-            pid, tid, queue->id, agent.handle, signal.handle, name.c_str(), start, stop, id);
+            pid, tid, queue->id, agent.handle, signal.handle, demangle ? cpp_demangle(name).c_str() : name.c_str(), start, stop, id);
     flush();
 }
 
@@ -160,7 +179,7 @@ void TlsData::hsa_dispatch_copy(hsa_agent_t agent, hsa_signal_t signal, lu start
     flush();
 }
 
-void TlsData::hip_api(uint32_t cid, struct hip_api_data_s *data, int status, lu tick, lu ticks, const std::string &kernname, bool args)
+void TlsData::hip_api(uint32_t cid, struct hip_api_data_s *data, int status, lu tick, lu ticks, const char *kernname, bool args, bool demangle)
 {
     std::string msg;
 
@@ -174,11 +193,11 @@ void TlsData::hip_api(uint32_t cid, struct hip_api_data_s *data, int status, lu 
         msg = hip_api_names[cid];
     }
 
-    if (kernname.empty()) {
+    if (NULL == kernname) {
         fprintf(stream, "HIP: pid:%d tid:%s %s ret=%d @%lu +%lu\n", pid, tid, msg.c_str(), status, tick, ticks);
     }
     else {
-        fprintf(stream, "HIP: pid:%d tid:%s %s [%s] ret=%d @%lu +%lu\n", pid, tid, msg.c_str(), kernname.c_str(), status, tick, ticks);
+        fprintf(stream, "HIP: pid:%d tid:%s %s [%s] ret=%d @%lu +%lu\n", pid, tid, msg.c_str(), demangle ? cpp_demangle(kernname).c_str() : kernname, status, tick, ticks);
     }
 }
 
@@ -218,9 +237,9 @@ void RtgOutPrintfLockless::hsa_api(const string& func, const string& args, lu ti
     TlsData::Get(filename)->hsa_api(func, args, tick, ticks);
 }
 
-void RtgOutPrintfLockless::hsa_host_dispatch_kernel(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, const string& name, const hsa_kernel_dispatch_packet_t *packet)
+void RtgOutPrintfLockless::hsa_host_dispatch_kernel(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, const string& name, const hsa_kernel_dispatch_packet_t *packet, bool demangle)
 {
-    TlsData::Get(filename)->hsa_host_dispatch_kernel(queue, agent, signal, tick, id, name, packet);
+    TlsData::Get(filename)->hsa_host_dispatch_kernel(queue, agent, signal, tick, id, name, packet, demangle);
 }
 
 void RtgOutPrintfLockless::hsa_host_dispatch_barrier(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, lu dep[5], const hsa_barrier_and_packet_t *packet)
@@ -228,9 +247,9 @@ void RtgOutPrintfLockless::hsa_host_dispatch_barrier(hsa_queue_t *queue, hsa_age
     TlsData::Get(filename)->hsa_host_dispatch_barrier(queue, agent, signal, tick, id, dep, packet);
 }
 
-void RtgOutPrintfLockless::hsa_dispatch_kernel(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, const string& name, uint64_t correlation_id)
+void RtgOutPrintfLockless::hsa_dispatch_kernel(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, const string& name, uint64_t correlation_id, bool demangle)
 {
-    TlsData::Get(filename)->hsa_dispatch_kernel(queue, agent, signal, start, stop, id, name, correlation_id);
+    TlsData::Get(filename)->hsa_dispatch_kernel(queue, agent, signal, start, stop, id, name, correlation_id, demangle);
 }
 
 void RtgOutPrintfLockless::hsa_dispatch_barrier(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, lu dep[5])
@@ -243,9 +262,9 @@ void RtgOutPrintfLockless::hsa_dispatch_copy(hsa_agent_t agent, hsa_signal_t sig
     TlsData::Get(filename)->hsa_dispatch_copy(agent, signal, start, stop, dep);
 }
 
-void RtgOutPrintfLockless::hip_api(uint32_t cid, struct hip_api_data_s *data, int status, lu tick, lu ticks, const std::string &kernname, bool args)
+void RtgOutPrintfLockless::hip_api(uint32_t cid, struct hip_api_data_s *data, int status, lu tick, lu ticks, const char *kernname, bool args, bool demangle)
 {
-    TlsData::Get(filename)->hip_api(cid, data, status, tick, ticks, kernname, args);
+    TlsData::Get(filename)->hip_api(cid, data, status, tick, ticks, kernname, args, demangle);
 }
 
 void RtgOutPrintfLockless::roctx(uint64_t correlation_id, const string& message, lu tick, lu ticks)

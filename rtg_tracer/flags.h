@@ -81,6 +81,11 @@ FLAG_BOOL(RTG_LEGACY_PRINTF, false, "use the old printf logger (writes to one tx
 // Not RTG exactly, but still parsed by RTG.
 FLAG_CHAR(HIP_VISIBLE_DEVICES, "", "Devices ordinals visible to HIP");
 FLAG_CHAR(CUDA_VISIBLE_DEVICES, "", "Devices ordinals visible to HIP, but using the CUDA version of the env var");
+#if (HIP_VERSION_MAJOR == 4 && HIP_VERSION_MINOR >= 4) || HIP_VERSION_MAJOR > 4
+FLAG_BOOL(AMD_DIRECT_DISPATCH, 1, "Does HIP runtime use worker thread per stream (0) or does user thread directly dispatch kernels (1)");
+#else
+FLAG_BOOL(AMD_DIRECT_DISPATCH, 0, "Does HIP runtime use worker thread per stream (0) or does user thread directly dispatch kernels (1)");
+#endif
 
 void Flag::init_all() {
     for (auto flag : flags) {
