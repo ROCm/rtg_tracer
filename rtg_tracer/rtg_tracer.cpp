@@ -161,6 +161,15 @@ static thread_local std::vector<char[sizeof(hip_api_data_t)]> gstl_hip_api_data(
 static thread_local std::vector<uint64_t> gstl_hip_api_tick(HIP_API_ID_NUMBER);
 static thread_local uint64_t gstl_hip_api_correlation_id;
 
+// memory backtraces
+static std::string backtrace();
+// for HIP
+static std::unordered_map<void*, std::pair<size_t, std::string> > gs_hip_backtrace;
+static mutex_t gs_hip_backtrace_mutex_;
+// for HSA malloc
+static std::unordered_map<void*, std::pair<size_t, std::string> > gs_hsa_backtrace;
+static mutex_t gs_hsa_backtrace_mutex_;
+
 static thread_local std::vector<roctx_data_t> gstl_roctx_stack; // for roctx range push pop
 static thread_local std::unordered_map<int,roctx_data_t> gstl_roctx_range; // for roctx range start stop
 
@@ -946,12 +955,30 @@ hsa_status_t hsa_memory_deregister(void* address, size_t size) {
 
 hsa_status_t hsa_memory_allocate(hsa_region_t region, size_t size, void** ptr) {
     TRACE(region, size, ptr);
-    return LOG_STATUS(gs_OrigCoreApiTable.hsa_memory_allocate_fn(region, size, ptr));
+    if (RTG_HSA_MEMORY_BACKTRACE) {
+        auto status = LOG_STATUS(gs_OrigCoreApiTable.hsa_memory_allocate_fn(region, size, ptr));
+        std::lock_guard<mutex_t> lck(gs_hsa_backtrace_mutex_);
+        gs_hsa_backtrace.emplace(*ptr, std::make_pair(size, backtrace()));
+        return status;
+    }
+    else {
+        return LOG_STATUS(gs_OrigCoreApiTable.hsa_memory_allocate_fn(region, size, ptr));
+    }
 }
 
 hsa_status_t hsa_memory_free(void* ptr) {
     TRACE(ptr);
-    return LOG_STATUS(gs_OrigCoreApiTable.hsa_memory_free_fn(ptr));
+    if (RTG_HSA_MEMORY_BACKTRACE) {
+        auto status = LOG_STATUS(gs_OrigCoreApiTable.hsa_memory_free_fn(ptr));
+        std::lock_guard<mutex_t> lck(gs_hsa_backtrace_mutex_);
+        if (1 != gs_hsa_backtrace.erase(ptr)) {
+            fprintf(stderr, "RTG Tracer: invalid hsa_amd_memory_pool_free ptr\n");
+        }
+        return status;
+    }
+    else {
+        return LOG_STATUS(gs_OrigCoreApiTable.hsa_memory_free_fn(ptr));
+    }
 }
 
 hsa_status_t hsa_memory_copy(void* dst, const void* src, size_t size) {
@@ -1664,13 +1691,31 @@ hsa_status_t hsa_amd_agent_iterate_memory_pools(hsa_agent_t agent, hsa_status_t 
 // Mirrors Amd Extension Apis
 hsa_status_t hsa_amd_memory_pool_allocate(hsa_amd_memory_pool_t memory_pool, size_t size, uint32_t flags, void** ptr) {
     TRACE(memory_pool, size, flags, ptr);
-    return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_memory_pool_allocate_fn(memory_pool, size, flags, ptr));
+    if (RTG_HSA_MEMORY_BACKTRACE) {
+        auto status = LOG_STATUS(gs_OrigExtApiTable.hsa_amd_memory_pool_allocate_fn(memory_pool, size, flags, ptr));
+        std::lock_guard<mutex_t> lck(gs_hsa_backtrace_mutex_);
+        gs_hsa_backtrace.emplace(*ptr, std::make_pair(size, backtrace()));
+        return status;
+    }
+    else {
+        return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_memory_pool_allocate_fn(memory_pool, size, flags, ptr));
+    }
 }
 
 // Mirrors Amd Extension Apis
 hsa_status_t hsa_amd_memory_pool_free(void* ptr) {
     TRACE(ptr);
-    return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_memory_pool_free_fn(ptr));
+    if (RTG_HSA_MEMORY_BACKTRACE) {
+        auto status = LOG_STATUS(gs_OrigExtApiTable.hsa_amd_memory_pool_free_fn(ptr));
+        std::lock_guard<mutex_t> lck(gs_hsa_backtrace_mutex_);
+        if (1 != gs_hsa_backtrace.erase(ptr)) {
+            fprintf(stderr, "RTG Tracer: invalid hsa_amd_memory_pool_free ptr\n");
+        }
+        return status;
+    }
+    else {
+        return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_memory_pool_free_fn(ptr));
+    }
 }
 
 inline hsa_device_type_t agent_type(hsa_agent_t x)
@@ -2505,6 +2550,55 @@ static void* hip_activity_callback(uint32_t cid, activity_record_t* record, cons
     return (hip_api_data_t*)gstl_hip_api_data[cid];
 }
 
+#define UNW_LOCAL_ONLY
+#include <libunwind.h>
+static std::string backtrace()
+{
+  std::ostringstream os;
+
+  unw_cursor_t cursor;
+  unw_context_t context;
+
+  unw_getcontext(&context);
+  unw_init_local(&cursor, &context);
+
+  int n=0;
+  while ( unw_step(&cursor) ) {
+    unw_word_t ip, sp, off;
+
+    unw_get_reg(&cursor, UNW_REG_IP, &ip);
+    unw_get_reg(&cursor, UNW_REG_SP, &sp);
+
+    char symbol[256] = {"<unknown>"};
+    char *name = symbol;
+
+    if ( !unw_get_proc_name(&cursor, symbol, sizeof(symbol), &off) ) {
+      int status;
+      if ( (name = abi::__cxa_demangle(symbol, NULL, NULL, &status)) == 0 )
+        name = symbol;
+    }
+
+#if 0
+    fprintf(stderr, "#%-2d 0x%016" PRIxPTR " sp=0x%016" PRIxPTR " %s + 0x%" PRIxPTR "\n",
+        ++n,
+        static_cast<uintptr_t>(ip),
+        static_cast<uintptr_t>(sp),
+        name,
+        static_cast<uintptr_t>(off));
+#else
+    os << "#" << std::left << std::setw(2) << ++n << " " << (void*)ip << " sp=" << (void*)sp << " " << name << " + " << (void*)off << std::endl;
+#endif
+
+    if ( name != symbol )
+      free(name);
+
+    // stop after 20 frames
+    if (n>20) break;
+  }
+
+  return os.str();
+}
+
 static inline bool _is_kernel(uint32_t cid) {
     switch (cid) {
         case HIP_API_ID_hipLaunchCooperativeKernel:
@@ -2590,6 +2684,19 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
         }
 
         LOG_HIP(cid, data, localStatus, tick_, ticks, kernname, RTG_HIP_API_ARGS, RTG_DEMANGLE);
+
+        if (RTG_HIP_MEMORY_BACKTRACE) {
+            if (cid == HIP_API_ID_hipMalloc) {
+                std::lock_guard<mutex_t> lck(gs_hip_backtrace_mutex_);
+                gs_hip_backtrace.emplace(*(data->args.hipMalloc.ptr), std::make_pair(data->args.hipMalloc.size, backtrace()));
+            }
+            else if (cid == HIP_API_ID_hipFree) {
+                std::lock_guard<mutex_t> lck(gs_hip_backtrace_mutex_);
+                if (1 != gs_hip_backtrace.erase(data->args.hipFree.ptr)) {
+                    fprintf(stderr, "RTG Tracer: invalid hipFree ptr\n");
+                }
+            }
+        }
 
         // Now that we're done with the api data, zero it for the next time.
         // Otherwise, phase is always wrong because HIP doesn't set the phase to 0 during API start.
@@ -2689,6 +2796,23 @@ static void finalize_once()
         RTG::gs_out->close();
     }
 
+    // mem leak check
+    if (gs_hip_backtrace.size()) {
+        fprintf(stderr, "RTG Tracer: hipMalloc leak detected, count=%zu\n", gs_hip_backtrace.size());
+        for (auto &it : gs_hip_backtrace) {
+            fprintf(stderr, "=============================== size=%zu ptr=%p\n", it.second.first, it.first);
+            fprintf(stderr, "%s\n", it.second.second.c_str());
+        }
+    }
+
+    if (gs_hsa_backtrace.size()) {
+        fprintf(stderr, "RTG Tracer: HSA leak detected, count=%zu\n", gs_hsa_backtrace.size());
+        for (auto &it : gs_hsa_backtrace) {
+            fprintf(stderr, "=============================== size=%zu ptr=%p\n", it.second.first, it.first);
+            fprintf(stderr, "%s\n", it.second.second.c_str());
+        }
+    }
+
     RTG::RestoreHsaTable(RTG::gs_OrigHsaTable);
 }
 
@@ -2768,6 +2892,13 @@ extern "C" bool OnLoad(void *pTable,
         tokens_prune_always.push_back("hipGetDeviceProperties");
         tokens_prune_always.push_back("hipModuleGetFunction");
         tokens_prune_always.push_back("hipEventCreateWithFlags");
+        std::vector<std::string> tokens_keep_always;
+        tokens_keep_always.push_back("hipLaunchCooperativeKernel");
+        tokens_keep_always.push_back("hipLaunchKernel");
+        tokens_keep_always.push_back("hipHccModuleLaunchKernel");
+        tokens_keep_always.push_back("hipExtModuleLaunchKernel");
+        tokens_keep_always.push_back("hipModuleLaunchKernel");
+        tokens_keep_always.push_back("hipExtLaunchKernel");
 
         for (int i=0; i<HIP_API_ID_NUMBER; ++i) {
             bool keep = false;
@@ -2787,6 +2918,12 @@ extern "C" bool OnLoad(void *pTable,
             for (auto tok : tokens_prune_always) {
                 if (name.find(tok) != std::string::npos) {
                     keep = false;
+                    break;
+                }
+            }
+            for (auto tok : tokens_keep_always) {
+                if (name.find(tok) != std::string::npos) {
+                    keep = true;
                     break;
                 }
             }
