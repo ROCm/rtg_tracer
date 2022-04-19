@@ -2,6 +2,7 @@
 
 ## Quick Start
 ```bash
+apt install libsqlite3-dev libunwind-dev libfmt-dev
 git clone https://github.com/jeffdaily/rocm-timeline-generator
 cd rocm-timeline-generator
 make
