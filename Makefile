@@ -3,9 +3,9 @@
 ###########################################################################
 
 all:
-	$(MAKE) -C rtg_tracer
+	$(MAKE) -C src
 
 clean:
-	$(MAKE) -C rtg_tracer clean
+	$(MAKE) -C src clean
 
 .PHONY: all clean
