@@ -2694,8 +2694,11 @@ static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, 
 
         if (RTG_HIP_MEMORY_BACKTRACE) {
             if (cid == HIP_API_ID_hipMalloc) {
-                std::lock_guard<mutex_t> lck(gs_hip_backtrace_mutex_);
-                gs_hip_backtrace.emplace(*(data->args.hipMalloc.ptr), std::make_pair(data->args.hipMalloc.size, backtrace()));
+                if (data->args.hipMalloc.size) {
+                    // only track non-zero allocations
+                    std::lock_guard<mutex_t> lck(gs_hip_backtrace_mutex_);
+                    gs_hip_backtrace.emplace(*(data->args.hipMalloc.ptr), std::make_pair(data->args.hipMalloc.size, backtrace()));
+                }
             }
             else if (cid == HIP_API_ID_hipFree) {
                 std::lock_guard<mutex_t> lck(gs_hip_backtrace_mutex_);
