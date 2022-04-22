@@ -2098,6 +2098,13 @@ static void InitEnabledTable(std::string what_to_trace, std::string what_not_to_
             }
         }
     }
+    // we must always trace these memory operations if we want tracebacks
+    if (RTG_HSA_MEMORY_BACKTRACE) {
+        gs_hsa_enabled_map["hsa_memory_allocate"] = true;
+        gs_hsa_enabled_map["hsa_memory_free"] = true;
+        gs_hsa_enabled_map["hsa_amd_memory_pool_allocate"] = true;
+        gs_hsa_enabled_map["hsa_amd_memory_pool_free"] = true;
+    }
 }
 
 static void InitEnabledTableCore(bool value) {
