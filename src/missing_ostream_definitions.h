@@ -52,3 +52,14 @@ DUMMY_DECL(hipMipmappedArray)
 #if (HIP_VERSION_MAJOR == 5 && HIP_VERSION_MINOR >= 0) || HIP_VERSION_MAJOR > 5
 DUMMY_DECL(hipHostNodeParams)
 #endif
+
+#if (HIP_VERSION_MAJOR == 5 && HIP_VERSION_MINOR >= 2) || HIP_VERSION_MAJOR > 5
+DUMMY_DECL(hipUUID)
+DUMMY_DECL(hipKernelNodeAttrValue)
+DUMMY_DECL(hipMemAllocationProp)
+DUMMY_DECL(hipMemLocation)
+DUMMY_DECL(hipArrayMapInfo)
+DUMMY_DECL(hipMemPoolProps)
+DUMMY_DECL(hipMemPoolPtrExportData)
+DUMMY_DECL(hipMemAccessDesc)
+#endif
