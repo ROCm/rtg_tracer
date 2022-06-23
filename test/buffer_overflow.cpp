@@ -47,6 +47,7 @@ int main(void)
     vectorAdd<<<dim3(blocksPerGrid), dim3(threadsPerBlock), 0, 0>>>(d_A, d_B, d_C, 2*numElements);
 
     // hipMemcpy(h_C, d_C, size, hipMemcpyDeviceToHost);
+    hipDeviceSynchronize();
 
     hipFree(d_A);
     hipFree(d_B);

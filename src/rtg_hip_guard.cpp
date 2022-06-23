@@ -24,11 +24,14 @@ constexpr int threadsPerBlock = 256;
 
 static thread_local bool this_launch_is_our_guard_launch(false);
 
+#define OUT std::cerr
+//#define OUT std::cout
 static std::string LABEL = "HIP GUARD: ";
-#define ERR(msg) std::cerr << LABEL << __func__ << ": " << msg << std::endl
+#define ERR(msg) OUT << LABEL << __func__ << ": " << msg << std::endl
+#define RPT(msg) OUT << LABEL << msg << std::endl
 #if DEBUG == 1
-#define LOG(msg) std::cerr << LABEL << __func__ << ": " << msg << std::endl
-#define TRACE(msg) std::cerr << LABEL << __func__ << ": " << msg << std::endl
+#define LOG(msg) OUT << LABEL << __func__ << ": " << msg << std::endl
+#define TRACE(msg) OUT << LABEL << __func__ << ": " << msg << std::endl
 #else
 #define LOG(msg)
 #define TRACE(msg)
@@ -182,7 +185,7 @@ void check_answer(hipStream_t stream, hipError_t status, void* userData)
     TRACE("stream=" << stream << " status=" << status << " userData=" << userData);
     CheckAnswerData *data = reinterpret_cast<CheckAnswerData*>(userData);
     if (*(data->answer) != 0) {
-        ERR("out of bounds found: " << data->kernel_name);
+        RPT("out of bounds found: " << data->kernel_name);
     }
     delete data;
 }
@@ -197,6 +200,9 @@ void free_answer(hipStream_t stream, hipError_t status, void* userData)
 
 void launch_guard_check(std::string kernel_name, hipStream_t stream)
 {
+    // protect against recursive calls
+    this_launch_is_our_guard_launch = true;
+
     hipError_t status = hipSuccess;
     int *answer = get_stream_guard_ptr(stream);
     Array<int*,blocksPerGrid> guards;
@@ -214,7 +220,6 @@ void launch_guard_check(std::string kernel_name, hipStream_t stream)
             LOG("guard_check prep for i=" << i << " ptr=" << ptr << " guard=" << guard << " size=" << size);
             if (i == blocksPerGrid) {
                 LOG("guard_check full");
-                this_launch_is_our_guard_launch = true;
                 guard_check<<<dim3(blocksPerGrid), dim3(threadsPerBlock), 0, stream>>>(guards, blocksPerGrid, answer);
                 status = hipStreamAddCallback(stream, check_answer, new CheckAnswerData{answer,kernel_name}, 0);
                 if (hipSuccess != status) {
@@ -225,7 +230,6 @@ void launch_guard_check(std::string kernel_name, hipStream_t stream)
         }
         if (i > 0) {
             LOG("guard_check partial i=" << i);
-            this_launch_is_our_guard_launch = true;
             guard_check<<<dim3(i), dim3(threadsPerBlock), 0, stream>>>(guards, i, answer);
             status = hipStreamAddCallback(stream, check_answer, new CheckAnswerData{answer,kernel_name}, 0);
             if (hipSuccess != status) {

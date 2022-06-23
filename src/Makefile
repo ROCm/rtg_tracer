@@ -8,7 +8,9 @@ HIPCC=$(HIP_PATH)/bin/hipcc
 ifeq ($(DEBUG), 1)
 CXXFLAGS = -g -O0 -Wall -DDEBUG=1
 else
-CXXFLAGS = -O3
+#CXXFLAGS = -O3
+#CXXFLAGS = -O2 -Wall
+CXXFLAGS = -O0 -Wall
 endif
 
 ROC_LIBS = -lroctx64 -lroctracer64 -lamdhip64 -lhsa-runtime64 -lsqlite3 -lfmt -lunwind
