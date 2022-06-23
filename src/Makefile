@@ -17,7 +17,8 @@ ROC_INCLUDE = -I/opt/rocm/include -I/opt/rocm/hip/include -I/opt/rocm/roctracer/
 RTG_MAIN = rtg_tracer.so
 RPD_MAIN = rpd_tracer.so
 
-all: $(RTG_MAIN) $(RPD_MAIN)
+all: rtg_hip_guard.so
+#all: $(RTG_MAIN) $(RPD_MAIN)
 
 RTG_SRCS =
 RTG_SRCS += rtg_tracer.cpp
@@ -71,6 +72,9 @@ CopyApiTable.o: hsa_rsrc_factory.h Table.h
 ApiIdList.o: ApiIdList.h
 rtg_tracer.o: flags.h
 rpd_tracer.o: flags.h
+
+rtg_hip_guard.so: rtg_hip_guard.cpp
+	hipcc -o $@ $< -shared -fPIC -std=c++14 -I/opt/rocm/include -D__HIP_PLATFORM_AMD__ -L/opt/rocm/lib -lamdhip64 $(CXXFLAGS) -Wl,-rpath,/opt/rocm/lib -ldl
 
 clean:
 	rm -f *.o *.so
