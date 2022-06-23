@@ -2,6 +2,8 @@
 ## Copyright (c) 2022 Advanced Micro Devices, Inc.
 ###########################################################################
 
+all: buffer_overflow
+
 dlopen_test: dlopen_test.c
 	$(CC) -o $@ $< -ldl
 
@@ -12,4 +14,4 @@ buffer_overflow: buffer_overflow.cpp
 	hipcc -o $@ $< -L/opt/rocm/lib -lamdhip64 -I/opt/rocm/include -D__HIP_PLATFORM_AMD__
 
 clean:
-	rm -f nccl-example dlopen_test
+	rm -f nccl-example dlopen_test buffer_overflow

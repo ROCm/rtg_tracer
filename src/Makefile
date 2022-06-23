@@ -6,7 +6,7 @@ HIP_PATH = /opt/rocm/hip
 HIPCC=$(HIP_PATH)/bin/hipcc
 
 ifeq ($(DEBUG), 1)
-CXXFLAGS = -g -O0
+CXXFLAGS = -g -O0 -Wall -DDEBUG=1
 else
 CXXFLAGS = -O3
 endif
