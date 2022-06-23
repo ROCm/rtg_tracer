@@ -1,6 +1,7 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#include <cxxabi.h>
 #include <dlfcn.h>
 
 #include <iostream>
@@ -33,9 +34,6 @@ static std::string LABEL = "HIP GUARD: ";
 #define TRACE(msg)
 #endif
 
-#define ARGS_HIPMALLOC  const void* function_address, dim3 numBlocks, dim3 dimBlocks, void** args, size_t sharedMemBytes, hipStream_t stream
-#define ARGS_HIPMALLOC_             function_address,      numBlocks,      dimBlocks,        args,        sharedMemBytes,             stream
-
 template <typename T, int size>
 struct Array {
     T data[size];
@@ -55,6 +53,14 @@ struct Array {
         }
     }
 };
+
+// C++ symbol demangle
+static inline const char* cxx_demangle(const char* symbol) {
+  size_t funcnamesize;
+  int status;
+  const char* ret = (symbol != NULL) ? abi::__cxa_demangle(symbol, NULL, &funcnamesize, &status) : symbol;
+  return (ret != NULL) ? ret : symbol;
+}
 
 static void save_ptr(void* ptr, size_t size)
 {
@@ -166,13 +172,19 @@ __global__ void guard_check(Array<int*,blocksPerGrid> guards, int num_guards, in
     }
 }
 
+struct CheckAnswerData {
+    int *answer;
+    std::string kernel_name;
+};
+
 void check_answer(hipStream_t stream, hipError_t status, void* userData)
 {
     TRACE("stream=" << stream << " status=" << status << " userData=" << userData);
-    int *answer = reinterpret_cast<int*>(userData);
-    if (*answer != 0) {
-        ERR("out of bounds found");
+    CheckAnswerData *data = reinterpret_cast<CheckAnswerData*>(userData);
+    if (*(data->answer) != 0) {
+        ERR("out of bounds found: " << data->kernel_name);
     }
+    delete data;
 }
 
 void free_answer(hipStream_t stream, hipError_t status, void* userData)
@@ -183,25 +195,8 @@ void free_answer(hipStream_t stream, hipError_t status, void* userData)
     th.detach();
 }
 
-hipError_t hipLaunchKernel(ARGS_HIPMALLOC)
+void launch_guard_check(std::string kernel_name, hipStream_t stream)
 {
-    TRACE("");
-    typedef hipError_t (*fptr)(ARGS_HIPMALLOC);
-    static fptr orig = NULL;
-
-    if (orig == NULL) {
-        orig = (fptr)dlsym(RTLD_NEXT, "hipLaunchKernel");
-        if (orig == NULL) {
-            ERR("dlsym: " << dlerror());
-            return hipErrorUnknown;
-        }
-    }
-
-    auto ret = orig(ARGS_HIPMALLOC_);
-
-    if (this_launch_is_our_guard_launch) return ret;
-
-    // prepare and run guard_check kernel
     hipError_t status = hipSuccess;
     int *answer = get_stream_guard_ptr(stream);
     Array<int*,blocksPerGrid> guards;
@@ -221,7 +216,7 @@ hipError_t hipLaunchKernel(ARGS_HIPMALLOC)
                 LOG("guard_check full");
                 this_launch_is_our_guard_launch = true;
                 guard_check<<<dim3(blocksPerGrid), dim3(threadsPerBlock), 0, stream>>>(guards, blocksPerGrid, answer);
-                status = hipStreamAddCallback(stream, check_answer, answer, 0);
+                status = hipStreamAddCallback(stream, check_answer, new CheckAnswerData{answer,kernel_name}, 0);
                 if (hipSuccess != status) {
                     ERR("hipStreamAddCallback failed: " << hipGetErrorString(status));
                 }
@@ -232,7 +227,7 @@ hipError_t hipLaunchKernel(ARGS_HIPMALLOC)
             LOG("guard_check partial i=" << i);
             this_launch_is_our_guard_launch = true;
             guard_check<<<dim3(i), dim3(threadsPerBlock), 0, stream>>>(guards, i, answer);
-            status = hipStreamAddCallback(stream, check_answer, answer, 0);
+            status = hipStreamAddCallback(stream, check_answer, new CheckAnswerData{answer,kernel_name}, 0);
             if (hipSuccess != status) {
                 ERR("hipStreamAddCallback failed: " << hipGetErrorString(status));
             }
@@ -242,6 +237,176 @@ hipError_t hipLaunchKernel(ARGS_HIPMALLOC)
             ERR("hipStreamAddCallback failed: " << hipGetErrorString(status));
         }
     }
+}
+
+#define ARGS_HIPLAUNCHKERNEL  const void* function_address, dim3 numBlocks, dim3 dimBlocks, void** args, size_t sharedMemBytes, hipStream_t stream
+#define ARGS_HIPLAUNCHKERNEL_             function_address,      numBlocks,      dimBlocks,        args,        sharedMemBytes,             stream
+hipError_t hipLaunchKernel(ARGS_HIPLAUNCHKERNEL)
+{
+    TRACE("");
+    typedef hipError_t (*fptr)(ARGS_HIPLAUNCHKERNEL);
+    static fptr orig = NULL;
+
+    if (orig == NULL) {
+        orig = (fptr)dlsym(RTLD_NEXT, "hipLaunchKernel");
+        if (orig == NULL) {
+            ERR("dlsym: " << dlerror());
+            return hipErrorUnknown;
+        }
+    }
+
+    auto ret = orig(ARGS_HIPLAUNCHKERNEL_);
+
+    if (this_launch_is_our_guard_launch) return ret;
+
+    std::string kernel_name = cxx_demangle(hipKernelNameRefByPtr(function_address, stream));
+
+    launch_guard_check(kernel_name, stream);
 
     return ret;
 }
+
+
+//hipLaunchCooperativeKernelMultiDevice TODO
+//hipExtLaunchMultiKernelMultiDevice TODO
+
+#define ARGS_HIPEXTLAUNCHKERNEL  const void* function_address, dim3 numBlocks, dim3 dimBlocks, void** args, size_t sharedMemBytes, hipStream_t stream, hipEvent_t startEvent, hipEvent_t stopEvent, int flags
+#define ARGS_HIPEXTLAUNCHKERNEL_             function_address,      numBlocks,      dimBlocks,        args,        sharedMemBytes,             stream,            startEvent,            stopEvent,     flags
+hipError_t hipExtLaunchKernel(ARGS_HIPEXTLAUNCHKERNEL)
+{
+    TRACE("");
+    typedef hipError_t (*fptr)(ARGS_HIPEXTLAUNCHKERNEL);
+    static fptr orig = NULL;
+
+    if (orig == NULL) {
+        orig = (fptr)dlsym(RTLD_NEXT, "hipExtLaunchKernel");
+        if (orig == NULL) {
+            ERR("dlsym: " << dlerror());
+            return hipErrorUnknown;
+        }
+    }
+
+    auto ret = orig(ARGS_HIPEXTLAUNCHKERNEL_);
+
+    if (this_launch_is_our_guard_launch) return ret;
+
+    std::string kernel_name = cxx_demangle(hipKernelNameRefByPtr(function_address, stream));
+
+    launch_guard_check(kernel_name, stream);
+
+    return ret;
+}
+
+
+#define ARGS_HIPLAUNCHCOOPERATIVEKERNEL  const void* f, dim3 gridDim, dim3 blockDimX, void** kernelParams, unsigned int sharedMemBytes, hipStream_t stream
+#define ARGS_HIPLAUNCHCOOPERATIVEKERNEL_             f,      gridDim,      blockDimX,        kernelParams,              sharedMemBytes,             stream
+hipError_t hipLaunchCooperativeKernel(ARGS_HIPLAUNCHCOOPERATIVEKERNEL)
+{
+    TRACE("");
+    typedef hipError_t (*fptr)(ARGS_HIPLAUNCHCOOPERATIVEKERNEL);
+    static fptr orig = NULL;
+
+    if (orig == NULL) {
+        orig = (fptr)dlsym(RTLD_NEXT, "hipLaunchCooperativeKernel");
+        if (orig == NULL) {
+            ERR("dlsym: " << dlerror());
+            return hipErrorUnknown;
+        }
+    }
+
+    auto ret = orig(ARGS_HIPLAUNCHCOOPERATIVEKERNEL_);
+
+    if (this_launch_is_our_guard_launch) return ret;
+
+    std::string kernel_name = cxx_demangle(hipKernelNameRefByPtr(f, stream));
+
+    launch_guard_check(kernel_name, stream);
+
+    return ret;
+}
+
+
+#define ARGS_HIPHCCMODULELAUNCHKERNEL  hipFunction_t f, uint32_t globalWorkSizeX, uint32_t globalWorkSizeY, uint32_t globalWorkSizeZ, uint32_t localWorkSizeX, uint32_t localWorkSizeY, uint32_t localWorkSizeZ, size_t sharedMemBytes, hipStream_t hStream, void** kernelParams, void** extra, hipEvent_t startEvent, hipEvent_t stopEvent
+#define ARGS_HIPHCCMODULELAUNCHKERNEL_               f,          globalWorkSizeX,          globalWorkSizeY,          globalWorkSizeZ,          localWorkSizeX,          localWorkSizeY,          localWorkSizeZ,        sharedMemBytes,             hStream,        kernelParams,        extra,            startEvent,            stopEvent
+hipError_t hipHccModuleLaunchKernel(ARGS_HIPHCCMODULELAUNCHKERNEL)
+{
+    TRACE("");
+    typedef hipError_t (*fptr)(ARGS_HIPHCCMODULELAUNCHKERNEL);
+    static fptr orig = NULL;
+
+    if (orig == NULL) {
+        orig = (fptr)dlsym(RTLD_NEXT, "hipHccModuleLaunchKernel");
+        if (orig == NULL) {
+            ERR("dlsym: " << dlerror());
+            return hipErrorUnknown;
+        }
+    }
+
+    auto ret = orig(ARGS_HIPHCCMODULELAUNCHKERNEL_);
+
+    if (this_launch_is_our_guard_launch) return ret;
+
+    std::string kernel_name = cxx_demangle(hipKernelNameRef(f));
+
+    launch_guard_check(kernel_name, hStream);
+
+    return ret;
+}
+
+
+#define ARGS_HIPMODULELAUNCHKERNEL  hipFunction_t f, unsigned int gridDimX, unsigned int gridDimY, unsigned int gridDimZ, unsigned int blockDimX, unsigned int blockDimY, unsigned int blockDimZ, unsigned int sharedMemBytes, hipStream_t stream, void** kernelParams, void** extra
+#define ARGS_HIPMODULELAUNCHKERNEL_               f,              gridDimX,              gridDimY,              gridDimZ,              blockDimX,              blockDimY,              blockDimZ,              sharedMemBytes,             stream,        kernelParams,        extra
+hipError_t hipModuleLaunchKernel(ARGS_HIPMODULELAUNCHKERNEL)
+{
+    TRACE("");
+    typedef hipError_t (*fptr)(ARGS_HIPMODULELAUNCHKERNEL);
+    static fptr orig = NULL;
+
+    if (orig == NULL) {
+        orig = (fptr)dlsym(RTLD_NEXT, "hipModuleLaunchKernel");
+        if (orig == NULL) {
+            ERR("dlsym: " << dlerror());
+            return hipErrorUnknown;
+        }
+    }
+
+    auto ret = orig(ARGS_HIPMODULELAUNCHKERNEL_);
+
+    if (this_launch_is_our_guard_launch) return ret;
+
+    std::string kernel_name = cxx_demangle(hipKernelNameRef(f));
+
+    launch_guard_check(kernel_name, stream);
+
+    return ret;
+}
+
+
+#define ARGS_HIPEXTMODULELAUNCHKERNEL  hipFunction_t f, uint32_t globalWorkSizeX, uint32_t globalWorkSizeY, uint32_t globalWorkSizeZ, uint32_t localWorkSizeX, uint32_t localWorkSizeY, uint32_t localWorkSizeZ, size_t sharedMemBytes, hipStream_t hStream, void** kernelParams, void** extra, hipEvent_t startEvent, hipEvent_t stopEvent, uint32_t flags
+#define ARGS_HIPEXTMODULELAUNCHKERNEL_               f,          globalWorkSizeX,          globalWorkSizeY,          globalWorkSizeZ,          localWorkSizeX,          localWorkSizeY,          localWorkSizeZ,        sharedMemBytes,             hStream,        kernelParams,        extra,            startEvent,            stopEvent,          flags
+hipError_t hipExtModuleLaunchKernel(ARGS_HIPEXTMODULELAUNCHKERNEL)
+{
+    TRACE("");
+    typedef hipError_t (*fptr)(ARGS_HIPEXTMODULELAUNCHKERNEL);
+    static fptr orig = NULL;
+
+    if (orig == NULL) {
+        orig = (fptr)dlsym(RTLD_NEXT, "hipExtModuleLaunchKernel");
+        if (orig == NULL) {
+            ERR("dlsym: " << dlerror());
+            return hipErrorUnknown;
+        }
+    }
+
+    auto ret = orig(ARGS_HIPEXTMODULELAUNCHKERNEL_);
+
+    if (this_launch_is_our_guard_launch) return ret;
+
+    std::string kernel_name = cxx_demangle(hipKernelNameRef(f));
+
+    launch_guard_check(kernel_name, hStream);
+
+    return ret;
+}
+
+// hipMemcpy et al TODO
