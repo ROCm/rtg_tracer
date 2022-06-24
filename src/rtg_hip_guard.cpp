@@ -118,6 +118,7 @@ static std::string backtrace()
 static void store_ptr(void* ptr, size_t size)
 {
     TRACE("ptr=" << ptr << " size=" << size);
+    if (ptr == NULL || size == 0) return;
     {
         std::lock_guard<std::mutex> lock(gs_allocations_mutex_);
         if (gs_allocations.find(ptr) != gs_allocations.end()) {
@@ -137,6 +138,7 @@ static void store_ptr(void* ptr, size_t size)
 static void release_ptr(void* ptr)
 {
     TRACE("ptr=" << ptr);
+    if (ptr == NULL) return;
     {
         std::lock_guard<std::mutex> lock(gs_allocations_mutex_);
         if (gs_allocations.find(ptr) == gs_allocations.end()) {
