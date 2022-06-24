@@ -12,6 +12,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 #include <hip/hip_runtime.h>
 //#include <hip/hip_runtime_api.h>
@@ -19,13 +20,25 @@
 #define GUARD_SIZE (2 * 1024 * 1024)
 #define GUARD_INT 0xdeadbeef
 #define GUARD_INT_COUNT (GUARD_SIZE / sizeof(int))
-static std::mutex gs_allocations_mutex_; // protects gs_allocations
+static std::mutex gs_allocations_mutex; // protects gs_allocations
 static std::unordered_map<void*, std::pair<size_t,int> > gs_allocations;
 static std::unordered_map<hipStream_t, int*> gs_stream_guard_ptr;
 constexpr int blocksPerGrid = 256;
 constexpr int threadsPerBlock = 256;
 
-static thread_local bool this_launch_is_our_guard_launch(false);
+static std::mutex gs_bad_kernels_mutex;
+static std::vector<std::string> gs_bad_kernels;
+
+static thread_local bool only_call_original_func(false);
+class OriginalBehaviorGuard {
+public:
+    OriginalBehaviorGuard() {
+        only_call_original_func = true;
+    }
+    ~OriginalBehaviorGuard() {
+        only_call_original_func = false;
+    }
+};
 
 #define OUT std::cerr
 //#define OUT std::cout
@@ -117,6 +130,14 @@ static std::string backtrace()
   return os.str();
 }
 
+__global__ void my_memset(int *buf)
+{
+    int tid = blockDim.x * blockIdx.x + threadIdx.x;
+    if (tid < GUARD_INT_COUNT) {
+        buf[tid] = GUARD_INT;
+    }
+}
+
 static void store_ptr(void* ptr, size_t size)
 {
     TRACE("ptr=" << ptr << " size=" << size);
@@ -129,21 +150,37 @@ static void store_ptr(void* ptr, size_t size)
         ERR("hipGetDevice failed: " << hipGetErrorString(status));
     }
 
+    // don't store null pointers (0-size is okay)
     if (ptr == NULL) return;
+
+    // store ptr in map
     {
-        std::lock_guard<std::mutex> lock(gs_allocations_mutex_);
+        std::lock_guard<std::mutex> lock(gs_allocations_mutex);
         if (gs_allocations.find(ptr) != gs_allocations.end()) {
             ERR("collision");
         }
         gs_allocations[ptr] = std::make_pair(size,dev);
     }
 
+    // initialize guard buffer with guard values
     int *guard = (int*)(((char*)(ptr)) + size);
     LOG("guard=" << guard);
+    // cannot use hipMemsetD32 -- sometimes memory is unaligned and it fails
+#if 0
     status = hipMemsetD32(guard, GUARD_INT, GUARD_INT_COUNT);
     if (hipSuccess != status) {
         ERR("memset guard failed: " << hipGetErrorString(status));
     }
+#else
+    // Number of threads in each thread block
+    int blockSize = 1024;
+    // Number of thread blocks in grid
+    int gridSize = (int)ceil((float)GUARD_INT_COUNT/blockSize);
+    // protect against recursive calls
+    OriginalBehaviorGuard og;
+    // launch
+    my_memset<<<dim3(gridSize), dim3(blockSize), 0, 0>>>(guard);
+#endif
 }
 
 static void release_ptr(void* ptr)
@@ -152,7 +189,7 @@ static void release_ptr(void* ptr)
 
     if (ptr == NULL) return;
     {
-        std::lock_guard<std::mutex> lock(gs_allocations_mutex_);
+        std::lock_guard<std::mutex> lock(gs_allocations_mutex);
         if (gs_allocations.find(ptr) == gs_allocations.end()) {
             ERR("ptr=" << ptr << " not found");
             ERR("backtrace:\n" << backtrace());
@@ -163,21 +200,11 @@ static void release_ptr(void* ptr)
     }
 }
 
-static int* get_stream_guard_ptr(hipStream_t stream)
+static int* malloc_answer()
 {
-    TRACE("stream=" << stream);
+    TRACE("");
 
-#if 0
-    std::lock_guard<std::mutex> lock(gs_allocations_mutex_);
-    if (gs_stream_guard_ptr.find(stream) == gs_stream_guard_ptr.end()) {
-        int *ptr = NULL;
-        if (hipSuccess != hipHostMalloc(&ptr, sizeof(int), 0)) {
-            ERR("hipHostMalloc failed");
-        }
-        gs_stream_guard_ptr[stream] = ptr;
-    }
-    return gs_stream_guard_ptr[stream];
-#else
+#if 1
     int *ptr = NULL;
     auto status = hipHostMalloc(&ptr, sizeof(int), 0);
     if (hipSuccess != status) {
@@ -185,16 +212,38 @@ static int* get_stream_guard_ptr(hipStream_t stream)
     }
     *ptr = 0;
     return ptr;
+#else
+    OriginalBehaviorGuard og;
+
+    int *ptr = NULL;
+    auto status = hipMalloc(&ptr, sizeof(int));
+    if (hipSuccess != status) {
+        ERR("hipHostMalloc failed: " << hipGetErrorString(status));
+    }
+    status = hipMemset(ptr, 0, sizeof(int));
+    if (hipSuccess != status) {
+        ERR("memset answer failed: " << hipGetErrorString(status));
+    }
+    return ptr;
 #endif
 }
 
 static void release_stream_guard_ptr(void *ptr) {
     TRACE("ptr=" << ptr);
 
+#if 1
     auto status = hipHostFree(ptr);
     if (hipSuccess != status) {
         ERR("hipHostFree failed: " << hipGetErrorString(status));
     }
+#else
+    OriginalBehaviorGuard og;
+
+    auto status = hipFree(ptr);
+    if (hipSuccess != status) {
+        ERR("hipHostFree failed: " << hipGetErrorString(status));
+    }
+#endif
 }
 
 hipError_t hipMalloc(void** ptr, size_t size)
@@ -212,14 +261,21 @@ hipError_t hipMalloc(void** ptr, size_t size)
         }
     }
 
-    auto new_size = size + GUARD_SIZE;
+    size_t new_size = size;
+    if (!only_call_original_func) {
+        new_size += GUARD_SIZE;
+    }
+
     auto status = orig(ptr, new_size);
     if (hipSuccess != status) {
         ERR(hipGetErrorString(status));
     }
     LOG("*ptr=" << *ptr);
 
-    store_ptr(*ptr, size);
+    if (!only_call_original_func) {
+        store_ptr(*ptr, size);
+    }
+
     return status;
 }
 
@@ -290,7 +346,9 @@ hipError_t hipFree(void* ptr)
         }
     }
 
-    release_ptr(ptr);
+    if (!only_call_original_func) {
+        release_ptr(ptr);
+    }
 
     auto status = orig(ptr);
     if (hipSuccess != status) {
@@ -346,25 +404,20 @@ void check_answer(hipStream_t stream, hipError_t status, void* userData)
     CheckAnswerData *data = reinterpret_cast<CheckAnswerData*>(userData);
     if (*(data->answer) != 0) {
         RPT("out of bounds found: " << data->kernel_name);
+        std::lock_guard<std::mutex> lock(gs_bad_kernels_mutex);
+        gs_bad_kernels.push_back(data->kernel_name);
     }
-    delete data;
-}
-
-void free_answer(hipStream_t stream, hipError_t status, void* userData)
-{
-    TRACE("stream=" << stream << " status=" << status << " userData=" << userData);
 
     // must be in separate thread or hangs the runtime
-    auto th = std::thread(release_stream_guard_ptr, userData);
+    auto th = std::thread(release_stream_guard_ptr, data->answer);
     th.detach();
+
+    delete data;
 }
 
 void launch_guard_check(std::string kernel_name, hipStream_t stream)
 {
     TRACE("kernel_name=" << kernel_name << " stream=" << stream);
-
-    // protect against recursive calls
-    this_launch_is_our_guard_launch = true;
 
     hipError_t status = hipSuccess;
 
@@ -374,13 +427,12 @@ void launch_guard_check(std::string kernel_name, hipStream_t stream)
         ERR("hipGetDevice failed: " << hipGetErrorString(status));
     }
 
-    int *answer = get_stream_guard_ptr(stream);
     Array<int*,blocksPerGrid> guards;
     for (int i=0; i<blocksPerGrid; i++) {
         guards[i] = NULL;
     }
     {
-        std::lock_guard<std::mutex> lock(gs_allocations_mutex_);
+        std::lock_guard<std::mutex> lock(gs_allocations_mutex);
         int i = 0;
         for (auto& it: gs_allocations) {
             void *ptr = it.first;
@@ -394,7 +446,11 @@ void launch_guard_check(std::string kernel_name, hipStream_t stream)
             }
             if (i == blocksPerGrid) {
                 LOG("guard_check full");
-                guard_check<<<dim3(blocksPerGrid), dim3(threadsPerBlock), 0, stream>>>(guards, blocksPerGrid, answer);
+                int *answer = malloc_answer();
+                {
+                    OriginalBehaviorGuard og;
+                    guard_check<<<dim3(blocksPerGrid), dim3(threadsPerBlock), 0, stream>>>(guards, blocksPerGrid, answer);
+                }
                 status = hipStreamAddCallback(stream, check_answer, new CheckAnswerData{answer,kernel_name}, 0);
                 if (hipSuccess != status) {
                     ERR("hipStreamAddCallback failed: " << hipGetErrorString(status));
@@ -404,15 +460,15 @@ void launch_guard_check(std::string kernel_name, hipStream_t stream)
         }
         if (i > 0) {
             LOG("guard_check partial i=" << i);
-            guard_check<<<dim3(i), dim3(threadsPerBlock), 0, stream>>>(guards, i, answer);
+            int *answer = malloc_answer();
+            {
+                OriginalBehaviorGuard og;
+                guard_check<<<dim3(i), dim3(threadsPerBlock), 0, stream>>>(guards, i, answer);
+            }
             status = hipStreamAddCallback(stream, check_answer, new CheckAnswerData{answer,kernel_name}, 0);
             if (hipSuccess != status) {
                 ERR("hipStreamAddCallback failed: " << hipGetErrorString(status));
             }
-        }
-        status = hipStreamAddCallback(stream, free_answer, answer, 0);
-        if (hipSuccess != status) {
-            ERR("hipStreamAddCallback failed: " << hipGetErrorString(status));
         }
     }
 }
@@ -436,7 +492,7 @@ hipError_t hipLaunchKernel(ARGS_HIPLAUNCHKERNEL)
 
     auto ret = orig(ARGS_HIPLAUNCHKERNEL_);
 
-    if (this_launch_is_our_guard_launch) return ret;
+    if (only_call_original_func) return ret;
 
     std::string kernel_name = cxx_demangle(hipKernelNameRefByPtr(function_address, stream));
 
@@ -468,7 +524,7 @@ extern "C" hipError_t hipExtLaunchKernel(ARGS_HIPEXTLAUNCHKERNEL)
 
     auto ret = orig(ARGS_HIPEXTLAUNCHKERNEL_);
 
-    if (this_launch_is_our_guard_launch) return ret;
+    if (only_call_original_func) return ret;
 
     std::string kernel_name = cxx_demangle(hipKernelNameRefByPtr(function_address, stream));
 
@@ -497,7 +553,7 @@ hipError_t hipLaunchCooperativeKernel(ARGS_HIPLAUNCHCOOPERATIVEKERNEL)
 
     auto ret = orig(ARGS_HIPLAUNCHCOOPERATIVEKERNEL_);
 
-    if (this_launch_is_our_guard_launch) return ret;
+    if (only_call_original_func) return ret;
 
     std::string kernel_name = cxx_demangle(hipKernelNameRefByPtr(f, stream));
 
@@ -526,7 +582,7 @@ hipError_t hipHccModuleLaunchKernel(ARGS_HIPHCCMODULELAUNCHKERNEL)
 
     auto ret = orig(ARGS_HIPHCCMODULELAUNCHKERNEL_);
 
-    if (this_launch_is_our_guard_launch) return ret;
+    if (only_call_original_func) return ret;
 
     std::string kernel_name = cxx_demangle(hipKernelNameRef(f));
 
@@ -555,7 +611,7 @@ hipError_t hipModuleLaunchKernel(ARGS_HIPMODULELAUNCHKERNEL)
 
     auto ret = orig(ARGS_HIPMODULELAUNCHKERNEL_);
 
-    if (this_launch_is_our_guard_launch) return ret;
+    if (only_call_original_func) return ret;
 
     std::string kernel_name = cxx_demangle(hipKernelNameRef(f));
 
@@ -585,13 +641,20 @@ hipError_t hipExtModuleLaunchKernel(ARGS_HIPEXTMODULELAUNCHKERNEL)
 
     auto ret = orig(ARGS_HIPEXTMODULELAUNCHKERNEL_);
 
-    if (this_launch_is_our_guard_launch) return ret;
+    if (only_call_original_func) return ret;
 
     std::string kernel_name = cxx_demangle(hipKernelNameRef(f));
 
     launch_guard_check(kernel_name, hStream);
 
     return ret;
+}
+
+__attribute__((destructor)) static void destroy() {
+    RPT("destructor");
+    for (auto& name : gs_bad_kernels) {
+        RPT("[destructor report] out of bounds found: " << name);
+    }
 }
 
 // hipMemcpy et al TODO
