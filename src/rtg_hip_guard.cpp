@@ -155,6 +155,56 @@ hipError_t hipMalloc(void** ptr, size_t size)
     return status;
 }
 
+hipError_t hipExtMallocWithFlags(void** ptr, size_t size, unsigned int flags)
+{
+    TRACE("**ptr=" << ptr << " size=" << size << " flags=" << flags);
+    typedef hipError_t (*fptr)(void** ptr, size_t size, unsigned int flags);
+    static fptr orig = NULL;
+
+    if (orig == NULL) {
+        orig = (fptr)dlsym(RTLD_NEXT, "hipExtMallocWithFlags");
+        if (orig == NULL) {
+            ERR("dlsym: " << dlerror());
+            return hipErrorUnknown;
+        }
+    }
+
+    auto new_size = size + GUARD_SIZE;
+    auto status = orig(ptr, new_size, flags);
+    if (hipSuccess != status) {
+        ERR(hipGetErrorString(status));
+    }
+    LOG("*ptr=" << *ptr);
+
+    store_ptr(*ptr, size);
+    return status;
+}
+
+hipError_t hipMallocManaged(void** ptr, size_t size, unsigned int flags)
+{
+    TRACE("**ptr=" << ptr << " size=" << size << " flags=" << flags);
+    typedef hipError_t (*fptr)(void** ptr, size_t size, unsigned int flags);
+    static fptr orig = NULL;
+
+    if (orig == NULL) {
+        orig = (fptr)dlsym(RTLD_NEXT, "hipMallocManaged");
+        if (orig == NULL) {
+            ERR("dlsym: " << dlerror());
+            return hipErrorUnknown;
+        }
+    }
+
+    auto new_size = size + GUARD_SIZE;
+    auto status = orig(ptr, new_size, flags);
+    if (hipSuccess != status) {
+        ERR(hipGetErrorString(status));
+    }
+    LOG("*ptr=" << *ptr);
+
+    store_ptr(*ptr, size);
+    return status;
+}
+
 hipError_t hipFree(void* ptr)
 {
     TRACE("ptr=" << ptr);
