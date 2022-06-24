@@ -3,6 +3,8 @@
 #endif
 #include <cxxabi.h>
 #include <dlfcn.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 #include <iostream>
 #include <iomanip>
@@ -27,12 +29,12 @@ static thread_local bool this_launch_is_our_guard_launch(false);
 
 #define OUT std::cerr
 //#define OUT std::cout
-static std::string LABEL = "HIP GUARD: ";
-#define ERR(msg) OUT << LABEL << __func__ << ": " << msg << std::endl
-#define RPT(msg) OUT << LABEL << msg << std::endl
+#define PREFIX "HIP GUARD: " << getpid() << ": " << std::this_thread::get_id() << ": "
+#define ERR(msg) OUT << PREFIX << __func__ << ": " << msg << std::endl
+#define RPT(msg) OUT << PREFIX << msg << std::endl
 #if DEBUG == 1
-#define LOG(msg) OUT << LABEL << __func__ << ": " << msg << std::endl
-#define TRACE(msg) OUT << LABEL << __func__ << ": " << msg << std::endl
+#define LOG(msg) OUT << PREFIX << __func__ << ": " << msg << std::endl
+#define TRACE(msg) OUT << PREFIX << __func__ << ": " << msg << std::endl
 #else
 #define LOG(msg)
 #define TRACE(msg)
@@ -118,6 +120,7 @@ static std::string backtrace()
 static void store_ptr(void* ptr, size_t size)
 {
     TRACE("ptr=" << ptr << " size=" << size);
+
     int dev = 0;
     hipError_t status = hipSuccess;
 
@@ -126,7 +129,7 @@ static void store_ptr(void* ptr, size_t size)
         ERR("hipGetDevice failed: " << hipGetErrorString(status));
     }
 
-    if (ptr == NULL || size == 0) return;
+    if (ptr == NULL) return;
     {
         std::lock_guard<std::mutex> lock(gs_allocations_mutex_);
         if (gs_allocations.find(ptr) != gs_allocations.end()) {
@@ -146,12 +149,13 @@ static void store_ptr(void* ptr, size_t size)
 static void release_ptr(void* ptr)
 {
     TRACE("ptr=" << ptr);
+
     if (ptr == NULL) return;
     {
         std::lock_guard<std::mutex> lock(gs_allocations_mutex_);
         if (gs_allocations.find(ptr) == gs_allocations.end()) {
-            ERR("not found");
-            ERR(backtrace());
+            ERR("ptr=" << ptr << " not found");
+            ERR("backtrace:\n" << backtrace());
         }
         else {
             gs_allocations.erase(ptr);
@@ -162,6 +166,7 @@ static void release_ptr(void* ptr)
 static int* get_stream_guard_ptr(hipStream_t stream)
 {
     TRACE("stream=" << stream);
+
 #if 0
     std::lock_guard<std::mutex> lock(gs_allocations_mutex_);
     if (gs_stream_guard_ptr.find(stream) == gs_stream_guard_ptr.end()) {
@@ -185,6 +190,7 @@ static int* get_stream_guard_ptr(hipStream_t stream)
 
 static void release_stream_guard_ptr(void *ptr) {
     TRACE("ptr=" << ptr);
+
     auto status = hipHostFree(ptr);
     if (hipSuccess != status) {
         ERR("hipHostFree failed: " << hipGetErrorString(status));
@@ -194,6 +200,7 @@ static void release_stream_guard_ptr(void *ptr) {
 hipError_t hipMalloc(void** ptr, size_t size)
 {
     TRACE("**ptr=" << ptr << " size=" << size);
+
     typedef hipError_t (*fptr)(void** ptr, size_t size);
     static fptr orig = NULL;
 
@@ -219,6 +226,7 @@ hipError_t hipMalloc(void** ptr, size_t size)
 hipError_t hipExtMallocWithFlags(void** ptr, size_t size, unsigned int flags)
 {
     TRACE("**ptr=" << ptr << " size=" << size << " flags=" << flags);
+
     typedef hipError_t (*fptr)(void** ptr, size_t size, unsigned int flags);
     static fptr orig = NULL;
 
@@ -244,6 +252,7 @@ hipError_t hipExtMallocWithFlags(void** ptr, size_t size, unsigned int flags)
 hipError_t hipMallocManaged(void** ptr, size_t size, unsigned int flags)
 {
     TRACE("**ptr=" << ptr << " size=" << size << " flags=" << flags);
+
     typedef hipError_t (*fptr)(void** ptr, size_t size, unsigned int flags);
     static fptr orig = NULL;
 
@@ -269,6 +278,7 @@ hipError_t hipMallocManaged(void** ptr, size_t size, unsigned int flags)
 hipError_t hipFree(void* ptr)
 {
     TRACE("ptr=" << ptr);
+
     typedef hipError_t (*fptr)(void* ptr);
     static fptr orig = NULL;
 
@@ -332,6 +342,7 @@ struct CheckAnswerData {
 void check_answer(hipStream_t stream, hipError_t status, void* userData)
 {
     TRACE("stream=" << stream << " status=" << status << " userData=" << userData);
+
     CheckAnswerData *data = reinterpret_cast<CheckAnswerData*>(userData);
     if (*(data->answer) != 0) {
         RPT("out of bounds found: " << data->kernel_name);
@@ -341,14 +352,17 @@ void check_answer(hipStream_t stream, hipError_t status, void* userData)
 
 void free_answer(hipStream_t stream, hipError_t status, void* userData)
 {
-    // must be in separate thread or hangs the runtime
     TRACE("stream=" << stream << " status=" << status << " userData=" << userData);
+
+    // must be in separate thread or hangs the runtime
     auto th = std::thread(release_stream_guard_ptr, userData);
     th.detach();
 }
 
 void launch_guard_check(std::string kernel_name, hipStream_t stream)
 {
+    TRACE("kernel_name=" << kernel_name << " stream=" << stream);
+
     // protect against recursive calls
     this_launch_is_our_guard_launch = true;
 
@@ -408,6 +422,7 @@ void launch_guard_check(std::string kernel_name, hipStream_t stream)
 hipError_t hipLaunchKernel(ARGS_HIPLAUNCHKERNEL)
 {
     TRACE("");
+
     typedef hipError_t (*fptr)(ARGS_HIPLAUNCHKERNEL);
     static fptr orig = NULL;
 
@@ -439,6 +454,7 @@ hipError_t hipLaunchKernel(ARGS_HIPLAUNCHKERNEL)
 extern "C" hipError_t hipExtLaunchKernel(ARGS_HIPEXTLAUNCHKERNEL)
 {
     TRACE("");
+
     typedef hipError_t (*fptr)(ARGS_HIPEXTLAUNCHKERNEL);
     static fptr orig = NULL;
 
@@ -467,6 +483,7 @@ extern "C" hipError_t hipExtLaunchKernel(ARGS_HIPEXTLAUNCHKERNEL)
 hipError_t hipLaunchCooperativeKernel(ARGS_HIPLAUNCHCOOPERATIVEKERNEL)
 {
     TRACE("");
+
     typedef hipError_t (*fptr)(ARGS_HIPLAUNCHCOOPERATIVEKERNEL);
     static fptr orig = NULL;
 
@@ -495,6 +512,7 @@ hipError_t hipLaunchCooperativeKernel(ARGS_HIPLAUNCHCOOPERATIVEKERNEL)
 hipError_t hipHccModuleLaunchKernel(ARGS_HIPHCCMODULELAUNCHKERNEL)
 {
     TRACE("");
+
     typedef hipError_t (*fptr)(ARGS_HIPHCCMODULELAUNCHKERNEL);
     static fptr orig = NULL;
 
@@ -523,6 +541,7 @@ hipError_t hipHccModuleLaunchKernel(ARGS_HIPHCCMODULELAUNCHKERNEL)
 hipError_t hipModuleLaunchKernel(ARGS_HIPMODULELAUNCHKERNEL)
 {
     TRACE("");
+
     typedef hipError_t (*fptr)(ARGS_HIPMODULELAUNCHKERNEL);
     static fptr orig = NULL;
 
@@ -551,6 +570,7 @@ hipError_t hipModuleLaunchKernel(ARGS_HIPMODULELAUNCHKERNEL)
 hipError_t hipExtModuleLaunchKernel(ARGS_HIPEXTMODULELAUNCHKERNEL)
 {
     TRACE("");
+
     typedef hipError_t (*fptr)(ARGS_HIPEXTMODULELAUNCHKERNEL);
     static fptr orig = NULL;
 
