@@ -228,7 +228,7 @@ static int* malloc_answer()
 #endif
 }
 
-static void release_stream_guard_ptr(void *ptr) {
+static void free_answer(void *ptr) {
     TRACE("ptr=" << ptr);
 
 #if 1
@@ -262,9 +262,7 @@ hipError_t hipMalloc(void** ptr, size_t size)
     }
 
     size_t new_size = size;
-    if (!only_call_original_func) {
-        new_size += GUARD_SIZE;
-    }
+    new_size += GUARD_SIZE;
 
     auto status = orig(ptr, new_size);
     if (hipSuccess != status) {
@@ -272,9 +270,7 @@ hipError_t hipMalloc(void** ptr, size_t size)
     }
     LOG("*ptr=" << *ptr);
 
-    if (!only_call_original_func) {
-        store_ptr(*ptr, size);
-    }
+    store_ptr(*ptr, size);
 
     return status;
 }
@@ -346,9 +342,7 @@ hipError_t hipFree(void* ptr)
         }
     }
 
-    if (!only_call_original_func) {
-        release_ptr(ptr);
-    }
+    release_ptr(ptr);
 
     auto status = orig(ptr);
     if (hipSuccess != status) {
@@ -409,7 +403,7 @@ void check_answer(hipStream_t stream, hipError_t status, void* userData)
     }
 
     // must be in separate thread or hangs the runtime
-    auto th = std::thread(release_stream_guard_ptr, data->answer);
+    auto th = std::thread(free_answer, data->answer);
     th.detach();
 
     delete data;
@@ -651,7 +645,9 @@ hipError_t hipExtModuleLaunchKernel(ARGS_HIPEXTMODULELAUNCHKERNEL)
 }
 
 __attribute__((destructor)) static void destroy() {
-    RPT("destructor");
+    if (!gs_bad_kernels.empty()) {
+        RPT("destructor");
+    }
     for (auto& name : gs_bad_kernels) {
         RPT("[destructor report] out of bounds found: " << name);
     }
