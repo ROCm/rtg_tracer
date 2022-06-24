@@ -5,6 +5,7 @@
 #include <dlfcn.h>
 
 #include <iostream>
+#include <iomanip>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -65,6 +66,55 @@ static inline const char* cxx_demangle(const char* symbol) {
   return (ret != NULL) ? ret : symbol;
 }
 
+#define UNW_LOCAL_ONLY
+#include <libunwind.h>
+static std::string backtrace()
+{
+  std::ostringstream os;
+
+  unw_cursor_t cursor;
+  unw_context_t context;
+
+  unw_getcontext(&context);
+  unw_init_local(&cursor, &context);
+
+  int n=0;
+  while ( unw_step(&cursor) ) {
+    unw_word_t ip, sp, off;
+
+    unw_get_reg(&cursor, UNW_REG_IP, &ip);
+    unw_get_reg(&cursor, UNW_REG_SP, &sp);
+
+    char symbol[256] = {"<unknown>"};
+    char *name = symbol;
+
+    if ( !unw_get_proc_name(&cursor, symbol, sizeof(symbol), &off) ) {
+      int status;
+      if ( (name = abi::__cxa_demangle(symbol, NULL, NULL, &status)) == 0 )
+        name = symbol;
+    }
+
+#if 0
+    fprintf(stderr, "#%-2d 0x%016" PRIxPTR " sp=0x%016" PRIxPTR " %s + 0x%" PRIxPTR "\n",
+        ++n,
+        static_cast<uintptr_t>(ip),
+        static_cast<uintptr_t>(sp),
+        name,
+        static_cast<uintptr_t>(off));
+#else
+    os << "#" << std::left << std::setw(2) << ++n << " " << (void*)ip << " sp=" << (void*)sp << " " << name << " + " << (void*)off << std::endl;
+#endif
+
+    if ( name != symbol )
+      free(name);
+
+    // stop after 20 frames
+    if (n>20) break;
+  }
+
+  return os.str();
+}
+
 static void store_ptr(void* ptr, size_t size)
 {
     TRACE("ptr=" << ptr << " size=" << size);
@@ -91,6 +141,7 @@ static void release_ptr(void* ptr)
         std::lock_guard<std::mutex> lock(gs_allocations_mutex_);
         if (gs_allocations.find(ptr) == gs_allocations.end()) {
             ERR("not found");
+            ERR(backtrace());
         }
         else {
             gs_allocations.erase(ptr);

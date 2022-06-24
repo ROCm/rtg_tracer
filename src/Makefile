@@ -76,7 +76,7 @@ rtg_tracer.o: flags.h
 rpd_tracer.o: flags.h
 
 rtg_hip_guard.so: rtg_hip_guard.cpp
-	hipcc -o $@ $< -shared -fPIC -std=c++14 -I/opt/rocm/include -D__HIP_PLATFORM_AMD__ -L/opt/rocm/lib -lamdhip64 $(CXXFLAGS) -Wl,-rpath,/opt/rocm/lib -ldl
+	hipcc -o $@ $< -shared -fPIC -std=c++14 -I/opt/rocm/include -D__HIP_PLATFORM_AMD__ -L/opt/rocm/lib -lamdhip64 -lunwind $(CXXFLAGS) -Wl,-rpath,/opt/rocm/lib -ldl
 
 clean:
 	rm -f *.o *.so
