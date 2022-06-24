@@ -137,7 +137,7 @@ hipError_t hipMalloc(void** ptr, size_t size)
     static fptr orig = NULL;
 
     if (orig == NULL) {
-        orig = (fptr)dlsym(RTLD_NEXT, "hipMalloc");
+        orig = (fptr)dlsym(RTLD_NEXT, __func__);
         if (orig == NULL) {
             ERR("dlsym: " << dlerror());
             return hipErrorUnknown;
@@ -162,7 +162,7 @@ hipError_t hipExtMallocWithFlags(void** ptr, size_t size, unsigned int flags)
     static fptr orig = NULL;
 
     if (orig == NULL) {
-        orig = (fptr)dlsym(RTLD_NEXT, "hipExtMallocWithFlags");
+        orig = (fptr)dlsym(RTLD_NEXT, __func__);
         if (orig == NULL) {
             ERR("dlsym: " << dlerror());
             return hipErrorUnknown;
@@ -187,7 +187,7 @@ hipError_t hipMallocManaged(void** ptr, size_t size, unsigned int flags)
     static fptr orig = NULL;
 
     if (orig == NULL) {
-        orig = (fptr)dlsym(RTLD_NEXT, "hipMallocManaged");
+        orig = (fptr)dlsym(RTLD_NEXT, __func__);
         if (orig == NULL) {
             ERR("dlsym: " << dlerror());
             return hipErrorUnknown;
@@ -212,7 +212,7 @@ hipError_t hipFree(void* ptr)
     static fptr orig = NULL;
 
     if (orig == NULL) {
-        orig = (fptr)dlsym(RTLD_NEXT, "hipFree");
+        orig = (fptr)dlsym(RTLD_NEXT, __func__);
         if (orig == NULL) {
             ERR("dlsym: " << dlerror());
             return hipErrorUnknown;
@@ -340,7 +340,7 @@ hipError_t hipLaunchKernel(ARGS_HIPLAUNCHKERNEL)
     static fptr orig = NULL;
 
     if (orig == NULL) {
-        orig = (fptr)dlsym(RTLD_NEXT, "hipLaunchKernel");
+        orig = (fptr)dlsym(RTLD_NEXT, __func__);
         if (orig == NULL) {
             ERR("dlsym: " << dlerror());
             return hipErrorUnknown;
@@ -371,7 +371,7 @@ extern "C" hipError_t hipExtLaunchKernel(ARGS_HIPEXTLAUNCHKERNEL)
     static fptr orig = NULL;
 
     if (orig == NULL) {
-        orig = (fptr)dlsym(RTLD_NEXT, "hipExtLaunchKernel");
+        orig = (fptr)dlsym(RTLD_NEXT, __func__);
         if (orig == NULL) {
             ERR("dlsym: " << dlerror());
             return hipErrorUnknown;
@@ -399,7 +399,7 @@ hipError_t hipLaunchCooperativeKernel(ARGS_HIPLAUNCHCOOPERATIVEKERNEL)
     static fptr orig = NULL;
 
     if (orig == NULL) {
-        orig = (fptr)dlsym(RTLD_NEXT, "hipLaunchCooperativeKernel");
+        orig = (fptr)dlsym(RTLD_NEXT, __func__);
         if (orig == NULL) {
             ERR("dlsym: " << dlerror());
             return hipErrorUnknown;
@@ -427,7 +427,7 @@ hipError_t hipHccModuleLaunchKernel(ARGS_HIPHCCMODULELAUNCHKERNEL)
     static fptr orig = NULL;
 
     if (orig == NULL) {
-        orig = (fptr)dlsym(RTLD_NEXT, "hipHccModuleLaunchKernel");
+        orig = (fptr)dlsym(RTLD_NEXT, __func__);
         if (orig == NULL) {
             ERR("dlsym: " << dlerror());
             return hipErrorUnknown;
@@ -455,7 +455,7 @@ hipError_t hipModuleLaunchKernel(ARGS_HIPMODULELAUNCHKERNEL)
     static fptr orig = NULL;
 
     if (orig == NULL) {
-        orig = (fptr)dlsym(RTLD_NEXT, "hipModuleLaunchKernel");
+        orig = (fptr)dlsym(RTLD_NEXT, __func__);
         if (orig == NULL) {
             ERR("dlsym: " << dlerror());
             return hipErrorUnknown;
@@ -483,7 +483,7 @@ hipError_t hipExtModuleLaunchKernel(ARGS_HIPEXTMODULELAUNCHKERNEL)
     static fptr orig = NULL;
 
     if (orig == NULL) {
-        //orig = (fptr)dlsym(RTLD_NEXT, "hipExtModuleLaunchKernel");
+        //orig = (fptr)dlsym(RTLD_NEXT, __func__);
         orig = (fptr)dlsym(RTLD_NEXT, "_Z24hipExtModuleLaunchKernelP18ihipModuleSymbol_tjjjjjjmP12ihipStream_tPPvS4_P11ihipEvent_tS6_j");
         if (orig == NULL) {
             ERR("dlsym: " << dlerror());
