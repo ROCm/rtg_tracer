@@ -65,7 +65,7 @@ static inline const char* cxx_demangle(const char* symbol) {
   return (ret != NULL) ? ret : symbol;
 }
 
-static void save_ptr(void* ptr, size_t size)
+static void store_ptr(void* ptr, size_t size)
 {
     TRACE("ptr=" << ptr << " size=" << size);
     {
@@ -81,6 +81,20 @@ static void save_ptr(void* ptr, size_t size)
     auto status = hipMemsetD32(guard, GUARD_INT, GUARD_INT_COUNT);
     if (hipSuccess != status) {
         ERR("memset guard failed: " << hipGetErrorString(status));
+    }
+}
+
+static void release_ptr(void* ptr)
+{
+    TRACE("ptr=" << ptr);
+    {
+        std::lock_guard<std::mutex> lock(gs_allocations_mutex_);
+        if (gs_allocations.find(ptr) == gs_allocations.end()) {
+            ERR("not found");
+        }
+        else {
+            gs_allocations.erase(ptr);
+        }
     }
 }
 
@@ -137,7 +151,31 @@ hipError_t hipMalloc(void** ptr, size_t size)
     }
     LOG("*ptr=" << *ptr);
 
-    save_ptr(*ptr, size);
+    store_ptr(*ptr, size);
+    return status;
+}
+
+hipError_t hipFree(void* ptr)
+{
+    TRACE("ptr=" << ptr);
+    typedef hipError_t (*fptr)(void* ptr);
+    static fptr orig = NULL;
+
+    if (orig == NULL) {
+        orig = (fptr)dlsym(RTLD_NEXT, "hipFree");
+        if (orig == NULL) {
+            ERR("dlsym: " << dlerror());
+            return hipErrorUnknown;
+        }
+    }
+
+    release_ptr(ptr);
+
+    auto status = orig(ptr);
+    if (hipSuccess != status) {
+        ERR(hipGetErrorString(status));
+    }
+
     return status;
 }
 
@@ -276,7 +314,7 @@ hipError_t hipLaunchKernel(ARGS_HIPLAUNCHKERNEL)
 
 #define ARGS_HIPEXTLAUNCHKERNEL  const void* function_address, dim3 numBlocks, dim3 dimBlocks, void** args, size_t sharedMemBytes, hipStream_t stream, hipEvent_t startEvent, hipEvent_t stopEvent, int flags
 #define ARGS_HIPEXTLAUNCHKERNEL_             function_address,      numBlocks,      dimBlocks,        args,        sharedMemBytes,             stream,            startEvent,            stopEvent,     flags
-hipError_t hipExtLaunchKernel(ARGS_HIPEXTLAUNCHKERNEL)
+extern "C" hipError_t hipExtLaunchKernel(ARGS_HIPEXTLAUNCHKERNEL)
 {
     TRACE("");
     typedef hipError_t (*fptr)(ARGS_HIPEXTLAUNCHKERNEL);
@@ -395,7 +433,8 @@ hipError_t hipExtModuleLaunchKernel(ARGS_HIPEXTMODULELAUNCHKERNEL)
     static fptr orig = NULL;
 
     if (orig == NULL) {
-        orig = (fptr)dlsym(RTLD_NEXT, "hipExtModuleLaunchKernel");
+        //orig = (fptr)dlsym(RTLD_NEXT, "hipExtModuleLaunchKernel");
+        orig = (fptr)dlsym(RTLD_NEXT, "_Z24hipExtModuleLaunchKernelP18ihipModuleSymbol_tjjjjjjmP12ihipStream_tPPvS4_P11ihipEvent_tS6_j");
         if (orig == NULL) {
             ERR("dlsym: " << dlerror());
             return hipErrorUnknown;
