@@ -18,7 +18,7 @@
 #define GUARD_INT 0xdeadbeef
 #define GUARD_INT_COUNT (GUARD_SIZE / sizeof(int))
 static std::mutex gs_allocations_mutex_; // protects gs_allocations
-static std::unordered_map<void*, size_t> gs_allocations;
+static std::unordered_map<void*, std::pair<size_t,int> > gs_allocations;
 static std::unordered_map<hipStream_t, int*> gs_stream_guard_ptr;
 constexpr int blocksPerGrid = 256;
 constexpr int threadsPerBlock = 256;
@@ -118,18 +118,26 @@ static std::string backtrace()
 static void store_ptr(void* ptr, size_t size)
 {
     TRACE("ptr=" << ptr << " size=" << size);
+    int dev = 0;
+    hipError_t status = hipSuccess;
+
+    status = hipGetDevice(&dev);
+    if (hipSuccess != status) {
+        ERR("hipGetDevice failed: " << hipGetErrorString(status));
+    }
+
     if (ptr == NULL || size == 0) return;
     {
         std::lock_guard<std::mutex> lock(gs_allocations_mutex_);
         if (gs_allocations.find(ptr) != gs_allocations.end()) {
             ERR("collision");
         }
-        gs_allocations[ptr] = size;
+        gs_allocations[ptr] = std::make_pair(size,dev);
     }
 
     int *guard = (int*)(((char*)(ptr)) + size);
     LOG("guard=" << guard);
-    auto status = hipMemsetD32(guard, GUARD_INT, GUARD_INT_COUNT);
+    status = hipMemsetD32(guard, GUARD_INT, GUARD_INT_COUNT);
     if (hipSuccess != status) {
         ERR("memset guard failed: " << hipGetErrorString(status));
     }
@@ -345,6 +353,13 @@ void launch_guard_check(std::string kernel_name, hipStream_t stream)
     this_launch_is_our_guard_launch = true;
 
     hipError_t status = hipSuccess;
+
+    int this_dev;
+    status = hipGetDevice(&this_dev);
+    if (hipSuccess != status) {
+        ERR("hipGetDevice failed: " << hipGetErrorString(status));
+    }
+
     int *answer = get_stream_guard_ptr(stream);
     Array<int*,blocksPerGrid> guards;
     for (int i=0; i<blocksPerGrid; i++) {
@@ -355,10 +370,14 @@ void launch_guard_check(std::string kernel_name, hipStream_t stream)
         int i = 0;
         for (auto& it: gs_allocations) {
             void *ptr = it.first;
-            size_t size = it.second;
-            int *guard = (int*)((char*)ptr + size);
-            guards[i++] = guard;
-            LOG("guard_check prep for i=" << i << " ptr=" << ptr << " guard=" << guard << " size=" << size);
+            size_t size;
+            int that_dev;
+            std::tie(size,that_dev) = it.second;
+            if (this_dev == that_dev) {
+                int *guard = (int*)((char*)ptr + size);
+                guards[i++] = guard;
+                LOG("guard_check prep for i=" << i << " dev=" << that_dev << " ptr=" << ptr << " guard=" << guard << " size=" << size);
+            }
             if (i == blocksPerGrid) {
                 LOG("guard_check full");
                 guard_check<<<dim3(blocksPerGrid), dim3(threadsPerBlock), 0, stream>>>(guards, blocksPerGrid, answer);
