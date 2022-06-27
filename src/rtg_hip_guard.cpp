@@ -567,7 +567,8 @@ hipError_t hipHccModuleLaunchKernel(ARGS_HIPHCCMODULELAUNCHKERNEL)
     static fptr orig = NULL;
 
     if (orig == NULL) {
-        orig = (fptr)dlsym(RTLD_NEXT, __func__);
+        //orig = (fptr)dlsym(RTLD_NEXT, __func__);
+        orig = (fptr)dlsym(RTLD_NEXT, "_Z24hipHccModuleLaunchKernelP18ihipModuleSymbol_tjjjjjjmP12ihipStream_tPPvS4_P11ihipEvent_tS6_");
         if (orig == NULL) {
             ERR("dlsym: " << dlerror());
             return hipErrorUnknown;
