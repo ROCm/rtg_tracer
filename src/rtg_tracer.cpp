@@ -2513,6 +2513,9 @@ static void hsa_amd_queue_intercept_cb(
             const_cast<hsa_barrier_and_packet_t*>(barrier_packet)->completion_signal = new_signal;
             gs_pool.push(SignalWaiter, new SignalCallbackData(data_, deleter_signal, new_signal, original_signal, owns_orig_signal, barrier_packet));
         }
+        else if (type == HSA_PACKET_TYPE_VENDOR_SPECIFIC) {
+            fprintf(stderr, "RTG Tracer: cannot handle vendor packet type %d\n", type);
+        }
         else {
             fprintf(stderr, "RTG Tracer: unrecognized packet type %d\n", type);
             exit(EXIT_FAILURE);
@@ -2520,6 +2523,11 @@ static void hsa_amd_queue_intercept_cb(
 
         // Submitting the original packets as if profiling was not enabled
         writer(packet, 1);
+
+        if (type == HSA_PACKET_TYPE_VENDOR_SPECIFIC) {
+            // we don't know what to do after submitting original packet, so do nothing
+            return;
+        }
 
         // Submit a new packet just for decrementing the original signal. This is done in a separate queue. Signal packet depends on real packet.
         if (original_signal.handle) {
