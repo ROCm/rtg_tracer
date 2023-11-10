@@ -27,11 +27,13 @@
 #include <hsa/amd_hsa_kernel_code.h>
 #include <hsa/amd_hsa_signal.h>
 
+#include "loader.h"
+
 #include <hip/hip_runtime_api.h>
-#include <hip/amd_detail/hip_runtime_prof.h>
+#define HIP_PROF_HIP_API_STRING 0
 #include <hip/amd_detail/hip_prof_str.h>
 
-#include "missing_ostream_definitions.h"
+//#include "missing_ostream_definitions.h"
 
 #include <roctracer/roctracer.h>
 #include <roctracer/roctracer_roctx.h>
@@ -151,15 +153,17 @@ static counter_t gs_cb_count_signals{0};      // counts signals we destroy
 static counter_t gs_did{0};                   // global dispach id
 
 static std::atomic<uint64_t> gs_correlation_id_counter{0}; // global API counter, for correlation ID, for HIP and roctx calls
+static std::atomic<uint64_t> gs_dispatch_id_counter{0}; // global API counter, for dispatch ID
 
 static bool loaded{false};
 static RtgOut* gs_out{NULL};  // output interface
 static FILE *gs_stream{NULL}; // output only used for HCC_PROFILE mode
 
 // Need to allocate hip_api_data_t, but cannot use new operator due to incomplete default constructors.
-static thread_local std::vector<char[sizeof(hip_api_data_t)]> gstl_hip_api_data(HIP_API_ID_NUMBER);
-static thread_local std::vector<uint64_t> gstl_hip_api_tick(HIP_API_ID_NUMBER);
-static thread_local uint64_t gstl_hip_api_correlation_id;
+static std::vector<int> gstl_hip_api_enabled(HIP_API_ID_LAST);
+static thread_local std::vector<char[sizeof(hip_api_data_t)]> gstl_hip_api_data(HIP_API_ID_LAST);
+static thread_local std::vector<uint64_t> gstl_hip_api_tick(HIP_API_ID_LAST);
+//static thread_local uint64_t gstl_hip_api_correlation_id;
 
 // memory backtraces
 static std::string backtrace();
@@ -182,11 +186,20 @@ static void finalize();
 static void finalize_once();
 
 // Support for HIP API callbacks.
-static void* hip_activity_callback(uint32_t cid, activity_record_t* record, const void* data, void* arg);
-static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data, void* arg);
+struct hip_api_trace_data_t {
+  hip_api_data_t api_data;
+  uint64_t phase_enter_timestamp;
+  uint64_t phase_data;
+
+  void (*phase_enter)(hip_api_id_t operation_id, hip_api_trace_data_t* data);
+  void (*phase_exit)(hip_api_id_t operation_id, hip_api_trace_data_t* data);
+};
+static int hip_enabled_callback(activity_domain_t domain, uint32_t operation_id, void* data_);
+static void hip_api_enter_callback(hip_api_id_t operation_id, hip_api_trace_data_t *data);
+static void hip_api_exit_callback(hip_api_id_t operation_id, hip_api_trace_data_t *data);
 
 // Support for ROCTX callbacks.
-static void* roctx_callback(uint32_t domain, uint32_t cid, const void* data, void* arg);
+static int roctx_callback(activity_domain_t domain, uint32_t operation_id, void* data_);
 
 // Support for HSA function table hooks.
 static void InitCoreApiTable(CoreApiTable* table);
@@ -462,7 +475,7 @@ static uint64_t submit_to_signal_queue(hsa_queue_t *signal_queue, hsa_signal_t n
     const uint32_t queueSize = signal_queue->size;
     const uint32_t queueMask = queueSize - 1;
     uint64_t index = gs_OrigCoreApiTable.hsa_queue_add_write_index_screlease_fn(signal_queue, 1);
-    uint64_t read = gs_OrigCoreApiTable.hsa_queue_load_read_index_relaxed_fn(signal_queue);
+    //uint64_t read = gs_OrigCoreApiTable.hsa_queue_load_read_index_relaxed_fn(signal_queue);
     while ((index - gs_OrigCoreApiTable.hsa_queue_load_read_index_scacquire_fn(signal_queue)) >= queueMask) {
         sched_yield();
     }
@@ -568,9 +581,9 @@ struct SignalCallbackData
     InterceptCallbackData *data;
     hsa_queue_t* queue;
     hsa_agent_t agent;
+    hsa_signal_t deleter_signal;
     hsa_signal_t signal;
     hsa_signal_t orig_signal;
-    hsa_signal_t deleter_signal;
     bool owns_orig_signal;
     size_t bytes;
     int direction;
@@ -1784,7 +1797,7 @@ hsa_status_t hsa_amd_memory_async_copy_rect(const hsa_pitched_ptr_t* dst, const 
                 submit_to_signal_queue(queue, gs_NullSignal, deleter_signal);
                 gs_pool.push(SignalWaiter, new SignalCallbackData(queue, copy_agent, deleter_signal, new_signal, completion_signal, false, num_dep_signals, dep_signals, range->x*range->y, dir, index));
                 TRACE(dst, dst_offset, src, src_offset, range, copy_agent, dir, num_dep_signals, dep_signals, completion_signal);
-                return gs_OrigExtApiTable.hsa_amd_memory_async_copy_rect_fn(dst, dst_offset, src, src_offset, range, copy_agent, dir, num_dep_signals, dep_signals, new_signal);
+                return LOG_STATUS(gs_OrigExtApiTable.hsa_amd_memory_async_copy_rect_fn(dst, dst_offset, src, src_offset, range, copy_agent, dir, num_dep_signals, dep_signals, new_signal));
             }
         }
     }
@@ -2434,11 +2447,8 @@ static void hsa_amd_queue_intercept_cb(
         uint64_t user_que_idx, void* data,
         hsa_amd_queue_intercept_packet_writer writer)
 {
-    hsa_status_t status;
     const packet_t* packets_arr = reinterpret_cast<const packet_t*>(in_packets);
     InterceptCallbackData *data_ = reinterpret_cast<InterceptCallbackData*>(data);
-    hsa_agent_t agent = data_->agent;
-    hsa_queue_t *queue = data_->queue;
     hsa_queue_t *signal_queue = data_->signal_queue;
 
     if (writer == NULL) {
@@ -2454,7 +2464,6 @@ static void hsa_amd_queue_intercept_cb(
     for (uint64_t j = 0; j < count; ++j) {
         //uint64_t idx = user_que_idx + j;
         const packet_t* packet = &packets_arr[j];
-        bool to_submit = true;
         hsa_packet_type_t type = GetHeaderType(packet);
         hsa_signal_t deleter_signal{0};
         hsa_signal_t new_signal{0};
@@ -2472,20 +2481,15 @@ static void hsa_amd_queue_intercept_cb(
 
             uint64_t kernel_object = dispatch_packet->kernel_object;
             const amd_kernel_code_t* kernel_code = GetKernelCode(kernel_object);
-            const uint64_t kernel_symbol = kernel_code->runtime_loader_kernel_symbol;
             std::string kernel_name = QueryKernelName(kernel_object, kernel_code);
 
-            // find kernel launch from HIP to get correlation id
-            uint64_t correlation_id;
+            uint64_t dispatch_id = 0;
             if (HCC_PROFILE) {
-                // HCC output does not need correlation_id
-            }
-            else if (!AMD_DIRECT_DISPATCH) {
-                correlation_id = AgentInfo::Get(agent)->find_op(kernel_name);
+                // HCC output does not need dispatch_id
             }
             else {
                 // direct dispatch means we can avoid complicated lookups
-                correlation_id = gstl_hip_api_correlation_id;
+                dispatch_id = gs_dispatch_id_counter++;
             }
 
             original_signal = dispatch_packet->completion_signal;
@@ -2494,7 +2498,7 @@ static void hsa_amd_queue_intercept_cb(
                 original_signal = CreateSignal();
             }
             const_cast<hsa_kernel_dispatch_packet_t*>(dispatch_packet)->completion_signal = new_signal;
-            gs_pool.push(SignalWaiter, new SignalCallbackData(kernel_name, correlation_id, data_, deleter_signal, new_signal, original_signal, owns_orig_signal, dispatch_packet));
+            gs_pool.push(SignalWaiter, new SignalCallbackData(kernel_name, dispatch_id, data_, deleter_signal, new_signal, original_signal, owns_orig_signal, dispatch_packet));
         }
         else if (type == HSA_PACKET_TYPE_BARRIER_AND || type == HSA_PACKET_TYPE_BARRIER_OR) {
             ++RTG::gs_host_count_barriers;
@@ -2549,12 +2553,6 @@ static void DestroySignal(hsa_signal_t signal)
         fprintf(stderr, "RTG Tracer: hsa_signal_destroy_fn failed %lu\n", signal.handle);
     }
     ++gs_cb_count_signals;
-}
-
-static void* hip_activity_callback(uint32_t cid, activity_record_t* record, const void* data, void* arg)
-{
-    // The hip_api_data_t is returned from this activity callback; without it, the hip_api_callback does not fire.
-    return (hip_api_data_t*)gstl_hip_api_data[cid];
 }
 
 #define UNW_LOCAL_ONLY
@@ -2654,75 +2652,70 @@ static inline void _get_kernname_and_stream(uint32_t cid, hip_api_data_t *data, 
     }
 }
 
-static void* hip_api_callback(uint32_t domain, uint32_t cid, const void* data_, void* arg)
+static int hip_enabled_callback(activity_domain_t domain, uint32_t operation_id, void* data_)
 {
-    hip_api_data_t *data = (hip_api_data_t*)data_;
+    // rocclr ops also triggered by current callback, ACTIVITY_DOMAIN_HIP_OPS, we want HIP API only
+    if (domain != ACTIVITY_DOMAIN_HIP_API) {
+        return -1;
+    }
+
+    if (!gstl_hip_api_enabled[operation_id]) {
+        return -1; // non-zero return indicates disabled
+    }
+
+    hip_api_trace_data_t *data = (hip_api_trace_data_t*)data_;
+    data->phase_enter_timestamp = tick();
+    data->api_data.correlation_id = gs_correlation_id_counter++;
+    data->phase_enter = hip_api_enter_callback;
+    data->phase_exit = hip_api_exit_callback;
+    return 0;
+}
+
+static void hip_api_enter_callback(hip_api_id_t operation_id, hip_api_trace_data_t *trace_data)
+{
+}
+
+static void hip_api_exit_callback(hip_api_id_t operation_id, hip_api_trace_data_t *trace_data)
+{
+    hip_api_data_t *data = &trace_data->api_data;
 
     const char *kernname = NULL;
     hipStream_t stream;
 
-    if (data->phase == 0) {
-        data->correlation_id = gs_correlation_id_counter++;
-        gstl_hip_api_tick[cid] = tick();
+    uint64_t tick_ = trace_data->phase_enter_timestamp;
+    uint64_t ticks = tick() - tick_;
+    //int localStatus = hipPeekAtLastError();
+    int localStatus = 0;
 
-        if (_is_kernel(cid)) {
-            if (HCC_PROFILE) {
-                // HCC output does not need correlation id
-            }
-            else if (!AMD_DIRECT_DISPATCH) {
-                _get_kernname_and_stream(cid, data, kernname, stream);
-                int ord = hipGetStreamDeviceId(stream);
-                AgentInfo::Get(ord)->insert_op({kernname,data->correlation_id});
-            }
-            else {
-                // direct dispatch means we can avoid complicated lookups
-                gstl_hip_api_correlation_id = data->correlation_id;
-            }
-        }
+    if (_is_kernel(operation_id)) {
+        _get_kernname_and_stream(operation_id, data, kernname, stream);
     }
-    else {
-        uint64_t tick_ = gstl_hip_api_tick[cid];
-        uint64_t ticks = tick() - tick_;
-        //int localStatus = hipPeekAtLastError();
-        int localStatus = 0;
 
-        if (_is_kernel(cid)) {
-            _get_kernname_and_stream(cid, data, kernname, stream);
-        }
+    LOG_HIP(operation_id, data, localStatus, tick_, ticks, kernname, RTG_HIP_API_ARGS, RTG_DEMANGLE);
 
-        LOG_HIP(cid, data, localStatus, tick_, ticks, kernname, RTG_HIP_API_ARGS, RTG_DEMANGLE);
-
-        if (RTG_HIP_MEMORY_BACKTRACE) {
-            if (cid == HIP_API_ID_hipMalloc) {
-                if (data->args.hipMalloc.size) {
-                    // only track non-zero allocations
-                    std::lock_guard<mutex_t> lck(gs_hip_backtrace_mutex_);
-                    gs_hip_backtrace.emplace(*(data->args.hipMalloc.ptr), std::make_pair(data->args.hipMalloc.size, backtrace()));
-                }
-            }
-            else if (cid == HIP_API_ID_hipFree) {
+    if (RTG_HIP_MEMORY_BACKTRACE) {
+        if (operation_id == HIP_API_ID_hipMalloc) {
+            if (data->args.hipMalloc.size) {
+                // only track non-zero allocations
                 std::lock_guard<mutex_t> lck(gs_hip_backtrace_mutex_);
-                if (1 != gs_hip_backtrace.erase(data->args.hipFree.ptr)) {
-                    fprintf(stderr, "RTG Tracer: invalid hipFree ptr\n");
-                }
+                gs_hip_backtrace.emplace(*(data->args.hipMalloc.ptr), std::make_pair(data->args.hipMalloc.size, backtrace()));
             }
         }
-
-        // Now that we're done with the api data, zero it for the next time.
-        // Otherwise, phase is always wrong because HIP doesn't set the phase to 0 during API start.
-        //memset(data, 0, sizeof(hip_api_data_t));
-        data->phase = 0;
+        else if (operation_id == HIP_API_ID_hipFree) {
+            std::lock_guard<mutex_t> lck(gs_hip_backtrace_mutex_);
+            if (1 != gs_hip_backtrace.erase(data->args.hipFree.ptr)) {
+                fprintf(stderr, "RTG Tracer: invalid hipFree ptr\n");
+            }
+        }
     }
-
-    return NULL;
 }
 
-static void* roctx_callback(uint32_t domain, uint32_t cid, const void* data_, void* arg)
+static int roctx_callback(activity_domain_t domain, uint32_t operation_id, void* data_)
 {
     uint64_t new_tick = tick();
     roctx_api_data_t *data = (roctx_api_data_t*)data_;
 
-    switch (cid) {
+    switch (operation_id) {
         case ROCTX_API_ID_roctxMarkA:
             LOG_ROCTX_MARK(gs_correlation_id_counter++, data->args.message, new_tick);
             break;
@@ -2753,12 +2746,7 @@ static void* roctx_callback(uint32_t domain, uint32_t cid, const void* data_, vo
             break;
     }
 
-    // NOTE: roctx uses strdup() with all messages stored in the roctx_api_data_t ; user must free
-    if (data->args.message) {
-        free(const_cast<char*>(data->args.message));
-    }
-
-    return NULL;
+    return 0;
 }
 
 static void finalize_once()
@@ -2794,10 +2782,10 @@ static void finalize_once()
         }
     }
 
-    // Unregister ROCTX
-    for (int i=0; i<ROCTX_API_ID_NUMBER; ++i) {
-        RemoveApiCallback(i);
-    }
+    //// Unregister ROCTX
+    //for (int i=0; i<ROCTX_API_ID_NUMBER; ++i) {
+    //    RemoveApiCallback(i);
+    //}
 
     if (HCC_PROFILE) {
         fclose(RTG::gs_stream);
@@ -2910,7 +2898,7 @@ extern "C" bool OnLoad(void *pTable,
         tokens_keep_always.push_back("hipModuleLaunchKernel");
         tokens_keep_always.push_back("hipExtLaunchKernel");
 
-        for (int i=0; i<HIP_API_ID_NUMBER; ++i) {
+        for (int i=0; i<HIP_API_ID_LAST; ++i) {
             bool keep = false;
             std::string name = hip_api_name(i);
             for (auto tok : tokens_keep) {
@@ -2939,18 +2927,21 @@ extern "C" bool OnLoad(void *pTable,
             }
 
             if (keep) {
-                hipRegisterActivityCallback(i, (void*)RTG::hip_activity_callback, NULL);
-                hipRegisterApiCallback(i, (void*)RTG::hip_api_callback, NULL);
+                RTG::gstl_hip_api_enabled[i] = 1;
+            }
+            else {
+                RTG::gstl_hip_api_enabled[i] = 0;
             }
             if (RTG_VERBOSE == "2") {
                 fprintf(stderr, "RTG Tracer: HIP API %s %s\n", keep ? "keep" : "skip", name.c_str());
             }
         }
 
+        // Register HIP
+        RTG::HipLoader::Instance().RegisterTracerCallback(RTG::hip_enabled_callback);
+
         // Register ROCTX
-        for (int i=0; i<ROCTX_API_ID_NUMBER; ++i) {
-            RegisterApiCallback(i, (void*)RTG::roctx_callback, NULL);
-        }
+        RTG::RocTxLoader::Instance().RegisterTracerCallback(RTG::roctx_callback);
     }
 
     // set which HSA functions we should replace

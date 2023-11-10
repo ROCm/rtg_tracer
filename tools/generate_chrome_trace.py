@@ -128,12 +128,12 @@ try:
     group_by_process = False
     output_filename = None
     show_gaps = False
-    show_flow = False
+    show_flow = True
     verbose = False
     print_workgroups = False
     for o,a in opts:
         if o == "-f":
-            show_flow = True
+            show_flow = False
         elif o == "-g":
             show_gaps = True
         elif o == "-h":
@@ -341,7 +341,9 @@ for filename in non_opt_args:
                 count_hsa_dispatch_host += 1
                 pid,tid,queue,agent,signal,name,tick,did,wgx,wgy,wgz,gx,gy,gz = match.groups()
                 all_pids[pid] = pid
-                pid,tid = get_hsa_pid_tid(pid, tid)
+                # we use get_hip_pid_tid here because we want HSA host dispatches to group with HIP
+                #pid,tid = get_hsa_pid_tid(pid, tid)
+                pid,tid = get_hip_pid_tid(pid, tid)
                 workgroups[(int(wgx)*int(wgy)*int(wgz),(wgx,wgy,wgz),name)] = None
                 tick = int(tick)/1000
                 out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":1, "pid":%s, "tid":%s},\n'%(
@@ -372,7 +374,9 @@ for filename in non_opt_args:
                 name = 'barrier'
                 pid,tid,queue,agent,signal,dep1,dep2,dep3,dep4,dep5,tick,did = match.groups()
                 all_pids[pid] = pid
-                pid,tid = get_hsa_pid_tid(pid, tid)
+                # we use get_hip_pid_tid here because we want HSA host dispatches to group with HIP
+                #pid,tid = get_hsa_pid_tid(pid, tid)
+                pid,tid = get_hip_pid_tid(pid, tid)
                 tick = int(tick)/1000
                 out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":1, "pid":%s, "tid":%s, "args":{"dep1":"%s","dep2":"%s","dep3":"%s","dep4":"%s","dep5":"%s"}},\n'%(
                     name, tick, pid, tid, dep1, dep2, dep3, dep4, dep5))
@@ -613,7 +617,7 @@ for (pid,tid) in sorted(name_map):
         out.write('{"name":"thread_name", "ph":"M", "pid":%d, "tid":%d, "args":{"name":"%s"}},\n'%(pid,tid,label))
     else:
         out.write('{"name":"thread_name", "ph":"M", "pid":%d, "tid":%d, "args":{"name":"%s"}},\n'%(pid,tid,label))
-    out.write('{"name":"thread_sort_index", "ph":"M", "pid":%d, "tid":%d, "args":{"sort_index":%d}},\n'%(pid,tid,tid))
+    out.write('{"name":"thread_sort_index", "ph":"M", "pid":%s, "tid":%d, "args":{"sort_index":%d}},\n'%(pid,tid,tid))
 
 #if count_hsa_dispatch or count_hsa_barrier or count_hsa_copy:
 #    for pid,agent in hsa_queues:

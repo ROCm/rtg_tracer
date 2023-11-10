@@ -19,6 +19,7 @@
 #include <hip/amd_detail/hip_runtime_prof.h>
 #include "missing_ostream_definitions.h"
 #define HIP_PROF_HIP_API_STRING 1 // to enable hipApiString in hip_prof_str.h
+#include <roctracer/hip_ostream_ops.h>
 #include <hip/amd_detail/hip_prof_str.h>
 
 #include "rtg_out_printf_lockless.h"
@@ -36,7 +37,6 @@ static inline const char * tid() {
 
 static std::string cpp_demangle(const std::string &symname) {
     std::string retval;
-    std::size_t pos;
     size_t size = 0;
     int status = 0;
     char* result = abi::__cxa_demangle(symname.c_str(), NULL, &size, &status);
