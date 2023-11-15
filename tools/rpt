@@ -133,11 +133,11 @@ class TextLogRecord:
 
     def printMe(self,showLines=False):
         if showLines:
-            print "@%d---\n" % (self.startLineNum),
+            print("@%d---\n" % (self.startLineNum), end=' ')
         for l in self.text:
-            print ">", l,
+            print(">", l, end=' ')
         if showLines:
-            print "@%d---\n" % (self.stopLineNum)
+            print("@%d---\n" % (self.stopLineNum))
 
     def getLineText(self, lineNum): 
         try:
@@ -161,7 +161,7 @@ class TextLogRecord:
 class ProfileLogRecord:
     def __init__(self, lineNum, line, text):
         if args.db:
-            print "raw:", line
+            print("raw:", line)
 
         self.lineNum = lineNum
 
@@ -193,7 +193,7 @@ class ProfileLogRecord:
             try:
                 (self.device, self.queue, self.cmdNum) = [int(f) for f in fields[fi].lstrip("#").split(".")]
             except:
-                print "warning: unknown opid tag=", fields[fi]
+                print("warning: unknown opid tag=", fields[fi])
                 self.device = 0
                 self.queue = 0
                 self.cmdnum = 0
@@ -219,7 +219,7 @@ class ProfileLogRecord:
                     self.name = self.name + "_" + str(self.sizeBytes) + "_bytes"
                     #self.bandwidthGBps = (float)(sizeBytes*1000.0/1024.0*1000.0/1024.0) / (self.stopTime - self.startTime)
                 except:
-                    print "warning: can't find copy size in", fields[copyField]
+                    print("warning: can't find copy size in", fields[copyField])
 
             # these structures filled in after sorting the records:
             self.criticalTime = None
@@ -227,7 +227,7 @@ class ProfileLogRecord:
 
             self.valid = True
         except:
-            print "warning: ignored unparsable profile line:", line,
+            print("warning: ignored unparsable profile line:", line, end=' ')
 
             self.valid = False
 
@@ -262,19 +262,19 @@ class ProfileLogRecord:
     @staticmethod
     def printHeader(printInfo):
         if (printInfo):
-            print "Display each of the profiling events on a single line.  Fields:"
+            print("Display each of the profiling events on a single line.  Fields:")
 
-            print "  Resource : The resource this command executed on.  May be GPU# for a specific GPU or DATA to indicate data transfer command"
-            print "  Start(ms) : Start time of the command, displayed in ms.  Command start from time 0"
-            print "  +Time(us) : Time which the command contributed to the 'critical' path "
-            print "  Type  : Type of the command (kernel, barrier, copy)"
-            print "  Dev.Q.Cmd : The command sequm is a unique mononotically increasing number per-queue, so the triple of device.queue.cmdseqnum uniquely identifies the command during the process execution."
-            print "  LineNum : Line number from the input HCC_PROF_FILE"
-            print "  Name  : Name of the record.  For kernels, the kernel name.  For copy commands, the name contains the direction and size.  For barrier commands the name contains dependency counts and acquire and release fences."
+            print("  Resource : The resource this command executed on.  May be GPU# for a specific GPU or DATA to indicate data transfer command")
+            print("  Start(ms) : Start time of the command, displayed in ms.  Command start from time 0")
+            print("  +Time(us) : Time which the command contributed to the 'critical' path ")
+            print("  Type  : Type of the command (kernel, barrier, copy)")
+            print("  Dev.Q.Cmd : The command sequm is a unique mononotically increasing number per-queue, so the triple of device.queue.cmdseqnum uniquely identifies the command during the process execution.")
+            print("  LineNum : Line number from the input HCC_PROF_FILE")
+            print("  Name  : Name of the record.  For kernels, the kernel name.  For copy commands, the name contains the direction and size.  For barrier commands the name contains dependency counts and acquire and release fences.")
 
 
-        print "%4s %16s %8s %7s %10s %10s %-30s"  % \
-                ("Resource", "Start(ms)", "+Time(us)", "Type", "#Dev.Q.Cmd", "LineNum", "Name")
+        print("%4s %16s %8s %7s %10s %10s %-30s"  % \
+                ("Resource", "Start(ms)", "+Time(us)", "Type", "#Dev.Q.Cmd", "LineNum", "Name"))
 
     def printOneLine(self, startTime, lineNum):
         if lineNum == self.lineNum:
@@ -283,7 +283,7 @@ class ProfileLogRecord:
             try:
                 t = self.text.getLineText(lineNum)
                 if (t != None):
-                    print t 
+                    print(t) 
             except ValueError:
                 None
 
@@ -302,23 +302,23 @@ class ProfileLogRecord:
                         break;
                 markers = markerCnt * "=="
                 #markers += self.gapName()
-            print "%4s %16.6f: %+10.2f %-7s %10s %-30s" % \
+            print("%4s %16.6f: %+10.2f %-7s %10s %-30s" % \
                     (Resource.getName(self),\
                      (self.startTime - self.gapFromPrev - timeOffset)/1000000.0, \
                      self.gapFromPrev/1000.0, \
-                     "gap", "", markers)
+                     "gap", "", markers))
 
         if (self.criticalTime == None):
             time = 0
         else:
             time = self.criticalTime
 
-        print     "%4s %16.6f: %+10.2f %-7s #%d.%d.%d %8d: %-30s" % \
+        print("%4s %16.6f: %+10.2f %-7s #%d.%d.%d %8d: %-30s" % \
                 (Resource.getName(self), \
                  (self.startTime - timeOffset) / 1000000.0, time/1000.0, \
                  self.type, 
                  self.device, self.queue, self.cmdNum, 
-                 self.lineNum, self.name),
+                 self.lineNum, self.name), end=' ')
 
         #if (self.cmdNum != None):
         #    try:
@@ -327,13 +327,13 @@ class ProfileLogRecord:
         #        #print "#?%s.%s.%s" % (self.device, self.queue, self.cmdNum),
 
 
-	# TODO - figure out if this is useful.
+        # TODO - figure out if this is useful.
         #if (args.text_trace_verbose):
-       #     print "  %16.6f - %16.6f" % \
-       #             ((self.startTime - timeOffset)/1000000.0, \
-       #              (self.stopTime  - timeOffset)/1000000.0),
+        #     print "  %16.6f - %16.6f" % \
+        #             ((self.startTime - timeOffset)/1000000.0, \
+        #              (self.stopTime  - timeOffset)/1000000.0),
 
-        print ""
+        print("")
 
 
     def printJSON(self, file, timeOffset=0):
@@ -409,8 +409,8 @@ class ProfileSummaryRecord:
 
     @staticmethod
     def printHeader():
-        print "%14s %11s %8s %8s %8s %8s  %-30s" % \
-                ("Total(%)", "Time(us)", "Calls", "Avg(us)", "Min(us)", "Max(us)", "Name")
+        print("%14s %11s %8s %8s %8s %8s  %-30s" % \
+                ("Total(%)", "Time(us)", "Calls", "Avg(us)", "Min(us)", "Max(us)", "Name"))
 
 
     def printMe(self, totalTimeNs):
@@ -419,10 +419,10 @@ class ProfileSummaryRecord:
         else:
             timeUs = self.totalCriticalTime / 1000.0;
 
-            print "%13.2f%% %10.1f %8d %8.1f %8.1f %8.1f  %-30s" %\
+            print("%13.2f%% %10.1f %8d %8.1f %8.1f %8.1f  %-30s" %\
                   (self.totalCriticalTime*100.0/totalTimeNs, timeUs,
                    self.refs,
-                   timeUs/self.refs,  self.minTime/1000.0, self.maxTime/1000.0, self.name)
+                   timeUs/self.refs,  self.minTime/1000.0, self.maxTime/1000.0, self.name))
 
 
 """
@@ -458,7 +458,7 @@ class Resource:
         elif lr.isCopyCmd():
             return "DATA"
         else:
-            print "warning:unknown type='%s'" % ( lr.type )
+            print("warning:unknown type='%s'" % ( lr.type ))
             return None
 
     def selectMaxTime(self, roiTime):
@@ -476,12 +476,14 @@ class Resource:
         if (self.maxStopTime != None):
             gapFromPrev = lr.startTime  - self.maxStopTime
 
-        lr.update(self.maxStopTime, gapFromPrev)
+        lr.update(0 if self.maxStopTime is None else self.maxStopTime, gapFromPrev)
 
         if args.text_trace:
             lr.printMe(roiStartTime, True)
 
-        if (lr.stopTime > self.maxStopTime):
+        if (self.maxStopTime is None):
+            self.maxStopTime = lr.stopTime
+        elif (lr.stopTime > self.maxStopTime):
             self.maxStopTime =  lr.stopTime
 
         self.summaryByName.setdefault(lr.name, ProfileSummaryRecord(lr.name)).addRecord(self.summaryByName, lr)
@@ -493,14 +495,14 @@ class Resource:
 
     def printSummary(self, roiTime):
 
-        sortByTime = sorted(self.summaryByName.iteritems(), key=lambda x: x[1].totalCriticalTime, reverse=True)
+        sortByTime = sorted(iter(self.summaryByName.items()), key=lambda x: x[1].totalCriticalTime, reverse=True)
 
         maxToPrint = args.topn
         if maxToPrint < 0 or maxToPrint > len(sortByTime) :
             maxToPrint = len(sortByTime)
 
-        print "Resource=%s Showing %d/%d records  %6.2f%% busy" % \
-                (self.name, maxToPrint,  len(sortByTime), self.busyTime*100.0/roiTime)
+        print("Resource=%s Showing %d/%d records  %6.2f%% busy" % \
+                (self.name, maxToPrint,  len(sortByTime), self.busyTime*100.0/roiTime))
 
         time = self.selectMaxTime(roiTime)
 
@@ -515,7 +517,7 @@ class Resource:
 
     def printJSON(self, file):
         for q in self.opsPerQueue:
-            print "Q=", q
+            print("Q=", q)
             file.write('{ "name": "thread_name", "ph": "M", "pid": 1, "tid":%d ,\n' % (q))
             file.write('  "args": { "name" : "stream:%d" }\n' % (q))
             file.write('},\n')
@@ -529,7 +531,7 @@ class FileParser:
 
         lineNum = 0
         text = None
-	p = None
+        p = None
 
         for line in file:
             lineNum = lineNum+1
@@ -570,11 +572,11 @@ class FileParser:
         self.roiStop  = self.profileLogRecords[self.roiStopIndex]
 
         if show:
-            print "ROI_START:",
+            print("ROI_START:", end=' ')
             self.roiStart.printMe(self.roiStart.startTime)
-            print "ROI_STOP :" ,
+            print("ROI_STOP :", end=' ')
             self.roiStop.printMe(self.roiStart.startTime)  # yes, this should be startTime
-            print "ROI_TIME=%8.3f secs" % ((self.roiStop.stopTime - self.roiStart.startTime)/1000000000.0)
+            print("ROI_TIME=%8.3f secs" % ((self.roiStop.stopTime - self.roiStart.startTime)/1000000000.0))
 
         assert (self.roiStartIndex <= self.roiStopIndex)
         assert (self.roiStartIndex >=0 and self.roiStartIndex<len(self.profileLogRecords))
@@ -652,7 +654,7 @@ class FileParser:
                         if lineNum != None:
                             leadingNumbers -= 1
                             if leadingNumbers <= 0:
-                                print "info: %%roi regular expression matched @%d '%s'" %(lineNum, line.rstrip())
+                                print("info: %%roi regular expression matched @%d '%s'" %(lineNum, line.rstrip()))
                                 return (lri, lineNum) 
 
                 raise Exception ("roi search string not found=", roiStr)
@@ -663,7 +665,7 @@ class FileParser:
 
     def printSummary(self):
         for r in self.resources:
-            print
+            print()
             self.resources[r].printSummary(self.roiStop.stopTime-self.roiStart.startTime)
 
             
