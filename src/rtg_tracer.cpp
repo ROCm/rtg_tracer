@@ -2357,7 +2357,7 @@ static hsa_status_t hsa_executable_symbols_cb(hsa_executable_t exec, hsa_executa
     hsa_status_t status = gs_OrigCoreApiTable.hsa_executable_symbol_get_info_fn(symbol, HSA_EXECUTABLE_SYMBOL_INFO_TYPE, &value);
     RTG_HSA_CHECK_STATUS("Error in getting symbol info", status);
     if (value == HSA_SYMBOL_KIND_KERNEL) {
-        constexpr uint32_t RTG_SYM_NAME_MAX = 2048;
+        constexpr uint32_t RTG_SYM_NAME_MAX = 4096;
         char NAME[RTG_SYM_NAME_MAX];
         uint64_t addr = 0;
         uint32_t len = 0;
