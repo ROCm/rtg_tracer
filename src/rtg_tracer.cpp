@@ -2662,6 +2662,10 @@ static inline void _get_kernname_and_stream(uint32_t cid, hip_api_data_t *data, 
 
 static int hip_enabled_callback(activity_domain_t domain, uint32_t operation_id, void* data_)
 {
+    if (!RTG::loaded) {
+        return 0;
+    }
+
     // rocclr ops also triggered by current callback, ACTIVITY_DOMAIN_HIP_OPS, we want HIP API only
     if (domain != ACTIVITY_DOMAIN_HIP_API) {
         return -1;
@@ -2685,6 +2689,10 @@ static void hip_api_enter_callback(hip_api_id_t operation_id, hip_api_trace_data
 
 static void hip_api_exit_callback(hip_api_id_t operation_id, hip_api_trace_data_t *trace_data)
 {
+    if (!RTG::loaded) {
+        return;
+    }
+
     hip_api_data_t *data = &trace_data->api_data;
 
     const char *kernname = NULL;
@@ -2720,6 +2728,10 @@ static void hip_api_exit_callback(hip_api_id_t operation_id, hip_api_trace_data_
 
 static int roctx_callback(activity_domain_t domain, uint32_t operation_id, void* data_)
 {
+    if (!RTG::loaded) {
+        return 0;
+    }
+
     uint64_t new_tick = tick();
     roctx_api_data_t *data = (roctx_api_data_t*)data_;
 
@@ -2764,6 +2776,7 @@ static void finalize_once()
     if (!RTG::loaded) {
         return;
     }
+    RTG::loaded = false;
 
     if (RTG_PROFILE || RTG_PROFILE_COPY) {
         fprintf(stderr, "RTG Tracer: host_count_dispatches=%u\n", RTG::gs_host_count_dispatches.load());
