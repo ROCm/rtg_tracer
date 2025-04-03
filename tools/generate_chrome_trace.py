@@ -38,6 +38,26 @@ HCC sample output (Deprecated, HCC_PROFILE=2 mode, useful for the old 'rpt' repo
     profile: barrier;  depcnt=1,acq=none,rel=none;     25.8 us;  83831227971384; 83831227997144; #0.1.10; deps=#0.1.9
     profile:    copy;  DeviceToDevice_async_fast;     13.1 us;  83831227978264; 83831227991384; #0.1.9; 4004 bytes; 0.0 MB; 0.3 GB/s;
 
+HIP AMD_LOG_LEVEL=4 output
+--------------------------
+
+:3:hip_device_runtime.cpp   :688 : 1233197572 us: [pid:24631 tid: 0x155555409740] ^[[32m hipSetDevice ( 0 ) ^[[0m
+:3:hip_device_runtime.cpp   :692 : 1233197574 us: [pid:24631 tid: 0x155555409740] hipSetDevice: Returned hipSuccess :
+:3:hip_module.cpp           :533 : 1233197579 us: [pid:24631 tid: 0x155555409740] ^[[32m hipExtModuleLaunchKernel ( 0x0x55610b387b70, 294912, 1, 1, 256, 1, 1, 0, stream:<null>, char array:<null>, 0x7fffffff0d90, event:0, event:0, 0 ) ^[[0m
+:4:command.cpp              :359 : 1233197604 us: [pid:24631 tid: 0x155555409740] Command (KernelExecution) enqueued: 0x55611d09a700
+:3:rocvirtual.cpp           :733 : 1233197615 us: [pid:24631 tid: 0x155555409740] Arg0:  dst.coerce = ptr:0x152dcaafa000 obj:[0x152d43200000-0x152e87200000]
+:3:rocvirtual.cpp           :733 : 1233197627 us: [pid:24631 tid: 0x155555409740] Arg1:  src.coerce = ptr:0x152dcdb1f800 obj:[0x152d43200000-0x152e87200000]
+:3:rocvirtual.cpp           :809 : 1233197631 us: [pid:24631 tid: 0x155555409740] Arg2:  height = val:384
+:3:rocvirtual.cpp           :809 : 1233197635 us: [pid:24631 tid: 0x155555409740] Arg3:  width = val:96
+:3:rocvirtual.cpp           :809 : 1233197638 us: [pid:24631 tid: 0x155555409740] Arg4:  dim_stride = val:1152
+:3:rocvirtual.cpp           :809 : 1233197650 us: [pid:24631 tid: 0x155555409740] Arg5:  dim_total = val:1152
+:3:rocvirtual.cpp           :809 : 1233197651 us: [pid:24631 tid: 0x155555409740] Arg6:  magic_h = val:1431655766
+:3:rocvirtual.cpp           :809 : 1233197655 us: [pid:24631 tid: 0x155555409740] Arg7:  shift_h = val:4
+:3:rocvirtual.cpp           :809 : 1233197657 us: [pid:24631 tid: 0x155555409740] Arg8:  magic_w = val:1431655766
+:3:rocvirtual.cpp           :809 : 1233197668 us: [pid:24631 tid: 0x155555409740] Arg9:  shift_w = val:2
+:3:rocvirtual.cpp           :3198: 1233197669 us: [pid:24631 tid: 0x155555409740] ShaderName : batched_transpose_32x32_half
+:3:rocvirtual.cpp           :3412: 1233197673 us: [pid:24631 tid: 0x155555409740] KernargSegmentByteSize = 48 KernargSegmentAlignment = 128
+
 """
 
 from __future__ import print_function
@@ -65,6 +85,8 @@ RE_HCC_PROF         = re.compile(r"profile:\s+(\w+);\s+(.*);\s+(.*) us;")
 RE_STRACE_UNFINISED = re.compile(r"(\d+)\.(\d+) (.*) <unfinished \.\.\.>")
 RE_STRACE_RESUMED   = re.compile(r'(\d+)\.(\d+) <\.\.\. (\w+) resumed> .* = <?(["\w/\.-]+)>? <(.*)>')
 RE_STRACE_COMPLETE  = re.compile(r"(\d+)\.(\d+) (.*) = (-?<?\w+>?) <(.*)>")
+RE_HIP_LOG          = re.compile(r":(.*):(.*):(.*): (.*) us: \[pid:(.*) tid: 0x(.*)\] (.*)")
+RE_ANSI_ESCAPE      = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
 count_skipped = 0
 count_hip_api = 0
@@ -90,6 +112,7 @@ count_hsa_copy = 0
 count_hsa_missed = 0
 count_roctx_api = 0
 count_roctx_missed = 0
+count_hip_log = 0
 all_pids = {}
 
 workgroups = {}
@@ -246,6 +269,34 @@ def get_hip_pid_tid(pid, tid):
     else:
         name_map[(2,tid)] = label
         return (2,tid)
+
+hip_log_counter = 0
+hip_log_buffer = {}
+def append_hip_log_buffer(pid, tid, msg):
+    global hip_log_buffer
+    key = (pid,tid)
+    if key not in hip_log_buffer:
+        hip_log_buffer[key] = msg
+    else:
+        hip_log_buffer[key] += msg
+
+def get_hip_log_buffer(pid, tid):
+    global hip_log_buffer
+    key = (pid,tid)
+    ret = hip_log_buffer[key]
+    del hip_log_buffer[key]
+    return ret
+
+hip_log_ts = {}
+def set_hip_log_ts(pid, tid, ts):
+    global hip_log_ts
+    key = (pid,tid)
+    hip_log_ts[key] = ts
+
+def get_hip_log_ts(pid, tid):
+    global hip_log_ts
+    key = (pid,tid)
+    return hip_log_ts[key]
 
 if not output_filename:
     output_filename = "out.json"
@@ -579,6 +630,51 @@ for filename in non_opt_args:
                     name,ts,dur,-2000,escaped_call))
                 continue
 
+            match = RE_HIP_LOG.search(line)
+            if match:
+              try:
+                count_hip_log += 1
+                _,_,_,ts,pid,tid,msg = match.groups()
+                ts = int(ts)
+                all_pids[pid] = pid
+                pid,tid = get_hip_pid_tid(pid, tid)
+                # scrub any ansi escape terminal color sequences
+                msg = RE_ANSI_ESCAPE.sub('', msg)
+                msg = msg.strip()
+                # find hip api name, if present
+                if msg.startswith('hip'):
+                    name = msg.split()[0]
+                    if name[-1] == ':':
+                        name = name[:-1]
+                    if 'Returned' in msg:
+                        msg = get_hip_log_buffer(pid, tid)
+                        if 'hipExtModuleLaunchKernel' in name:  # doesn't have corresponding start
+                            old_ts = ts-10
+                        else:
+                            old_ts = get_hip_log_ts(pid, tid)
+                        dur = ts - old_ts
+                        if dur > 100000:
+                            print("excessive duration at ", count_hip_log)
+                            print(ts, old_ts, dur)
+                            print(line)
+                        if 'hipGetDevice' in name or 'hipSetDevice' in name:
+                            continue
+                        else:
+                            out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%d, "tid":%s, "args":{"params":"%s"}},\n'%(
+                                name, old_ts, dur, pid, tid, msg))
+                    else:
+                        set_hip_log_ts(pid, tid, ts)
+                        append_hip_log_buffer(pid, tid, msg)
+                else:
+                    append_hip_log_buffer(pid, tid, msg)
+                continue
+              except:
+                print("FAIL on line ", count_hip_log)
+                print("")
+                print(line)
+                print("")
+                sys.exit(1)
+
             vprint("unparsed line: %s" % line.strip())
             count_skipped += 1
 
@@ -687,6 +783,7 @@ print("         copy hsa lines: %d"%count_hsa_copy)
 print("       missed hsa lines: %d"%count_hsa_missed)
 print("          api hip lines: %d"%count_hip_api)
 print("       missed hip lines: %d"%count_hip_missed)
+print("          log hip lines: %d"%count_hip_log)
 print("            roctx lines: %d"%count_roctx_api)
 print("     missed roctx lines: %d"%count_roctx_missed)
 print("  prof ts opx hcc lines: %d"%count_hcc_prof_ts_opx)
