@@ -523,10 +523,8 @@ for filename in non_opt_args:
                     args = '{"seqNum":%s, "extra":"%s"}' % (seqnum,extra)
                 else:
                     args = '{"seqNum":%s}' % seqnum
-                ts = (int(start)/1000)
-                dur = (int(stop)-int(start))/1000
-                #ts = int(start)
-                #dur = int(stop)-int(start)
+                ts = int(start)
+                dur = int(stop)-int(start)
                 out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
                     msg, ts, dur, pid, tid, args))
                 # we do not log barriers for gap analysis
@@ -564,7 +562,7 @@ for filename in non_opt_args:
                 seqnum = opnum_parts[2]
                 args = '{"seqNum":%s}' % seqnum
                 out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":%s},\n'%(
-                    msg, (int(start)/1000), (int(stop)-int(start))/1000, pid, tid, args))
+                    msg, int(start), int(stop)-int(start), pid, tid, args))
                 continue
 
             match = RE_HCC_PROF_TS.search(line)

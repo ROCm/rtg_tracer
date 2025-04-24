@@ -562,17 +562,24 @@ struct SignalCallbackData
             stop = copy_time.end;
         }
         else {
-            hsa_amd_profiling_dispatch_time_t dispatch_time{};
-            status = gs_OrigExtApiTable.hsa_amd_profiling_get_dispatch_time_fn(
-                    agent, signal, &dispatch_time);
-            if (status != HSA_STATUS_SUCCESS) {
-                const char *msg;
-                gs_OrigCoreApiTable.hsa_status_string_fn(status, &msg);
-                fprintf(stderr, "RTG Tracer: signal callback dispatch time failed: %s\n", msg);
-                return false;
+            // for HCC_PROFILE mode we use the raw ticks from the hsa signal, not the clock-translated ticks
+            if (HCC_PROFILE) {
+                start = *reinterpret_cast<uint64_t*>(signal.handle+0x20);
+                stop = *reinterpret_cast<uint64_t*>(signal.handle+0x28);
             }
-            start = dispatch_time.start;
-            stop = dispatch_time.end;
+            else {
+                hsa_amd_profiling_dispatch_time_t dispatch_time{};
+                status = gs_OrigExtApiTable.hsa_amd_profiling_get_dispatch_time_fn(
+                        agent, signal, &dispatch_time);
+                if (status != HSA_STATUS_SUCCESS) {
+                    const char *msg;
+                    gs_OrigCoreApiTable.hsa_status_string_fn(status, &msg);
+                    fprintf(stderr, "RTG Tracer: signal callback dispatch time failed: %s\n", msg);
+                    return false;
+                }
+                start = dispatch_time.start;
+                stop = dispatch_time.end;
+            }
         }
         return true;
     }
