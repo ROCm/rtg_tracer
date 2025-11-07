@@ -73,6 +73,8 @@ RE_HSA_DISPATCH_HOST= re.compile(r"HSA: pid:(\d+) tid:(\d+) dispatch queue:(.*) 
 RE_HSA_DISPATCH     = re.compile(r"HSA: pid:(\d+) tid:(\d+) dispatch queue:(.*) agent:(\d+) signal:(\d+) name:'(.*)' start:(\d+) stop:(\d+) id:(\d+)")
 RE_HSA_BARRIER_HOST = re.compile(r"HSA: pid:(\d+) tid:(\d+) barrier queue:(.*) agent:(\d+) signal:(\d+) dep1:(\d+) dep2:(\d+) dep3:(\d+) dep4:(\d+) dep5:(\d+) tick:(\d+) id:(\d+)")
 RE_HSA_BARRIER      = re.compile(r"HSA: pid:(\d+) tid:(\d+) barrier queue:(.*) agent:(\d+) signal:(\d+) start:(\d+) stop:(\d+) dep1:(\d+) dep2:(\d+) dep3:(\d+) dep4:(\d+) dep5:(\d+) id:(\d+)")
+RE_HSA_VENDOR_HOST  = re.compile(r"HSA: pid:(\d+) tid:(\d+) vendor queue:(.*) agent:(\d+) signal:(\d+) dep:(\d+) tick:(\d+) id:(\d+)")
+RE_HSA_VENDOR       = re.compile(r"HSA: pid:(\d+) tid:(\d+) vendor queue:(.*) agent:(\d+) signal:(\d+) start:(\d+) stop:(\d+) dep:(\d+) id:(\d+)")
 RE_HSA_COPY         = re.compile(r"HSA: pid:(\d+) tid:(\d+) copy agent:(\d+) signal:(\d+) start:(\d+) stop:(\d+) dep1:(\d+) dep2:(\d+) dep3:(\d+) dep4:(\d+) dep5:(\d+)")
 RE_HIP              = re.compile(r"HIP: pid:(\d+) tid:(\d+) (.*) ret=(.*) @(\d+) \+(\d+)")
 RE_ROCTX            = re.compile(r"RTX: pid:(\d+) tid:(\d+) (.*) @(\d+) \+(\d+)")
@@ -108,6 +110,8 @@ count_hsa_dispatch_host = 0
 count_hsa_dispatch = 0
 count_hsa_barrier_host = 0
 count_hsa_barrier = 0
+count_hsa_vendor_host = 0
+count_hsa_vendor = 0
 count_hsa_copy = 0
 count_hsa_missed = 0
 count_roctx_api = 0
@@ -298,6 +302,29 @@ def get_hip_log_ts(pid, tid):
     key = (pid,tid)
     return hip_log_ts[key]
 
+# signals are reused, so map signal to list of events
+signal_to_event = {}
+def add_signal_event(signal, event):
+    global signal_to_event
+    signal = int(signal)
+    if signal != 0:
+        if signal in signal_to_event:
+            signal_to_event[signal].append(event)
+        else:
+            signal_to_event[signal] = [event]
+
+events_with_deps = []
+def add_event_with_dep(event):
+    global events_with_deps
+    if len(event) == 10:
+        name, ts, dur, pid, tid, dep1, dep2, dep3, dep4, dep5 = event
+        deps = (int(dep1), int(dep2), int(dep3), int(dep4), int(dep5))
+    else:
+        name, ts, dur, pid, tid, dep1 = event
+        deps = (int(dep1),)
+    if any(deps):
+        events_with_deps.append(event)
+
 if not output_filename:
     output_filename = "out.json"
     print("Writing chrome://tracing output to '%s' (use -o to change name)" % output_filename)
@@ -397,8 +424,8 @@ for filename in non_opt_args:
                 pid,tid = get_hip_pid_tid(pid, tid)
                 workgroups[(int(wgx)*int(wgy)*int(wgz),(wgx,wgy,wgz),name)] = None
                 tick = int(tick)/1000
-                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":1, "pid":%s, "tid":%s},\n'%(
-                    name, tick, pid, tid))
+                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":10, "pid":%s, "tid":%s, "args":{"signal":"%s"}},\n'%(
+                    name, tick, pid, tid, signal))
                 if show_flow:
                     out.write('{"name":"%s", "cat":"dispatch", "ph":"s", "ts":%s, "pid":%s, "tid":%s, "id":%s},\n'%(
                         name, tick, pid, tid, did))
@@ -412,10 +439,11 @@ for filename in non_opt_args:
                 pid,tid = get_gpu_pid_tid(pid, queue, agent)
                 ts = (int(start)/1000)
                 dur = (int(stop)-int(start))/1000
-                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s},\n'%(
-                    name, ts, dur, pid, tid))
+                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":{"signal":"%s"}},\n'%(
+                    name, ts, dur, pid, tid, signal))
+                add_signal_event(signal, (name, ts, dur, pid, tid))
                 if show_flow:
-                    out.write('{"name":"%s", "cat":"dispatch", "ph":"f", "ts":%s, "pid":%s, "tid":%s, "id":%s},\n'%(
+                    out.write('{"name":"%s", "cat":"dispatch", "ph":"f", "bp": "e", "ts":%s, "pid":%s, "tid":%s, "id":%s},\n'%(
                         name, ts, pid, tid, did))
                 continue
 
@@ -429,8 +457,8 @@ for filename in non_opt_args:
                 #pid,tid = get_hsa_pid_tid(pid, tid)
                 pid,tid = get_hip_pid_tid(pid, tid)
                 tick = int(tick)/1000
-                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":1, "pid":%s, "tid":%s, "args":{"dep1":"%s","dep2":"%s","dep3":"%s","dep4":"%s","dep5":"%s"}},\n'%(
-                    name, tick, pid, tid, dep1, dep2, dep3, dep4, dep5))
+                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":10, "pid":%s, "tid":%s, "args":{"signal":"%s","dep1":"%s","dep2":"%s","dep3":"%s","dep4":"%s","dep5":"%s"}},\n'%(
+                    name, tick, pid, tid, signal, dep1, dep2, dep3, dep4, dep5))
                 if show_flow:
                     out.write('{"name":"%s", "cat":"barrier", "ph":"s", "ts":%s, "pid":%s, "tid":%s, "id":%s},\n'%(
                         name, tick, pid, tid, did))
@@ -445,10 +473,47 @@ for filename in non_opt_args:
                 pid,tid = get_gpu_pid_tid(pid, queue, agent)
                 ts = (int(start)/1000)
                 dur = (int(stop)-int(start))/1000
-                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":{"dep1":"%s","dep2":"%s","dep3":"%s","dep4":"%s","dep5":"%s"}},\n'%(
-                    name, ts, dur, pid, tid, dep1, dep2, dep3, dep4, dep5))
+                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":{"signal":"%s","dep1":"%s","dep2":"%s","dep3":"%s","dep4":"%s","dep5":"%s"}},\n'%(
+                    name, ts, dur, pid, tid, signal, dep1, dep2, dep3, dep4, dep5))
+                add_signal_event(signal, (name, ts, dur, pid, tid))
+                add_event_with_dep((name, ts, dur, pid, tid, dep1, dep2, dep3, dep4, dep5))
                 if show_flow:
-                    out.write('{"name":"%s", "cat":"barrier", "ph":"f", "ts":%s, "pid":%s, "tid":%s, "id":%s},\n'%(
+                    out.write('{"name":"%s", "cat":"barrier", "ph":"f", "bp": "e", "ts":%s, "pid":%s, "tid":%s, "id":%s},\n'%(
+                        name, ts, pid, tid, did))
+                continue
+
+            match = RE_HSA_VENDOR_HOST.search(line)
+            if match:
+                count_hsa_vendor_host += 1
+                name = 'barrier'
+                pid,tid,queue,agent,signal,dep,tick,did = match.groups()
+                all_pids[pid] = pid
+                # we use get_hip_pid_tid here because we want HSA host dispatches to group with HIP
+                #pid,tid = get_hsa_pid_tid(pid, tid)
+                pid,tid = get_hip_pid_tid(pid, tid)
+                tick = int(tick)/1000
+                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":10, "pid":%s, "tid":%s, "args":{"signal":"%s","dep":"%s"}},\n'%(
+                    name, tick, pid, tid, signal, dep))
+                if show_flow:
+                    out.write('{"name":"%s", "cat":"barrier", "ph":"s", "ts":%s, "pid":%s, "tid":%s, "id":%s},\n'%(
+                        name, tick, pid, tid, did))
+                continue
+
+            match = RE_HSA_VENDOR.search(line)
+            if match:
+                count_hsa_vendor += 1
+                name = 'barrier'
+                pid,tid,queue,agent,signal,start,stop,dep,did = match.groups()
+                all_pids[pid] = pid
+                pid,tid = get_gpu_pid_tid(pid, queue, agent)
+                ts = (int(start)/1000)
+                dur = (int(stop)-int(start))/1000
+                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":{"signal":"%s","dep":"%s"}},\n'%(
+                    name, ts, dur, pid, tid, signal, dep))
+                add_signal_event(signal, (name, ts, dur, pid, tid))
+                add_event_with_dep((name, ts, dur, pid, tid, dep))
+                if show_flow:
+                    out.write('{"name":"%s", "cat":"barrier", "ph":"f", "bp": "e", "ts":%s, "pid":%s, "tid":%s, "id":%s},\n'%(
                         name, ts, pid, tid, did))
                 continue
 
@@ -461,8 +526,8 @@ for filename in non_opt_args:
                 pid,tid = get_gpu_copy_pid_tid(pid, agent)
                 ts = (int(start)/1000)
                 dur = (int(stop)-int(start))/1000
-                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":{"dep1":"%s","dep2":"%s","dep3":"%s","dep4":"%s","dep5":"%s"}},\n'%(
-                    name, ts, dur, pid, tid, dep1, dep2, dep3, dep4, dep5))
+                out.write('{"name":"%s", "ph":"X", "ts":%s, "dur":%s, "pid":%s, "tid":%s, "args":{"signal":"%s","dep1":"%s","dep2":"%s","dep3":"%s","dep4":"%s","dep5":"%s"}},\n'%(
+                    name, ts, dur, pid, tid, signal, dep1, dep2, dep3, dep4, dep5))
                 continue
 
             if 'HSA:' in line:
@@ -777,6 +842,8 @@ print("host dispatch hsa lines: %d"%count_hsa_dispatch_host)
 print("     dispatch hsa lines: %d"%count_hsa_dispatch)
 print(" host barrier hsa lines: %d"%count_hsa_barrier_host)
 print("      barrier hsa lines: %d"%count_hsa_barrier)
+print("  host vendor hsa lines: %d"%count_hsa_vendor_host)
+print("       vendor hsa lines: %d"%count_hsa_vendor)
 print("         copy hsa lines: %d"%count_hsa_copy)
 print("       missed hsa lines: %d"%count_hsa_missed)
 print("          api hip lines: %d"%count_hip_api)
@@ -796,6 +863,41 @@ print("  complete strace lines: %d"%count_strace_complete)
 print("       duplicate gap ts: %d"%count_gap_duplicate_ts)
 print("      wrapped gap event: %d"%count_gap_wrapped)
 print("         okay gap event: %d"%count_gap_okay)
+print("        signal_to_event: %d"%len(signal_to_event))
+print("       events_with_deps: %d"%len(events_with_deps))
+
+## sort all events
+#signal_to_event_sorted = {}
+#for signal in signal_to_event:
+#    events = signal_to_event[signal]
+#    signal_to_event_sorted[signal] = sorted(events, key=lambda event: event[1])
+#
+## any events with deps, create flows
+#inc = 1
+#for event in events_with_deps:
+#    if len(event) == 10:
+#        name, ts, dur, pid, tid, dep1, dep2, dep3, dep4, dep5 = event
+#        deps = (int(dep1), int(dep2), int(dep3), int(dep4), int(dep5))
+#    else:
+#        name, ts, dur, pid, tid, dep1 = event
+#        deps = (int(dep1),)
+#    for signal in deps:
+#        if signal == 0:
+#            continue
+#        # find signal
+#        last = None
+#        if signal in signal_to_event_sorted:
+#            for name_, ts_, dur_, pid_, tid_ in signal_to_event_sorted[signal]:
+#                if ts_ > ts:
+#                    break
+#                last = (name_, ts_, dur_, pid_, tid_)
+#        if last:
+#            (name_, ts_, dur_, pid_, tid_) = last
+#            out.write('{"name":"%s", "cat":"barrier", "ph":"s", "ts":%s, "pid":%s, "tid":%s,  "id":%s},\n'%(
+#                name_, ts_, pid_, tid_, inc))
+#            out.write('{"name":"%s", "cat":"barrier", "ph":"f", "bp": "e", "ts":%s, "pid":%s, "tid":%s,  "id":%s},\n'%(
+#                name, ts, pid, tid, inc))
+#            inc = inc + 1
 
 if print_workgroups:
     for size,(x,y,z),name in sorted(workgroups):

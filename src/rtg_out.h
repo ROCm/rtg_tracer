@@ -6,6 +6,7 @@
 #include <string>
 
 #include <hsa/hsa.h>
+#include <hsa/hsa_ext_amd.h>
 
 using std::string;
 
@@ -25,9 +26,11 @@ virtual void hsa_api(const string& func, const string& args, lu tick, lu ticks) 
 
 virtual void hsa_host_dispatch_kernel (hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, const string& name, const hsa_kernel_dispatch_packet_t *packet, bool demangle) = 0;
 virtual void hsa_host_dispatch_barrier(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, lu dep[5], const hsa_barrier_and_packet_t *packet) = 0;
+virtual void hsa_host_dispatch_vendor(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, lu dep, const hsa_amd_barrier_value_packet_t *packet) = 0;
 
 virtual void hsa_dispatch_kernel (hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, const string& name, uint64_t correlation_id, bool demangle) = 0;
 virtual void hsa_dispatch_barrier(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, lu dep[5]) = 0;
+virtual void hsa_dispatch_vendor(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, lu dep) = 0;
 virtual void hsa_dispatch_copy   (hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu dep[5]) = 0;
 
 virtual void hip_api(uint32_t cid, struct hip_api_data_s *data, int status, lu tick, lu ticks, const char *kernname, bool args, bool demangle) = 0;

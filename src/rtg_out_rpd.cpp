@@ -143,6 +143,12 @@ void RtgOutRpd::hsa_host_dispatch_barrier(hsa_queue_t *queue, hsa_agent_t agent,
     exit(EXIT_FAILURE);
 }
 
+void RtgOutRpd::hsa_host_dispatch_vendor(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, lu dep, const hsa_amd_barrier_value_packet_t *packet)
+{
+    fprintf(stderr, "RtgOutRpd::hsa_host_dispatch_vendor NOT IMPLEMENTED\n");
+    exit(EXIT_FAILURE);
+}
+
 static std::atomic<int> counter;
 
 void RtgOutRpd::hsa_dispatch_kernel(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, const string& name, uint64_t correlation_id, bool demangle)
@@ -166,6 +172,28 @@ void RtgOutRpd::hsa_dispatch_kernel(hsa_queue_t *queue, hsa_agent_t agent, hsa_s
 }
 
 void RtgOutRpd::hsa_dispatch_barrier(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, lu dep[5])
+{
+    OpTable::row row;
+    row.gpuId = agent.handle; // TODO
+    row.queueId = queue->id; // TODO
+    row.sequenceId = counter++;
+    //row.completionSignal = "";	//strcpy
+    strncpy(row.completionSignal, "", 18);
+    row.start = start;
+    row.end = stop;
+    //row.description_id = EMPTY_STRING_ID;
+    row.description_id = s_stringTable->getOrCreate("Barrier");
+    row.opType_id = s_stringTable->getOrCreate("Barrier");
+    // barriers do not current associate with HIP API calls, so set this to something that should never match a correlation_id
+    row.api_id = std::numeric_limits<sqlite_int64>::max();
+    //row.api_id = row.sequenceId;
+    s_opTable->insert(row);
+
+    //fprintf(stderr, "RtgOutRpd::hsa_dispatch_barrier NOT IMPLEMENTED\n");
+    //exit(EXIT_FAILURE);
+}
+
+void RtgOutRpd::hsa_dispatch_vendor(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, lu dep)
 {
     OpTable::row row;
     row.gpuId = agent.handle; // TODO

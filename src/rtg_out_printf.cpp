@@ -167,6 +167,14 @@ void RtgOutPrintf::hsa_host_dispatch_barrier(hsa_queue_t *queue, hsa_agent_t age
     TlsData::Get(stream)->push(buf);
 }
 
+void RtgOutPrintf::hsa_host_dispatch_vendor(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu tick, lu id, lu dep, const hsa_amd_barrier_value_packet_t *packet)
+{
+    char *buf = new char[BUF_SIZE];
+    check(snprintf(buf, BUF_SIZE, "HSA: pid:%d tid:%s vendor queue:%lu agent:%lu signal:%lu dep:%lu tick:%lu id:%lu\n",
+            pid, tid(), queue->id, agent.handle, signal.handle, dep, tick, id));
+    TlsData::Get(stream)->push(buf);
+}
+
 void RtgOutPrintf::hsa_dispatch_kernel(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, const string& name, uint64_t correlation_id, bool demangle)
 {
     char *buf = new char[BUF_SIZE];
@@ -180,6 +188,14 @@ void RtgOutPrintf::hsa_dispatch_barrier(hsa_queue_t *queue, hsa_agent_t agent, h
     char *buf = new char[BUF_SIZE];
     check(snprintf(buf, BUF_SIZE, "HSA: pid:%d tid:%s barrier queue:%lu agent:%lu signal:%lu start:%lu stop:%lu dep1:%lu dep2:%lu dep3:%lu dep4:%lu dep5:%lu id:%lu\n",
             pid, tid(), queue->id, agent.handle, signal.handle, start, stop, dep[0], dep[1], dep[2], dep[3], dep[4], id));
+    TlsData::Get(stream)->push(buf);
+}
+
+void RtgOutPrintf::hsa_dispatch_vendor(hsa_queue_t *queue, hsa_agent_t agent, hsa_signal_t signal, lu start, lu stop, lu id, lu dep)
+{
+    char *buf = new char[BUF_SIZE];
+    check(snprintf(buf, BUF_SIZE, "HSA: pid:%d tid:%s vendor queue:%lu agent:%lu signal:%lu start:%lu stop:%lu dep:%lu id:%lu\n",
+            pid, tid(), queue->id, agent.handle, signal.handle, start, stop, dep, id));
     TlsData::Get(stream)->push(buf);
 }
 

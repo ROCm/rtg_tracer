@@ -383,6 +383,8 @@ uint64_t inline tick() {
 #define LOG_DISPATCH
 #define LOG_BARRIER_HOST
 #define LOG_BARRIER
+#define LOG_VENDOR_HOST
+#define LOG_VENDOR
 #define LOG_COPY
 
 #define LOG_HIP
@@ -445,9 +447,11 @@ uint64_t inline tick() {
     })
 
 #define LOG_DISPATCH_HOST gs_out->hsa_host_dispatch_kernel
-#define LOG_BARRIER_HOST  gs_out->hsa_host_dispatch_barrier
 #define LOG_DISPATCH      gs_out->hsa_dispatch_kernel
+#define LOG_BARRIER_HOST  gs_out->hsa_host_dispatch_barrier
 #define LOG_BARRIER       gs_out->hsa_dispatch_barrier
+#define LOG_VENDOR_HOST   gs_out->hsa_host_dispatch_vendor
+#define LOG_VENDOR        gs_out->hsa_dispatch_vendor
 #define LOG_COPY          gs_out->hsa_dispatch_copy
 
 #define LOG_HIP           gs_out->hip_api
@@ -502,10 +506,10 @@ struct SignalCallbackData
 {
     SignalCallbackData(std::string name, uint64_t cid, InterceptCallbackData *data, hsa_signal_t deleter_signal, hsa_signal_t signal, hsa_signal_t orig_signal, bool owns_orig_signal, const hsa_kernel_dispatch_packet_t *packet)
         : name(name), data(data), queue(data->queue), agent(data->agent), deleter_signal(deleter_signal), signal(signal), orig_signal(orig_signal), owns_orig_signal(owns_orig_signal), bytes(0), direction(0),
-            is_copy(false), is_barrier(false), dep{0,0,0,0,0}, id_(gs_did++), seq_num_(data->seq_index++), cid(cid)
+            is_copy(false), is_barrier(false), is_vendor(false), dep{0,0,0,0,0}, id_(gs_did++), seq_num_(data->seq_index++), cid(cid)
     {
         if (RTG_HSA_HOST_DISPATCH) {
-            LOG_DISPATCH_HOST(queue, agent, signal, tick(), id_, name, packet, RTG_DEMANGLE);
+            LOG_DISPATCH_HOST(queue, agent, owns_orig_signal ? gs_NullSignal: orig_signal, tick(), id_, name, packet, RTG_DEMANGLE);
         }
     }
 
@@ -513,6 +517,7 @@ struct SignalCallbackData
         : name(), queue(queue), agent(agent), deleter_signal(deleter_signal), signal(signal), orig_signal(orig_signal), owns_orig_signal(owns_orig_signal), bytes(bytes), direction(direction),
             is_copy(true),
             is_barrier(false),
+            is_vendor(false),
             dep{
                   (num_dep_signals>0 ? dep_signals[0].handle : 0),
                   (num_dep_signals>1 ? dep_signals[1].handle : 0),
@@ -530,6 +535,7 @@ struct SignalCallbackData
         : name(), data(data), queue(data->queue), agent(data->agent), deleter_signal(deleter_signal), signal(signal), orig_signal(orig_signal), owns_orig_signal(owns_orig_signal), bytes(0), direction(0),
             is_copy(false),
             is_barrier(true),
+            is_vendor(false),
             dep{
                   (packet->dep_signal[0].handle),
                   (packet->dep_signal[1].handle),
@@ -542,7 +548,22 @@ struct SignalCallbackData
             cid(0)
     {
         if (RTG_HSA_HOST_DISPATCH) {
-            LOG_BARRIER_HOST(queue, agent, signal, tick(), id_, dep, packet);
+            LOG_BARRIER_HOST(queue, agent, owns_orig_signal ? gs_NullSignal: orig_signal, tick(), id_, dep, packet);
+        }
+    }
+
+    SignalCallbackData(InterceptCallbackData *data, hsa_signal_t deleter_signal, hsa_signal_t signal, hsa_signal_t orig_signal, bool owns_orig_signal, const hsa_amd_barrier_value_packet_t* packet)
+        : name(), data(data), queue(data->queue), agent(data->agent), deleter_signal(deleter_signal), signal(signal), orig_signal(orig_signal), owns_orig_signal(owns_orig_signal), bytes(0), direction(0),
+            is_copy(false),
+            is_barrier(false),
+            is_vendor(true),
+            dep{(packet->signal.handle), 0, 0, 0, 0},
+            id_(gs_did++),
+            seq_num_(data->seq_index++),
+            cid(0)
+    {
+        if (RTG_HSA_HOST_DISPATCH) {
+            LOG_VENDOR_HOST(queue, agent, owns_orig_signal ? gs_NullSignal: orig_signal, tick(), id_, dep[0], packet);
         }
     }
 
@@ -596,6 +617,7 @@ struct SignalCallbackData
     int direction;
     bool is_copy;
     bool is_barrier;
+    bool is_vendor;
     long unsigned dep[5];
     long unsigned start;
     long unsigned stop;
@@ -642,7 +664,7 @@ static void SignalWaiter(int id, SignalCallbackData *data)
     bool okay = data->compute_profile();
     if (okay) {
         if (HCC_PROFILE) {
-            if (data->is_barrier) {
+            if (data->is_barrier || data->is_vendor) {
                 LOG_HCC(data->start, data->stop, "barrier", "", "", data->data->agent_index, data->data->queue_index, data->seq_num_);
                 ++gs_cb_count_barriers;
             }
@@ -663,6 +685,10 @@ static void SignalWaiter(int id, SignalCallbackData *data)
         else {
             if (data->is_barrier) {
                 LOG_BARRIER(data->queue, data->agent, data->signal, data->start, data->stop, data->id_, data->dep);
+                ++gs_cb_count_barriers;
+            }
+            else if (data->is_vendor) {
+                LOG_VENDOR(data->queue, data->agent, data->signal, data->start, data->stop, data->id_, data->dep[0]);
                 ++gs_cb_count_barriers;
             }
             else if (data->is_copy) {
@@ -2118,6 +2144,11 @@ static void InitEnabledTable(std::string what_to_trace, std::string what_not_to_
             }
         }
     }
+    // we must always trace these copy operations if enabled
+    if (RTG_PROFILE_COPY) {
+        gs_hsa_enabled_map["hsa_amd_memory_async_copy"] = true;
+        gs_hsa_enabled_map["hsa_amd_memory_async_copy_rect"] = true;
+    }
     // we must always trace these memory operations if we want tracebacks
     if (RTG_HSA_MEMORY_BACKTRACE) {
         gs_hsa_enabled_map["hsa_memory_allocate"] = true;
@@ -2521,7 +2552,17 @@ static void hsa_amd_queue_intercept_cb(
             gs_pool.push(SignalWaiter, new SignalCallbackData(data_, deleter_signal, new_signal, original_signal, owns_orig_signal, barrier_packet));
         }
         else if (type == HSA_PACKET_TYPE_VENDOR_SPECIFIC) {
-            fprintf(stderr, "RTG Tracer: cannot handle vendor packet type %d\n", type);
+            ++RTG::gs_host_count_barriers;
+            const hsa_amd_barrier_value_packet_t* barrier_packet =
+                reinterpret_cast<const hsa_amd_barrier_value_packet_t*>(packet);
+
+            original_signal = barrier_packet->completion_signal;
+            if (!original_signal.handle) {
+                owns_orig_signal = true;
+                original_signal = CreateSignal();
+            }
+            const_cast<hsa_amd_barrier_value_packet_t*>(barrier_packet)->completion_signal = new_signal;
+            gs_pool.push(SignalWaiter, new SignalCallbackData(data_, deleter_signal, new_signal, original_signal, owns_orig_signal, barrier_packet));
         }
         else {
             fprintf(stderr, "RTG Tracer: unrecognized packet type %d\n", type);
@@ -2530,11 +2571,6 @@ static void hsa_amd_queue_intercept_cb(
 
         // Submitting the original packets as if profiling was not enabled
         writer(packet, 1);
-
-        if (type == HSA_PACKET_TYPE_VENDOR_SPECIFIC) {
-            // we don't know what to do after submitting original packet, so do nothing
-            return;
-        }
 
         // Submit a new packet just for decrementing the original signal. This is done in a separate queue. Signal packet depends on real packet.
         if (original_signal.handle) {
@@ -2913,11 +2949,11 @@ extern "C" bool OnLoad(void *pTable,
         tokens_prune_always.push_back("__hipPushCallConfiguration");
         tokens_prune_always.push_back("__hipPopCallConfiguration");
         tokens_prune_always.push_back("hipCtxSetCurrent");
-        tokens_prune_always.push_back("hipEventRecord");
-        tokens_prune_always.push_back("hipEventQuery");
+        //tokens_prune_always.push_back("hipEventRecord");
+        //tokens_prune_always.push_back("hipEventQuery");
         tokens_prune_always.push_back("hipGetDeviceProperties");
         tokens_prune_always.push_back("hipModuleGetFunction");
-        tokens_prune_always.push_back("hipEventCreateWithFlags");
+        //tokens_prune_always.push_back("hipEventCreateWithFlags");
         std::vector<std::string> tokens_keep_always;
         tokens_keep_always.push_back("hipLaunchCooperativeKernel");
         tokens_keep_always.push_back("hipLaunchKernel");
